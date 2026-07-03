@@ -7,7 +7,7 @@ import re
 import sys
 from pathlib import Path
 
-from common import REPO, RUNS, now_iso, update_state, write_json
+from common import TARGET_WORKSPACE, RUNS, now_iso, update_state, write_json
 
 
 def slugify(text: str) -> str:
@@ -53,7 +53,7 @@ def main() -> int:
     else:
         (path / "architecture-design.md").write_text(f"# Architecture Design\n\n{args.title}\n")
     update_state(run_id, status="created", current_stage="created", title=args.title)
-    print(json.dumps({"run_id": run_id, "path": str(path.relative_to(REPO))}, indent=2))
+    print(json.dumps({"run_id": run_id, "path": str(path.relative_to(TARGET_WORKSPACE))}, indent=2))
     return 0
 
 

@@ -5,7 +5,7 @@ import argparse
 import json
 import re
 
-from common import REPO, run_command, run_dir, update_state, write_json
+from common import TARGET_WORKSPACE, run_command, run_dir, update_state, write_json
 
 FORBIDDEN_PREFIXES = [
     ".env",

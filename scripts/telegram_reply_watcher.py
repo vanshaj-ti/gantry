@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from common import REPO, RUNS, load_json, run_dir, update_state, write_json
+from common import TARGET_WORKSPACE, RUNS, load_json, run_dir, update_state, write_json
 from telegram_bot import TelegramBotError, chat_id, get_updates, is_configured, send_message
 
 STATE_DB = Path(__import__("os").environ.get("HERMES_STATE_DB", "/Users/vanshaj/.hermes/state.db"))
@@ -119,8 +119,8 @@ def record_answer(run_id: str, stage: str, answer: str, message: dict) -> None:
 
 
 def resume_stage(run_id: str, stage: str) -> int:
-    cmd = [sys.executable, str(REPO / "agent-harness" / "scripts" / "run_stage.py"), stage, "--run-id", run_id, "--resume"]
-    proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=1200)
+    cmd = [sys.executable, str(Path(__file__).parent / "run_stage.py"), stage, "--run-id", run_id, "--resume"]
+    proc = subprocess.run(cmd, cwd=str(TARGET_WORKSPACE), capture_output=True, text=True, timeout=1200)
     logs = run_dir(run_id) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     (logs / f"{stage}.auto-resume.stdout").write_text(proc.stdout)

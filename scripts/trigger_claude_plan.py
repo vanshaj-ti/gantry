@@ -6,12 +6,12 @@ import json
 import subprocess
 from typing import Any
 
-from common import REPO, load_json, run_dir
+from common import TARGET_WORKSPACE, load_json, run_dir
 from start_flow import ARCHITECTURE_DESIGN, PRODUCT_SPEC
 
 
 def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    return subprocess.run(cmd, cwd=str(TARGET_WORKSPACE), capture_output=True, text=True, timeout=120)
 
 
 def main() -> int:

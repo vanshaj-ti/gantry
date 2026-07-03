@@ -9,9 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-REPO = Path(__file__).resolve().parents[2]
-RUNS = REPO / ".agent-runs"
-PROMPTS = REPO / "agent-harness" / "prompts"
+VALHALLA_ROOT = Path(__file__).resolve().parents[1]
+
+# The target project repo (e.g. EduPaid) is provided via environment variable,
+# defaulting to the current working directory.
+TARGET_WORKSPACE = Path(os.environ.get("TARGET_WORKSPACE", os.getcwd())).resolve()
+
+RUNS = TARGET_WORKSPACE / ".agent-runs"
+PROMPTS = VALHALLA_ROOT / "prompts"
 
 STAGES = {
     "plan": {
@@ -112,5 +117,5 @@ def is_question(text: str) -> bool:
     return "?" in stripped and len(stripped) < 800
 
 
-def run_command(cmd: list[str], cwd: Path = REPO, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+def run_command(cmd: list[str], cwd: Path = TARGET_WORKSPACE, timeout: int = 600) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)

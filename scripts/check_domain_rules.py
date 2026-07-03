@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from common import REPO, run_command, run_dir, update_state, write_json
+from common import TARGET_WORKSPACE, run_command, run_dir, update_state, write_json
 
 RULES = [
     {"id": "no-console-log-core", "pattern": r"console\.(log|error|warn)", "paths": ["apps/core/src/"], "severity": "fail"},
@@ -33,7 +33,7 @@ def main() -> int:
             if rule.get("path_prefix") and f.startswith(rule["path_prefix"]):
                 findings.append({"rule": rule["id"], "file": f, "severity": rule["severity"]})
             if rule.get("pattern") and any(f.startswith(p) for p in rule.get("paths", [""])):
-                path = REPO / f
+                path = TARGET_WORKSPACE / f
                 if path.exists() and re.search(rule["pattern"], path.read_text(errors="ignore")):
                     findings.append({"rule": rule["id"], "file": f, "severity": rule["severity"]})
     out = {"pass": not any(x["severity"] == "fail" for x in findings), "findings": findings}

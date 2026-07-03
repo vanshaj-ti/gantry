@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from common import REPO, RUNS, now_iso, run_dir, update_state, write_json
+from common import TARGET_WORKSPACE, RUNS, now_iso, run_dir, update_state, write_json
 
 ODIN_BOARD = "edupaid-odin"
 THOR_BOARD = "edupaid-thor"
@@ -22,7 +22,7 @@ def slugify(text: str) -> str:
 
 
 def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    return subprocess.run(cmd, cwd=str(TARGET_WORKSPACE), capture_output=True, text=True, timeout=120)
 
 
 def ensure_board(slug: str, name: str) -> None:
@@ -35,7 +35,7 @@ def ensure_board(slug: str, name: str) -> None:
         "--name",
         name,
         "--default-workdir",
-        str(REPO),
+        str(TARGET_WORKSPACE),
     ])
     if proc.returncode != 0 and "already" not in (proc.stderr + proc.stdout).lower():
         raise SystemExit(f"Failed to create board {slug}:\n{proc.stdout}\n{proc.stderr}")
@@ -54,7 +54,7 @@ def create_task(board: str, title: str, body: str, assignee: str, key: str) -> d
         "--assignee",
         assignee,
         "--workspace",
-        f"dir:{REPO}",
+        f"dir:{TARGET_WORKSPACE}",
         "--idempotency-key",
         key,
         "--json",
@@ -183,7 +183,7 @@ When the artifact is ready, do NOT mark the task done. Instead block it for huma
     write_json(rdir / "routing.json", routing)
     current_stage = "product_spec" if needs_odin else "architecture_design"
     update_state(run_id, status=f"awaiting_{current_stage}", current_stage=current_stage, title=args.title)
-    print(json.dumps({"run_id": run_id, "path": str(rdir.relative_to(REPO)), "routing": routing}, indent=2))
+    print(json.dumps({"run_id": run_id, "path": str(rdir.relative_to(TARGET_WORKSPACE)), "routing": routing}, indent=2))
     return 0
 
 

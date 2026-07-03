@@ -6,12 +6,12 @@ import json
 import subprocess
 from pathlib import Path
 
-from common import REPO, load_json, run_dir, update_state, write_json
+from common import TARGET_WORKSPACE, load_json, run_dir, update_state, write_json
 from run_review import parse_verdict
 
 
 def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=1200)
+    return subprocess.run(cmd, cwd=str(TARGET_WORKSPACE), capture_output=True, text=True, timeout=1200)
 
 
 def main() -> int:
