@@ -57,3 +57,15 @@ timeout = 900
 backend = "none"              # "none" | "telegram" | "webhook"
 # telegram reads GANTRY_TELEGRAM_BOT_TOKEN / GANTRY_TELEGRAM_CHAT_ID from env
 # webhook_url = "https://hooks.example.com/..."
+
+[skills]
+# Agent skill libraries mandated for the BUILD and EVIDENCE stages only (execution
+# discipline — TDD, systematic debugging, review rigor). Scoped so they augment
+# rather than fight Gantry's own spec/design/plan stages. Empty = none mandated.
+enabled = []                  # e.g. ["superpowers"]
+# Per-runner install commands (clean, inspectable — no piped remote scripts).
+# `gantry init --with-skills` runs the active runner's command; `gantry doctor` lists them.
+# Defaults for "superpowers" are built in; override or add more here:
+# [skills.installers.superpowers]
+# claude-code = "claude plugin install superpowers@claude-plugins-official"
+# cursor-cli  = "npx skills add obra/superpowers -a cursor"

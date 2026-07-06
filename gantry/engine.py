@@ -39,10 +39,28 @@ class Engine:
         if not template_path.exists():
             # fall back to a minimal generic instruction so a bare repo still runs
             artifact = self.cfg.artifact_for(stage)
-            return (f"# Stage: {stage}\n\nRun: {run_id}\n\n"
+            base = (f"# Stage: {stage}\n\nRun: {run_id}\n\n"
                     f"Read the artifacts in .agent-runs/{run_id}/. Perform the {stage} stage "
                     f"and write your output to .agent-runs/{run_id}/{artifact}.\n")
-        return template_path.read_text().replace("{RUN_ID}", run_id)
+        else:
+            base = template_path.read_text().replace("{RUN_ID}", run_id)
+        return base + self._skills_directive(stage)
+
+    def _skills_directive(self, stage: str) -> str:
+        """Scoped skill mandate. Only for build/evidence (execution stages) — NOT
+        spec/design/plan, where a methodology library would fight Gantry's own
+        stages. Tells the agent a plan already exists: execute, don't re-plan."""
+        if stage not in ("build", "evidence") or not self.cfg.skills.enabled:
+            return ""
+        skills = ", ".join(f"`{s}`" for s in self.cfg.skills.enabled)
+        return (
+            f"\n\n---\n## Mandated skills for this stage\n"
+            f"Load and actively use: {skills}. Invoke the Skill tool — do not leave them "
+            f"passively in context.\n\n"
+            f"IMPORTANT: an approved implementation plan already exists for this run. Use "
+            f"these skills for EXECUTION discipline (TDD, systematic debugging, review rigor) "
+            f"— do NOT restart spec/design/planning. Execute the existing plan.\n"
+        )
 
     def _answer_context(self, run_id: str, stage: str) -> str:
         ans = self.store.read_artifact(run_id, f"answers/{stage}.md")

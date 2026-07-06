@@ -1,32 +1,31 @@
 # Build Stage
 
-You are running inside Claude Code with the project's normal CLAUDE.md, skills, plugins, hooks, and settings available. Use those project capabilities naturally.
-
-**Explicitly use the `superpowers` plugin and `caveman` skill for this task:**
-- Load `superpowers:using-superpowers` at the start and follow its skill-selection guidance for implementation work (e.g. relevant `superpowers:*` execution/testing-discipline skills) — do not just let it sit in context unused.
-- Load the `caveman` skill for compressed internal reasoning/logging where appropriate.
-- Actually invoke the `Skill` tool for these — do not only read the injected hook content passively.
+You are running inside a coding agent with this project's normal context files
+(CLAUDE.md / AGENTS.md / .cursorrules), skills, and settings available. Use those
+project capabilities naturally.
 
 Input files for this stage live in `.agent-runs/{RUN_ID}/`:
-- `routing.json`
 - `intake.md`
 - `product-spec.md` if present
 - `architecture-design.md` if present
 - `implementation-plan.md`
-- optional `answer.md` if this is a resumed run
+- optional `answers/build.md` if this is a resumed run
 
-Your job: execute the implementation plan exactly. Do not redesign. Do not expand scope.
+Your job: execute the implementation plan exactly. Do NOT redesign. Do NOT expand scope.
 
 Rules:
-- Touch only files listed in the plan's allowed files.
+- Touch only files listed in the plan's "Allowed files" section.
 - If another file is required, ask one concise inline question and stop.
 - Do not read or write `.env` or credential files.
-- Do not create Supabase edge functions.
 - Do not run `git push`, `git commit`, or destructive git commands.
-- Run only verification commands necessary for the change.
-- Use npm, not pnpm, for all install/lint/test/build commands. Do not modify `pnpm-lock.yaml`.
+- Run only the verification commands necessary for the change.
+- Follow this repo's own conventions and package manager as declared in its
+  context files — do not introduce a different toolchain.
 
-Write `.agent-runs/{RUN_ID}/build-summary.md`. If the file already exists (because this is a resumed run fixing review feedback), DO NOT overwrite it. Instead, **append** a new top-level section at the bottom of the file starting with `## Pass <N>` (e.g., `## Pass 2`).
+Write `.agent-runs/{RUN_ID}/build-summary.md`. If the file already exists (because
+this is a resumed run fixing review feedback), DO NOT overwrite it. Instead,
+**append** a new top-level section at the bottom starting with `## Pass <N>`
+(e.g. `## Pass 2`) so iteration history is preserved.
 
 In your summary (or appended section), include:
 1. Files changed in this pass
@@ -34,6 +33,9 @@ In your summary (or appended section), include:
 3. Tests/commands run with outcomes
 4. Deviations from plan
 5. Remaining risks or questions
-6. Confirmation that `superpowers` and `caveman` skills were loaded and used (name which specific skills were invoked)
 
 If blocked, ask exactly one concise inline question in your final result and stop.
+
+<!-- Customize per repo: add project-specific skill/plugin directives here.
+     Example: "Load the `superpowers:using-superpowers` skill and invoke the Skill
+     tool for relevant execution/testing-discipline skills." -->

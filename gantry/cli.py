@@ -63,7 +63,26 @@ def cmd_init(args) -> int:
         dst = prompts / f"{stage}.md"
         if src.exists() and not dst.exists():
             shutil.copy(src, dst)
-    return _out({"ok": True, "config": str(cfg_path), "prompts_dir": str(prompts)})
+    result = {"ok": True, "config": str(cfg_path), "prompts_dir": str(prompts)}
+    if args.with_skills:
+        result["skills_install"] = _install_skills(load_config(tgt))
+    return _out(result)
+
+
+def _install_skills(cfg) -> list[dict]:
+    """Run the declared per-runner install command for each enabled skill.
+    Uses only the inspectable commands in config — never a piped remote script."""
+    runner = cfg.agent.runner
+    out = []
+    for skill in cfg.skills.enabled:
+        cmd = cfg.skills.install_command(skill, runner)
+        if not cmd:
+            out.append({"skill": skill, "runner": runner, "ok": False, "error": "no install command for this runner"})
+            continue
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=300)
+        out.append({"skill": skill, "runner": runner, "command": cmd,
+                    "ok": proc.returncode == 0, "output_tail": (proc.stdout + proc.stderr)[-500:]})
+    return out
 
 
 def cmd_run(args) -> int:
@@ -122,6 +141,7 @@ def cmd_doctor(args) -> int:
         "base_branch": cfg.git.base_branch,
         "notify_backend": cfg.notify.backend,
         "stages": cfg.stages,
+        "mandated_skills": cfg.skills.enabled,
     })
 
 
@@ -132,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init", help="scaffold gantry.toml + prompts")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--with-skills", action="store_true",
+                   help="also install enabled skills (e.g. superpowers) for the active runner")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("run", help="create a run and start the pipeline")

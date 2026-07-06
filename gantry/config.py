@@ -48,6 +48,35 @@ class AgentConfig:
     output_format: str = "json"
 
 
+# Per-runner install commands for agent skill libraries (e.g. superpowers).
+# Clean, inspectable commands only — never a piped remote shell script.
+# doctor verifies presence; `init --with-skills` runs the command for the active runner.
+DEFAULT_SKILL_INSTALLERS = {
+    "superpowers": {
+        "claude-code": "claude plugin install superpowers@claude-plugins-official",
+        "cursor-cli": "npx skills add obra/superpowers -a cursor",
+    },
+}
+
+
+@dataclass
+class SkillsConfig:
+    """Agent skill libraries mandated for the build/evidence stages.
+
+    `enabled` names skills to require; `installers` maps skill -> {runner -> command}.
+    Only the active runner's command is ever used. Scoped to build/evidence in the
+    prompts so it augments execution discipline without fighting Gantry's own
+    spec/design/plan stages.
+    """
+    enabled: list[str] = field(default_factory=list)
+    installers: dict[str, dict[str, str]] = field(
+        default_factory=lambda: {k: dict(v) for k, v in DEFAULT_SKILL_INSTALLERS.items()}
+    )
+
+    def install_command(self, skill: str, runner: str) -> str | None:
+        return (self.installers.get(skill) or {}).get(runner)
+
+
 @dataclass
 class StageModel:
     model: str
@@ -105,6 +134,7 @@ class GantryConfig:
     checks: ChecksConfig = field(default_factory=ChecksConfig)
     git: GitConfig = field(default_factory=GitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     # prompts dir: where stage prompt templates live (relative to config, or absolute)
     prompts_dir: str = ".gantry/prompts"
 
@@ -178,4 +208,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
     if "notify" in raw:
         n = raw["notify"]
         cfg.notify = NotifyConfig(backend=n.get("backend", "none"), webhook_url=n.get("webhook_url", ""))
+    if "skills" in raw:
+        sk = raw["skills"]
+        installers = {k: dict(v) for k, v in DEFAULT_SKILL_INSTALLERS.items()}
+        installers.update(sk.get("installers", {}))
+        cfg.skills = SkillsConfig(enabled=sk.get("enabled", []), installers=installers)
     return cfg
