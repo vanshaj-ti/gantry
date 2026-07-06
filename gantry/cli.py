@@ -204,14 +204,29 @@ def cmd_watch(args) -> int:
         column after it. Truncate first, then pad."""
         return (s[: width - 1] + "…") if len(s) > width else s.ljust(width)
 
+    def age(mtime: float) -> str:
+        """Relative age since state.json last changed — more actionable at a
+        glance than an absolute timestamp for spotting a run that's been
+        silently stuck (e.g. evidence_running for 3h is a real signal;
+        the wall-clock time it started is not, without doing the subtraction
+        yourself)."""
+        secs = max(0, time.time() - mtime)
+        if secs < 60:
+            return f"{int(secs)}s ago"
+        if secs < 3600:
+            return f"{int(secs // 60)}m ago"
+        if secs < 86400:
+            return f"{int(secs // 3600)}h ago"
+        return f"{int(secs // 86400)}d ago"
+
     def render() -> None:
         runs = store.list_runs()
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
-        print(f"{trunc('RUN ID', 30)} {trunc('STATUS', 24)} TITLE")
+        print(f"{trunc('RUN ID', 30)} {trunc('STATUS', 24)} {trunc('UPDATED', 10)} TITLE")
         print("-" * 90)
         for r in runs:
-            print(f"{trunc(r['id'], 30)} {trunc(r['status'], 24)} {r['title'][:28]}")
+            print(f"{trunc(r['id'], 30)} {trunc(r['status'], 24)} {trunc(age(r['mtime']), 10)} {r['title'][:28]}")
 
     if not args.live:
         render()
