@@ -17,6 +17,7 @@ from typing import Any
 from .config import GantryConfig
 from .runners import get_runner
 from .state import RunStore
+from . import herdr as _herdr
 
 REVIEW_ARTIFACTS = [
     "intake.md", "product-spec.md", "architecture-design.md",
@@ -51,6 +52,14 @@ def _parse_verdict(text: str, cfg: GantryConfig) -> str:
     return "ESCALATE"
 
 
+def _report_herdr(cfg: GantryConfig, run_id: str, status: str) -> None:
+    """Best-effort herdr sidebar report; never raises, mirrors Engine._set_status."""
+    try:
+        _herdr.report_state(run_id, status, enabled=cfg.herdr.enabled and cfg.herdr.report_state)
+    except Exception:
+        pass
+
+
 def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> dict[str, Any]:
     base = cfg.git.base_branch
     prompts_dir = Path(cfg.prompts_dir)
@@ -63,6 +72,7 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     prompt = _build_prompt(store, run_id, cwd, base, template)
     store.write_log(run_id, "review-prompt.md", prompt)
 
+    _report_herdr(cfg, run_id, "review_running")
     runner = get_runner(cfg.review.runner)
     session_id = store.get_session_id(run_id, "review")
     result = runner.run(
@@ -82,6 +92,7 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     status = {"APPROVE": "review_approved", "REQUEST_CHANGES": "review_changes_requested",
               "ESCALATE": "review_escalated"}[verdict]
     store.update_state(run_id, status=status, review_verdict=verdict)
+    _report_herdr(cfg, run_id, status)
     if verdict == "REQUEST_CHANGES":
         store.artifact_path(run_id, "review-comments.md").write_text(
             f"# Review: changes requested\n\n{text}\n")
