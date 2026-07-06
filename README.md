@@ -1,124 +1,127 @@
-# Agent Harness
+# Gantry
 
-Claude Code stage harness for product/spec → architecture/design → implementation-plan → build → evidence workflows.
+**A project-agnostic, staged, autonomous build pipeline for coding agents.**
 
-## Dedicated Telegram HITL bot
+Gantry wraps a spec → design → plan → build → evidence → review pipeline into a
+single CLI. You point it at any git repo, describe a task, and it drives a coding
+agent (Claude Code or Cursor) through the stages — pausing for human review where
+it matters, running deterministic guardrails, and getting an independent LLM review
+before anything ships.
 
-Use a separate Telegram bot for harness human-in-the-loop questions. Do **not** use the normal Hermes Telegram bot for this, because any reply to the Hermes bot starts a separate Hermes gateway chat session.
+The engine hardcodes no project, model, or tool. Everything specific to a repo
+lives in that repo's `gantry.toml`. Agent tools are pluggable adapters.
 
-Required environment variables:
+```
+spec ──▶ design ──▶ plan ──▶ build ──▶ evidence ──▶ review
+ │gate     │gate            │          │            │
+ human     human         (agent)    (agent)   (independent LLM)
+```
+
+## Install
 
 ```bash
-export HARNESS_TELEGRAM_BOT_TOKEN='<botfather-token-for-harness-bot>'
-export HARNESS_TELEGRAM_CHAT_ID='<your-telegram-chat-id>'
+pip install -e .        # from a clone; publishes as `gantry-cli`, binary `gantry`
 ```
 
-Behavior:
+Requires Python ≥ 3.11 and at least one agent runner on PATH (`claude` or
+`cursor-agent`). Check with `gantry doctor`.
 
-- `scripts/send_question.py` sends questions directly through Telegram Bot API when both env vars are set.
-- `scripts/telegram_reply_watcher.py` polls that same harness bot with `getUpdates`, records the answer under `.agent-runs/<run_id>/answers/<stage>.md`, and can resume the stored Claude Code session with `--auto-resume`.
-- If the env vars are missing, scripts fall back to the old Hermes gateway/state.db path.
-- On this machine, a no-agent Hermes cron named `agent-harness-telegram-watcher` runs the watcher every minute via `~/.hermes/scripts/agent-harness-telegram-watcher.sh`.
-
-Commands:
+## Quickstart
 
 ```bash
-python3 agent-harness/scripts/send_question.py --run-id <run_id> --question-file questions/<stage>-inline-question.json
-python3 agent-harness/scripts/telegram_reply_watcher.py --auto-resume
+cd /path/to/your/repo
+gantry init                      # scaffold gantry.toml + .gantry/prompts/
+gantry doctor                    # verify runners, git, config
+gantry run --title "add health endpoint" --request "add GET /health -> 200"
+
+# doc-stage gates (human):
+gantry approve --run <id> --stage spec
+gantry approve --run <id> --stage design
+
+# agent stages (or let `gantry advance --all` drive them):
+gantry stage plan --run <id>
+gantry stage build --run <id>
+gantry checks --run <id>         # scope guard + your repo's lint/build
+gantry stage evidence --run <id>
+gantry review --run <id>         # independent LLM verdict
+
+gantry watch                     # dashboard of all runs
 ```
 
-Recommended reply format: use Telegram's reply action on the question message and type only the answer. The watcher maps the reply-to message id back to the run/stage.
+## How it works
 
-Fallbacks still supported by the watcher for debugging: `/answer <run_id> <stage> <answer>`, `/a <run_id> <stage> <answer>`, and `ANSWER <run_id> <stage>: <answer>`.
+**Stages.** Doc stages (`spec`, `design`) produce a markdown artifact and pause at
+a human-review gate — advance with `gantry approve`, send back with
+`gantry revise`. Agent stages (`plan`, `build`, `evidence`) invoke the configured
+runner with the stage's prompt. The `review` stage feeds the diff + artifacts to an
+independent LLM and parses an `APPROVE` / `REQUEST_CHANGES` / `ESCALATE` verdict.
 
-Telegram does not provide true slash-command argument dropdowns. For one-click selection later, use an inline keyboard button per pending question with callback data containing the run/stage, then ask only for the free-text answer.
+**Runners (pluggable).** `claude-code` and `cursor-cli` ship in v1. They share a
+near-identical command surface; the adapter is a flag-mapping table plus shared
+JSON-result parsing. Add one by subclassing `AgentRunner`.
 
-## Complete workflow
+**Guardrails (layered, deterministic).**
+- *Scope guard* (built-in): forbidden path globs + optional plan-scope enforcement
+  (flags files changed outside the plan's stated "Allowed files").
+- *Repo checks* (delegated): Gantry runs the commands you list in `[checks]`
+  (`npm run lint`, `go vet`, `ruff`, …) and gates on exit code. Your repo owns its
+  own house rules — no rule logic is duplicated inside Gantry.
+- Semantic/architectural judgment is left to the LLM review stage, not regex.
 
-Default Hermes is the intake/orchestrator. There is no separate intake agent and no Ragnar stage.
+**Skills (scoped mandate).** Enable agent skill libraries (e.g. `superpowers`) in
+`[skills]`; Gantry injects a directive into the **build/evidence** stages only —
+never spec/design/plan — telling the agent to use them for execution discipline
+without restarting planning. Install per-runner with `gantry init --with-skills`.
 
-Artifacts:
+**State.** Gantry is stateless. Everything about a run lives in the target repo
+under `.agent-runs/<run_id>/` (artifacts, logs, `state.json`, sessions), so runs
+survive across invocations and machines.
 
-```text
-.agent-runs/<run_id>/
-  intake.md
-  product-spec.md
-  architecture-design.md
-  implementation-plan.md
-  build-summary.md
-  evidence-report.md
-  review-result.json
+**Auto-advance.** `gantry advance --all` ticks every run once, firing the next
+non-gated stage (build → checks → evidence → review, and re-build on
+REQUEST_CHANGES). Run it on a 1-minute cron for hands-off progression; it notifies
+via the configured backend on each state change.
+
+## Configuration (`gantry.toml`)
+
+Generated by `gantry init`. Key sections:
+
+| Section | Purpose |
+|---|---|
+| `stages` | which stages run, in order |
+| `[agent]` | runner (`claude-code` / `cursor-cli`), skip-permissions |
+| `[models.<stage>]` | per-stage model + max_turns |
+| `[review]` | reviewer runner/model + verdict keywords |
+| `[scope]` | forbidden path globs, plan-scope enforcement |
+| `[checks]` | your repo's own check commands |
+| `[git]` | diff base branch |
+| `[notify]` | `none` / `telegram` / `webhook` |
+| `[skills]` | mandated skill libraries + per-runner installers |
+
+## CLI reference
+
+```
+gantry init [--force] [--with-skills]   scaffold config + prompts (+ install skills)
+gantry run --title T --request R        create a run, start the pipeline
+gantry stage {plan|build|evidence} --run ID [--resume]
+gantry checks --run ID                  scope guard + repo checks
+gantry review --run ID                  independent LLM review
+gantry approve --run ID --stage S       pass a human-review gate, advance
+gantry revise --run ID --stage S "…"    send a stage back with comments
+gantry advance [--run ID | --all]       drive the pipeline forward one tick
+gantry status [--run ID]                run state (json)
+gantry watch [--live]                   dashboard of all runs
+gantry doctor                           environment / config health
 ```
 
-Boards:
+The target repo is `$GANTRY_TARGET` or the current working directory.
 
-```text
-edupaid-odin  -> odin-pm         -> product-spec.md
-edupaid-thor  -> thor-architect  -> architecture-design.md
-```
+## Design notes
 
-Only one task is created at a time for these boards:
-
-1. Default Hermes creates the run and an Odin task only.
-2. Odin picks up the task, writes `product-spec.md`, then blocks the task for human review instead of marking it done.
-3. You review the artifact. If changes are needed, add comments and unblock the Odin task. If approved, run:
-   ```bash
-   python3 agent-harness/scripts/advance_flow.py --run-id <run_id> --stage product-spec --approve
-   ```
-4. Approval marks the Odin task done and creates the Thor task.
-5. Thor writes `architecture-design.md`, then blocks the task for human review.
-6. You review. If changes are needed, add comments and unblock Thor. If approved, run:
-   ```bash
-   python3 agent-harness/scripts/advance_flow.py --run-id <run_id> --stage architecture-design --approve
-   ```
-7. The run becomes `ready_for_claude_plan`; trigger Claude Code plan mode next.
-   ```bash
-   python3 agent-harness/scripts/trigger_claude_plan.py --run-id <run_id>
-   ```
-
-The `start_flow.py` and approval helpers enforce one active task per Odin/Thor board. If a board already has a non-terminal task, they stop instead of creating another.
-
-Start a run:
-
-```bash
-python3 agent-harness/scripts/start_flow.py --title "<title>" --task-class feature --risk medium --request "<full request>"
-```
-
-Request revisions:
-
-```bash
-python3 agent-harness/scripts/advance_flow.py --run-id <run_id> --stage product-spec --revise "<comments>"
-python3 agent-harness/scripts/advance_flow.py --run-id <run_id> --stage architecture-design --revise "<comments>"
-```
-
-## Reviewer gate
-
-After Claude Code evidence is complete, run the independent GPT-5.5 reviewer:
-
-```bash
-python3 agent-harness/scripts/reviewer_gate.py --run-id <run_id>
-```
-
-The reviewer uses default Hermes with `openai-group/gpt-5.5`. Reviewer session identity is stored in:
-
-```text
-.agent-runs/<run_id>/reviewer-session.json
-```
-
-Every later reviewer pass for the same run resumes that same Hermes reviewer session. This keeps review context tied to the task while still using a different model family from Claude Code.
-
-Reviewer outputs:
-
-```text
-review-result.json
-review-gate.json
-review-comments.md   # only when REQUEST_CHANGES
-```
-
-Verdicts:
-
-```text
-APPROVE          -> status review_approved
-REQUEST_CHANGES  -> status review_changes_requested; resume Claude build with review-comments.md
-ESCALATE         -> status review_escalated; human decision required
-```
+- **Runner-agnostic core.** The engine never names `claude`, `cursor`, a model, or
+  a project. Swapping runners is a config line.
+- **Determinism where it counts.** Guardrails are deterministic (globs + exit
+  codes); only the review stage uses model judgment. This keeps false-approvals
+  from a chatty reviewer out of the gating path.
+- **The repo owns its rules.** House rules live in the repo's own linters, invoked
+  via `[checks]`. Gantry doesn't re-encode them, so they never drift.

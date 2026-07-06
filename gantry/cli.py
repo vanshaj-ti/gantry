@@ -123,6 +123,51 @@ def cmd_status(args) -> int:
     return _out(store.list_runs())
 
 
+def cmd_advance(args) -> int:
+    from .advance import advance_all, advance_run, label
+    tgt = _target()
+    cfg = load_config(tgt)
+    if args.all:
+        results = advance_all(tgt, cfg)
+        # notify on any state change
+        if results:
+            notifier = get_notifier(cfg.notify)
+            store = RunStore(tgt)
+            for r in results:
+                if r.get("advanced"):
+                    st = store.state(r["run_id"]).get("status", "")
+                    notifier.send(f"[{r['run_id']}] {label(st)}", meta=r)
+        return _out(results)
+    eng = Engine(tgt, cfg)
+    return _out(advance_run(eng, args.run))
+
+
+def cmd_watch(args) -> int:
+    """Live/one-shot dashboard of all runs in the target repo."""
+    import time
+    store = RunStore(_target())
+
+    def render() -> None:
+        runs = store.list_runs()
+        print("\033[2J\033[H" if args.live else "", end="")
+        print(f"GANTRY — {len(runs)} run(s)\n")
+        print(f"{'RUN ID':<34} {'STATUS':<26} TITLE")
+        print("-" * 90)
+        for r in runs:
+            print(f"{r['id']:<34} {r['status']:<26} {r['title'][:28]}")
+
+    if not args.live:
+        render()
+        return 0
+    try:
+        while True:
+            render()
+            print("\n(Ctrl+C to exit — refreshing every 2s)")
+            time.sleep(2)
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_doctor(args) -> int:
     tgt = _target()
     cfg = load_config(tgt)
@@ -191,8 +236,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run")
     s.set_defaults(func=cmd_status)
 
+    s = sub.add_parser("advance", help="drive the pipeline forward one tick")
+    s.add_argument("--run", help="advance a single run")
+    s.add_argument("--all", action="store_true", help="tick every run (poller mode); notifies on change")
+    s.set_defaults(func=cmd_advance)
+
     s = sub.add_parser("doctor", help="check environment")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("watch", help="dashboard of all runs")
+    s.add_argument("--live", action="store_true", help="refresh every 2s (default: one-shot)")
+    s.set_defaults(func=cmd_watch)
     return p
 
 
