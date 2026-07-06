@@ -1,0 +1,59 @@
+# gantry.toml — Gantry pipeline configuration for this repo.
+# Pipeline: spec -> design -> plan -> build -> evidence -> review
+# Everything project-specific lives here; the Gantry engine hardcodes nothing.
+
+project_id = "my-project"
+
+# Which stages run, in order. Drop stages you don't need (e.g. remove "spec"
+# and "design" for a plain build->review loop).
+stages = ["spec", "design", "plan", "build", "evidence", "review"]
+
+# Where stage prompt templates live (relative to this file, or absolute).
+prompts_dir = ".gantry/prompts"
+
+[agent]
+# Which agent CLI drives plan/build/evidence. "claude-code" | "cursor-cli"
+runner = "claude-code"
+skip_permissions = true      # pass the runner's headless auto-approve flag
+output_format = "json"
+
+# Per-stage model selection. Leave model = "" to use the runner's default.
+[models.plan]
+model = ""
+max_turns = 40
+plan_mode = true
+
+[models.build]
+model = ""
+max_turns = 80
+
+[models.evidence]
+model = ""
+max_turns = 120
+
+[review]
+enabled = true
+runner = "claude-code"        # ideally a different model family than build
+model = ""
+approve_keywords = ["APPROVE"]
+request_changes_keywords = ["REQUEST_CHANGES"]
+escalate_keywords = ["ESCALATE"]
+
+[git]
+base_branch = "main"          # diff base for scope guard + review
+
+[scope]
+# Gantry's built-in deterministic guard. Globs and path prefixes both work.
+forbid_paths = [".env", "**/*.pem", "**/secrets/**"]
+enforce_plan_scope = true     # flag files changed outside the plan's stated scope
+
+[checks]
+# Delegate house rules to THIS repo's own toolchain. Gantry runs each command
+# and gates on exit code. Works for any language: swap in ruff/go vet/etc.
+commands = ["npm run lint", "npm run build"]
+timeout = 900
+
+[notify]
+backend = "none"              # "none" | "telegram" | "webhook"
+# telegram reads GANTRY_TELEGRAM_BOT_TOKEN / GANTRY_TELEGRAM_CHAT_ID from env
+# webhook_url = "https://hooks.example.com/..."
