@@ -196,14 +196,22 @@ def cmd_watch(args) -> int:
     import time
     store = RunStore(_target())
 
+    def trunc(s: str, width: int) -> str:
+        """Fixed-width truncation with ellipsis. Plain `{s:<width}` only pads
+        short strings — it doesn't truncate long ones, so a long run_id (they
+        embed the full slugified title, e.g. `<ts>-change-resume-date-while-
+        subscription-is-paused`) blows past the column and misaligns every
+        column after it. Truncate first, then pad."""
+        return (s[: width - 1] + "…") if len(s) > width else s.ljust(width)
+
     def render() -> None:
         runs = store.list_runs()
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
-        print(f"{'RUN ID':<34} {'STATUS':<26} TITLE")
+        print(f"{trunc('RUN ID', 30)} {trunc('STATUS', 24)} TITLE")
         print("-" * 90)
         for r in runs:
-            print(f"{r['id']:<34} {r['status']:<26} {r['title'][:28]}")
+            print(f"{trunc(r['id'], 30)} {trunc(r['status'], 24)} {r['title'][:28]}")
 
     if not args.live:
         render()
