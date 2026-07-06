@@ -111,6 +111,46 @@ when it detects `HERDR_ENV=1`:
 > Note: `gantry watch` (Gantry's own dashboard) shows *pipeline-stage* state
 > across runs; herdr shows the *live terminals*. They complement each other.
 
+### One-command dashboard: `gantry-herdr`
+
+`scripts/gantry-herdr.sh` opens a herdr workspace pre-wired for a target repo in
+one command — no manual pane setup. Install once:
+
+```bash
+ln -s ~/gantry/scripts/gantry-herdr.sh ~/.local/bin/gantry-herdr
+chmod +x ~/.local/bin/gantry-herdr
+```
+
+Then:
+
+```bash
+gantry-herdr ~/some-repo   # defaults to ~/edupaid if omitted
+```
+
+Opens (or refocuses, if one already exists for that repo) a workspace with two
+panes: **left** = a live `claude --dangerously-skip-permissions` session cwd'd
+into the repo — this is your assistant for driving Gantry runs, with the
+`gantry-pipeline` Claude Code skill (see below) available; **right** =
+`gantry watch --live`, the auto-refreshing run-state dashboard. Reuses an
+existing workspace by label instead of spawning duplicates on repeat runs.
+
+### Claude Code skill: `gantry-pipeline`
+
+`claude-skills/gantry-pipeline/` teaches Claude Code the Gantry CLI surface
+(create/plan/build/checks/evidence/review/ship/advance/watch), the worktree
+isolation model, and recovery patterns for blocked/stuck runs. It's a **global**
+Claude Code skill — install once, works from any project:
+
+```bash
+ln -s ~/gantry/claude-skills/gantry-pipeline ~/.claude/skills/gantry-pipeline
+```
+
+It auto-triggers on Gantry-related requests (no slash command needed) as long
+as the prompt mentions "gantry"/"pipeline run"/"stage"/etc. — matching the
+skill's `description` frontmatter. Update `claude-skills/gantry-pipeline/` in
+this repo when the CLI surface changes; the symlink keeps `~/.claude/skills/`
+in sync automatically.
+
 
 **Auto-advance.** `gantry advance --all` ticks every run once, firing the next
 non-gated stage (build → checks → evidence → review, and re-build on
