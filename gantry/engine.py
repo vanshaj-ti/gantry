@@ -14,6 +14,7 @@ GantryConfig and the runner/notifier adapters.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,12 @@ class Engine:
         session_id = self.store.get_session_id(run_id, stage) if resume else None
         if resume and not session_id:
             raise ValueError(f"No stored session for {run_id}/{stage}; cannot resume")
+
+        # Register any enabled MCP servers for this stage before invoking the agent.
+        from .mcp import ensure_mcp_for_stage
+        mcp_results = ensure_mcp_for_stage(self.cfg, stage, self.target)
+        if mcp_results:
+            self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
         self.store.update_state(run_id, status=f"{stage}_running", current_stage=stage, resumed=resume)
         result = runner.run(

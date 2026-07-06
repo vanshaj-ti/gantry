@@ -142,6 +142,24 @@ def cmd_advance(args) -> int:
     return _out(advance_run(eng, args.run))
 
 
+def cmd_mcp(args) -> int:
+    from .mcp import ensure_mcp_for_stage
+    tgt = _target()
+    cfg = load_config(tgt)
+    if args.list:
+        return _out({"enabled": cfg.mcp.enabled,
+                     "available": sorted(cfg.mcp.servers.keys()),
+                     "runner": cfg.agent.runner})
+    seen, results = set(), []
+    for stage in ["plan", "build", "evidence", "review"]:
+        for r in ensure_mcp_for_stage(cfg, stage, tgt):
+            key = (r.get("server"), r.get("status"))
+            if key not in seen:
+                seen.add(key)
+                results.append(r)
+    return _out(results)
+
+
 def cmd_watch(args) -> int:
     """Live/one-shot dashboard of all runs in the target repo."""
     import time
@@ -187,6 +205,8 @@ def cmd_doctor(args) -> int:
         "notify_backend": cfg.notify.backend,
         "stages": cfg.stages,
         "mandated_skills": cfg.skills.enabled,
+        "mcp_enabled": cfg.mcp.enabled,
+        "mcp_available": sorted(cfg.mcp.servers.keys()),
     })
 
 
@@ -247,6 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("watch", help="dashboard of all runs")
     s.add_argument("--live", action="store_true", help="refresh every 2s (default: one-shot)")
     s.set_defaults(func=cmd_watch)
+
+    s = sub.add_parser("mcp", help="register/list MCP servers for the active runner")
+    s.add_argument("--list", action="store_true", help="show enabled/available servers (default: register)")
+    s.set_defaults(func=cmd_mcp)
     return p
 
 

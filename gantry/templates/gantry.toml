@@ -69,3 +69,19 @@ enabled = []                  # e.g. ["superpowers"]
 # [skills.installers.superpowers]
 # claude-code = "claude plugin install superpowers@claude-plugins-official"
 # cursor-cli  = "npx skills add obra/superpowers -a cursor"
+
+[mcp]
+# MCP servers Gantry registers with the active runner so the agent can call their
+# tools during a stage. Two curated servers ship with built-in configs:
+#   codebase-memory : structural code intelligence — architecture overview, call
+#                     graph, git-diff impact + risk. Attached to plan/build/evidence/review.
+#                     Install: https://github.com/DeusData/codebase-memory-mcp
+#   chrome-devtools : live Chrome control for real E2E evidence (network, console,
+#                     screenshots). Attached to evidence only. (npx, no install.)
+# Enable per repo. Empty = none.
+enabled = []                  # e.g. ["codebase-memory", "chrome-devtools"]
+# Declare custom servers here:
+# [mcp.servers.my-server]
+# command = "my-mcp"
+# args = ["serve"]
+# stages = ["build", "evidence"]

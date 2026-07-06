@@ -124,6 +124,62 @@ class NotifyConfig:
 
 
 @dataclass
+class MCPServer:
+    """An MCP server Gantry attaches to the agent runner.
+
+    `command`/`args` follow the standard MCP client config. `stages` limits which
+    stages this server is registered for (empty = all agent stages). `register`
+    maps runner -> the CLI command that registers it (Gantry runs it before the
+    stage if not already present); if absent, Gantry falls back to writing the
+    standard mcpServers JSON where the runner expects it.
+    """
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    stages: list[str] = field(default_factory=list)
+    register: dict[str, str] = field(default_factory=dict)
+
+
+# Curated defaults: the two vetted servers, with per-runner register commands.
+DEFAULT_MCP_SERVERS = {
+    "codebase-memory": {
+        "command": "codebase-memory-mcp",
+        "args": ["serve"],
+        "stages": ["plan", "build", "evidence", "review"],
+        "register": {
+            "claude-code": "claude mcp add codebase-memory --scope user codebase-memory-mcp serve",
+            "cursor-cli": "",  # cursor reads project .cursor/mcp.json; init writes it
+        },
+    },
+    "chrome-devtools": {
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@latest"],
+        "stages": ["evidence"],
+        "register": {
+            "claude-code": "claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest",
+            "cursor-cli": "",
+        },
+    },
+}
+
+
+@dataclass
+class MCPConfig:
+    """MCP servers to make available to the agent runner, per stage.
+    `enabled` names which servers to activate; `servers` holds their configs
+    (curated defaults for codebase-memory / chrome-devtools are built in)."""
+    enabled: list[str] = field(default_factory=list)
+    servers: dict[str, MCPServer] = field(default_factory=dict)
+
+    def for_stage(self, stage: str) -> dict[str, MCPServer]:
+        out = {}
+        for name in self.enabled:
+            srv = self.servers.get(name)
+            if srv and (not srv.stages or stage in srv.stages):
+                out[name] = srv
+        return out
+
+
+@dataclass
 class GantryConfig:
     project_id: str = "project"
     stages: list[str] = field(default_factory=lambda: list(DEFAULT_STAGES))
@@ -135,6 +191,7 @@ class GantryConfig:
     git: GitConfig = field(default_factory=GitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
     # prompts dir: where stage prompt templates live (relative to config, or absolute)
     prompts_dir: str = ".gantry/prompts"
 
@@ -213,4 +270,16 @@ def load_config(target_workspace: Path) -> GantryConfig:
         installers = {k: dict(v) for k, v in DEFAULT_SKILL_INSTALLERS.items()}
         installers.update(sk.get("installers", {}))
         cfg.skills = SkillsConfig(enabled=sk.get("enabled", []), installers=installers)
+    # MCP: merge curated defaults with any user-declared servers.
+    servers = {name: MCPServer(command=s["command"], args=s.get("args", []),
+                               stages=s.get("stages", []), register=dict(s.get("register", {})))
+               for name, s in DEFAULT_MCP_SERVERS.items()}
+    if "mcp" in raw:
+        m = raw["mcp"]
+        for name, s in (m.get("servers", {}) or {}).items():
+            servers[name] = MCPServer(command=s.get("command", ""), args=s.get("args", []),
+                                      stages=s.get("stages", []), register=dict(s.get("register", {})))
+        cfg.mcp = MCPConfig(enabled=m.get("enabled", []), servers=servers)
+    else:
+        cfg.mcp = MCPConfig(enabled=[], servers=servers)
     return cfg
