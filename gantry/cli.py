@@ -8,6 +8,7 @@ Verbs:
   gantry review --run ID             run the independent LLM review
   gantry approve --run ID --stage S  pass a human-review gate, advance
   gantry revise --run ID --stage S "comments"   send a stage back
+  gantry ship --run ID                commit + push + open a PR (review_approved only)
   gantry status [--run ID]           show run(s) status
   gantry doctor                      check the environment (runners, git, config)
 
@@ -26,6 +27,7 @@ from pathlib import Path
 from . import __version__
 from .config import CONFIG_FILENAME, load_config
 from .engine import Engine
+from .git import branch_name, commit_all, create_pr, push
 from .notify import get_notifier
 from .review import run_review
 from .runners import _RUNNERS
@@ -103,7 +105,7 @@ def cmd_checks(args) -> int:
 
 def cmd_review(args) -> int:
     eng = _engine()
-    return _out(run_review(eng.store, args.run, eng.cfg, eng.target))
+    return _out(run_review(eng.store, args.run, eng.cfg, eng.work_dir(args.run)))
 
 
 def cmd_approve(args) -> int:
@@ -114,6 +116,35 @@ def cmd_approve(args) -> int:
 def cmd_revise(args) -> int:
     _engine().revise(args.run, args.stage, args.comments)
     return _out({"ok": True, "stage": args.stage, "status": "changes_requested"})
+
+
+def cmd_ship(args) -> int:
+    """Commit the worktree, push the branch, open a PR. Only valid once review
+    has approved — never fires automatically; requires an explicit human call."""
+    eng = _engine()
+    run_id = args.run
+    state = eng.store.state(run_id)
+    if state.get("status") != "review_approved" and not args.force:
+        return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
+                    f"not review_approved (use --force to override)"})
+
+    wt = eng.work_dir(run_id)
+    branch = branch_name(run_id)
+    title = state.get("title", run_id)
+
+    commit_res = commit_all(wt, f"{title}\n\ngantry run {run_id}")
+    if not commit_res["ok"]:
+        return _out({"ok": False, "stage": "commit", **commit_res})
+
+    push_res = push(wt, branch)
+    if not push_res["ok"]:
+        return _out({"ok": False, "stage": "push", **push_res})
+
+    body = f"Automated PR from Gantry run `{run_id}`.\n\nSee `.agent-runs/{run_id}/` for the full trail (plan, build summary, evidence report, independent review verdict)."
+    pr_res = create_pr(wt, branch, eng.cfg.git.base_branch, title, body)
+    eng.store.update_state(run_id, status="shipped" if pr_res["ok"] else "ship_failed",
+                           pr_url=pr_res.get("url"))
+    return _out({"ok": pr_res["ok"], "commit": commit_res, "push": push_res, "pr": pr_res})
 
 
 def cmd_status(args) -> int:
@@ -257,6 +288,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--stage", required=True)
     s.add_argument("comments")
     s.set_defaults(func=cmd_revise)
+
+    s = sub.add_parser("ship", help="commit + push + open a PR (requires review_approved)")
+    s.add_argument("--run", required=True)
+    s.add_argument("--force", action="store_true", help="ship even if status isn't review_approved")
+    s.set_defaults(func=cmd_ship)
 
     s = sub.add_parser("status", help="show run status")
     s.add_argument("--run")

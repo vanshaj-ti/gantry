@@ -17,6 +17,8 @@ blocked) are intentionally NOT auto-advanced — they wait for `gantry approve`.
 """
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +73,7 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
 
     if status == "evidence_complete":
         if engine.cfg.review.enabled:
-            out = run_review(engine.store, run_id, engine.cfg, engine.target)
+            out = run_review(engine.store, run_id, engine.cfg, engine.work_dir(run_id))
             return {"advanced": True, "from": status, "action": "review", "verdict": out["verdict"]}
         return {"advanced": False, "from": status, "action": "review_disabled"}
 
@@ -82,14 +84,45 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
     return {"advanced": False, "from": status, "action": "no_auto_transition"}
 
 
+def _lock_path(engine: Engine, run_id: str) -> Path:
+    return engine.store.run_dir(run_id) / ".advance.lock"
+
+
+def _acquire_lock(engine: Engine, run_id: str, stale_after: int = 1800) -> bool:
+    """Best-effort lock so a slow-running stage (build/evidence routinely take
+    minutes) doesn't get double-fired by the next 60s cron tick. Stale locks
+    (crashed process, stale_after seconds old) are reclaimed automatically."""
+    lock = _lock_path(engine, run_id)
+    if lock.exists():
+        try:
+            age = time.time() - lock.stat().st_mtime
+            if age < stale_after:
+                return False
+        except OSError:
+            pass
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock(engine: Engine, run_id: str) -> None:
+    _lock_path(engine, run_id).unlink(missing_ok=True)
+
+
 def advance_all(target: Path, cfg: GantryConfig) -> list[dict[str, Any]]:
     engine = Engine(target, cfg)
     results = []
     for run in engine.store.list_runs():
         rid = run["id"]
-        if run["status"] in AUTO_TRANSITIONS:
-            try:
-                results.append({"run_id": rid, **advance_run(engine, rid)})
-            except Exception as exc:
-                results.append({"run_id": rid, "advanced": False, "error": str(exc)})
+        if run["status"] not in AUTO_TRANSITIONS:
+            continue
+        if not _acquire_lock(engine, rid):
+            results.append({"run_id": rid, "advanced": False, "action": "skipped_locked"})
+            continue
+        try:
+            results.append({"run_id": rid, **advance_run(engine, rid)})
+        except Exception as exc:
+            results.append({"run_id": rid, "advanced": False, "error": str(exc)})
+        finally:
+            _release_lock(engine, rid)
     return results

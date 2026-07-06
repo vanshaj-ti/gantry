@@ -77,6 +77,16 @@ without restarting planning. Install per-runner with `gantry init --with-skills`
 under `.agent-runs/<run_id>/` (artifacts, logs, `state.json`, sessions), so runs
 survive across invocations and machines.
 
+**Git isolation.** Each run gets its own worktree at
+`.worktrees/gantry/<run_id>` on a fresh branch `gantry/<run_id>` off
+`[git].base_branch` — agent stages, checks, and review all execute there, never
+in the main checkout. `.agent-runs/` is symlinked into the worktree so stage
+prompts see it at the expected relative path. `gantry ship --run ID` commits,
+pushes, and opens a PR (via `gh`) once a run reaches `review_approved`; it never
+fires automatically. Worktrees are cleaned up the same way any other
+`.worktrees/`-based branch is in this convention (e.g. a merged-branch prune
+cron) — Gantry does not delete them itself.
+
 ## Recommended cockpit: herdr
 
 Gantry drives one task through quality stages; [herdr](https://herdr.dev) — a
@@ -135,6 +145,7 @@ gantry checks --run ID                  scope guard + repo checks
 gantry review --run ID                  independent LLM review
 gantry approve --run ID --stage S       pass a human-review gate, advance
 gantry revise --run ID --stage S "…"    send a stage back with comments
+gantry ship --run ID                    commit + push + open a PR (review_approved only)
 gantry advance [--run ID | --all]       drive the pipeline forward one tick
 gantry status [--run ID]                run state (json)
 gantry watch [--live]                   dashboard of all runs

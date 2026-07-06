@@ -20,6 +20,7 @@ from typing import Any
 
 from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
+from .git import ensure_worktree
 from .runners import get_runner
 from .state import RunStore
 
@@ -29,6 +30,13 @@ class Engine:
         self.target = target_workspace.resolve()
         self.cfg = config
         self.store = RunStore(self.target)
+
+    def work_dir(self, run_id: str) -> Path:
+        """The isolated worktree a run's agent stages/checks/review execute in.
+        Created lazily on first use, reused afterward. .agent-runs/ state stays
+        in self.target regardless — only the working copy of the repo moves."""
+        return ensure_worktree(self.target, run_id, self.cfg.git.base_branch)
+
 
     def _set_status(self, run_id: str, status: str, **extra: Any) -> None:
         """Update run state and mirror the semantic status to herdr's sidebar
@@ -104,13 +112,14 @@ class Engine:
 
         # Register any enabled MCP servers for this stage before invoking the agent.
         from .mcp import ensure_mcp_for_stage
-        mcp_results = ensure_mcp_for_stage(self.cfg, stage, self.target)
+        work_dir = self.work_dir(run_id)
+        mcp_results = ensure_mcp_for_stage(self.cfg, stage, work_dir)
         if mcp_results:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
         self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume)
         result = runner.run(
-            cwd=self.target,
+            cwd=work_dir,
             prompt=prompt,
             model=sm.model,
             session_id=session_id,
@@ -132,7 +141,7 @@ class Engine:
 
     def run_checks(self, run_id: str) -> dict[str, Any]:
         return run_all_checks(self.store, run_id, self.cfg.scope, self.cfg.checks,
-                              self.target, self.cfg.git.base_branch)
+                              self.work_dir(run_id), self.cfg.git.base_branch)
 
     # --- gates ---
     def approve(self, run_id: str, stage: str) -> str:
