@@ -30,6 +30,17 @@ class Engine:
         self.cfg = config
         self.store = RunStore(self.target)
 
+    def _set_status(self, run_id: str, status: str, **extra: Any) -> None:
+        """Update run state and mirror the semantic status to herdr's sidebar
+        when running inside a herdr pane (no-op otherwise)."""
+        self.store.update_state(run_id, status=status, **extra)
+        try:
+            from . import herdr as _herdr
+            _herdr.report_state(run_id, status,
+                                enabled=self.cfg.herdr.enabled and self.cfg.herdr.report_state)
+        except Exception:
+            pass  # herdr reporting is best-effort; never break the pipeline
+
     # --- prompt rendering ---
     def _prompts_dir(self) -> Path:
         p = Path(self.cfg.prompts_dir)
@@ -97,7 +108,7 @@ class Engine:
         if mcp_results:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
-        self.store.update_state(run_id, status=f"{stage}_running", current_stage=stage, resumed=resume)
+        self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume)
         result = runner.run(
             cwd=self.target,
             prompt=prompt,
@@ -116,7 +127,7 @@ class Engine:
         self.store.save_session(run_id, stage, session_id=result.session_id,
                                 model=sm.model, runner=runner.name)
         status = f"{stage}_complete" if result.ok else f"{stage}_failed"
-        self.store.update_state(run_id, status=status)
+        self._set_status(run_id, status)
         return {"stage": stage, "ok": result.ok, "session_id": result.session_id}
 
     def run_checks(self, run_id: str) -> dict[str, Any]:

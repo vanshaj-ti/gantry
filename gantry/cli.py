@@ -195,6 +195,11 @@ def cmd_doctor(args) -> int:
         for name, cls in _RUNNERS.items()}
     git_ok = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
                             cwd=str(tgt), capture_output=True, text=True).returncode == 0
+    herdr_installed = bool(shutil.which("herdr"))
+    inside_herdr = os.environ.get("HERDR_ENV") == "1"
+    herdr_status = ("active (inside pane)" if (herdr_installed and inside_herdr)
+                    else "installed (run Gantry inside a herdr pane to activate)" if herdr_installed
+                    else "not installed — recommended cockpit: https://herdr.dev")
     return _out({
         "target": str(tgt),
         "config_present": (tgt / CONFIG_FILENAME).exists(),
@@ -207,6 +212,7 @@ def cmd_doctor(args) -> int:
         "mandated_skills": cfg.skills.enabled,
         "mcp_enabled": cfg.mcp.enabled,
         "mcp_available": sorted(cfg.mcp.servers.keys()),
+        "herdr": herdr_status,
     })
 
 

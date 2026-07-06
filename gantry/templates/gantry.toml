@@ -85,3 +85,12 @@ enabled = []                  # e.g. ["codebase-memory", "chrome-devtools"]
 # command = "my-mcp"
 # args = ["serve"]
 # stages = ["build", "evidence"]
+
+[herdr]
+# Optional integration with herdr (https://herdr.dev), a terminal multiplexer that
+# understands agents. When you run Gantry INSIDE a herdr pane (HERDR_ENV=1), Gantry
+# reports its semantic pipeline stage (e.g. evidence_running, review_approved) to
+# the herdr sidebar. Fully auto-detected: no effect at all when not inside herdr,
+# so this is safe to leave on for headless/CI/cron runs.
+enabled = true
+report_state = true           # push stage state to the herdr sidebar

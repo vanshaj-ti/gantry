@@ -124,6 +124,15 @@ class NotifyConfig:
 
 
 @dataclass
+class HerdrConfig:
+    """Optional herdr (terminal multiplexer) integration. When enabled and Gantry
+    runs inside a herdr pane (HERDR_ENV=1), report semantic pipeline state to the
+    sidebar and use event-driven waits. Fully opt-in; no-op when herdr absent."""
+    enabled: bool = True                  # cheap: only acts when HERDR_ENV=1 anyway
+    report_state: bool = True             # push stage state to the herdr sidebar
+
+
+@dataclass
 class MCPServer:
     """An MCP server Gantry attaches to the agent runner.
 
@@ -192,6 +201,7 @@ class GantryConfig:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    herdr: HerdrConfig = field(default_factory=HerdrConfig)
     # prompts dir: where stage prompt templates live (relative to config, or absolute)
     prompts_dir: str = ".gantry/prompts"
 
@@ -282,4 +292,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
         cfg.mcp = MCPConfig(enabled=m.get("enabled", []), servers=servers)
     else:
         cfg.mcp = MCPConfig(enabled=[], servers=servers)
+    if "herdr" in raw:
+        h = raw["herdr"]
+        cfg.herdr = HerdrConfig(enabled=bool(h.get("enabled", True)),
+                                report_state=bool(h.get("report_state", True)))
     return cfg
