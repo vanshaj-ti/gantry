@@ -21,10 +21,12 @@ else:  # pragma: no cover - fallback for <3.11
 
 CONFIG_FILENAME = "gantry.toml"
 
-# The ordered pipeline. Boards are gone; gates are enforced via `gantry approve`.
-# doc-stages (spec/design) produce a markdown artifact and pause for human review.
-# agent-stages (plan/build/evidence) invoke the agent runner.
-DEFAULT_STAGES = ["spec", "design", "plan", "build", "evidence", "review"]
+# The ordered pipeline used when no gantry.toml [stages] is set (or no config
+# file exists at all — see load_config's bare-repo fallback). spec/design are
+# NOT included: they have no CLI execution verb yet (see Engine.create_run's
+# guard) and would leave a fresh run stuck at awaiting_spec forever. Add them
+# back to this default once `gantry stage spec/design` exists.
+DEFAULT_STAGES = ["plan", "build", "evidence", "review"]
 
 DOC_STAGES = {"spec", "design"}          # human-authored/agent-drafted, human-gated
 AGENT_STAGES = {"plan", "build", "evidence"}  # invoke the agent runner

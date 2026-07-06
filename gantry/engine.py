@@ -88,10 +88,22 @@ class Engine:
 
     # --- run lifecycle ---
     def create_run(self, title: str, request: str, run_id: str | None = None) -> str:
+        # spec/design have no CLI verb yet (`gantry stage` only accepts
+        # plan/build/evidence) — a run whose first stage is spec/design gets
+        # permanently stuck at awaiting_spec/awaiting_design with no way to
+        # advance. Fail loudly at creation instead of writing an unrecoverable
+        # run_id someone discovers is dead days later.
+        first = self.cfg.stages[0] if self.cfg.stages else "plan"
+        if first in DOC_STAGES:
+            raise ValueError(
+                f"stages[0] is {first!r}, but doc stages (spec/design) have no "
+                f"execution path yet (no `gantry stage {first}` verb exists) — "
+                f"this run would be stuck at awaiting_{first} forever. Drop "
+                f"spec/design from [stages] in gantry.toml, or write the "
+                f"spec/design framing directly into --request instead.")
         rid = self.store.new_run_id(title, run_id)
         self.store.create(rid, title)
         self.store.artifact_path(rid, "intake.md").write_text(f"# Intake\n\n{request.strip() or title}\n")
-        first = self.cfg.stages[0] if self.cfg.stages else "plan"
         self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first, title=title)
         return rid
 

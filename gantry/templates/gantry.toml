@@ -4,9 +4,13 @@
 
 project_id = "my-project"
 
-# Which stages run, in order. Drop stages you don't need (e.g. remove "spec"
-# and "design" for a plain build->review loop).
-stages = ["spec", "design", "plan", "build", "evidence", "review"]
+# Which stages run, in order. NOTE: "spec" and "design" have no execution
+# path yet (no `gantry stage spec/design` verb) — including them as stages[0]
+# will fail loudly at `gantry run` time rather than silently creating a stuck
+# run. Left out of this default until that's built; write your spec/design
+# framing directly into `gantry run --request` instead, or add them back once
+# the doc-stage authoring step ships.
+stages = ["plan", "build", "evidence", "review"]
 
 # Where stage prompt templates live (relative to this file, or absolute).
 prompts_dir = ".gantry/prompts"

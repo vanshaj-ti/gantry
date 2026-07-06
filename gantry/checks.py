@@ -97,7 +97,13 @@ def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
     out = {"pass": scope["pass"] and checks["pass"], "scope": scope, "checks": checks}
     store.write_result(run_id, "checks.json", out)
     if out["pass"]:
-        store.update_state(run_id, checks="pass")
+        # Clear any prior block so advance_all (which only fires on
+        # AUTO_TRANSITIONS states) can pick this run back up. Restoring
+        # status to build_complete re-enters the normal build->evidence
+        # transition — this is what makes `gantry checks --run ID` a real
+        # recovery path after fixing a scope/lint/build failure, instead of
+        # leaving the run permanently stuck at status=blocked.
+        store.update_state(run_id, status="build_complete", blocked_on=None, checks="pass")
     else:
         blocked = "scope" if not scope["pass"] else "checks"
         store.update_state(run_id, status="blocked", blocked_on=blocked, checks="fail")
