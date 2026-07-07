@@ -223,10 +223,11 @@ def cmd_watch(args) -> int:
         runs = store.list_runs()
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
-        print(f"{trunc('RUN ID', 30)} {trunc('STATUS', 24)} {trunc('UPDATED', 10)} TITLE")
+        print(f"{trunc('TITLE', 40)} {trunc('STATUS', 24)} UPDATED")
         print("-" * 90)
         for r in runs:
-            print(f"{trunc(r['id'], 30)} {trunc(r['status'], 24)} {trunc(age(r['mtime']), 10)} {r['title'][:28]}")
+            title = r["title"] or r["id"]
+            print(f"{trunc(title, 40)} {trunc(r['status'], 24)} {age(r['mtime'])}")
 
     if not args.live:
         render()
