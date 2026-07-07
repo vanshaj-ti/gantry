@@ -72,7 +72,29 @@ def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
         runs_target.mkdir(parents=True, exist_ok=True)
         runs_link.symlink_to(runs_target, target_is_directory=True)
 
+    _install_deps_if_npm_project(wt)
+
     return wt
+
+
+def _install_deps_if_npm_project(wt: Path) -> None:
+    """Best-effort npm dependency install for a freshly created worktree.
+
+    A fresh `git worktree add` only checks out git-tracked files — node_modules
+    is untracked, so a new worktree starts with none. Without this, build/checks
+    stages fail on missing or stale packages that have nothing to do with the
+    run's actual diff (e.g. a package.json dependency added on main after the
+    worktree's base branch was cut). Non-fatal: a failed install here should not
+    block worktree creation — the failure will surface clearly later if it
+    actually matters, in whichever check needed the missing package.
+    """
+    if not (wt / "package.json").exists():
+        return
+    cmd = ["npm", "ci"] if (wt / "package-lock.json").exists() else ["npm", "install"]
+    try:
+        subprocess.run(cmd, cwd=str(wt), capture_output=True, text=True, timeout=600)
+    except Exception:
+        pass
 
 
 def commit_all(worktree: Path, message: str) -> dict:
