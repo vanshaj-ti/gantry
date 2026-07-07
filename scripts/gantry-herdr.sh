@@ -56,8 +56,12 @@ else
   CREATE_JSON="$(herdr workspace create --cwd "$TARGET" --label "$LABEL" --focus)"
   ROOT_PANE="$(echo "$CREATE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")"
 
-  # Right pane: live state dashboard.
-  RIGHT_PANE="$(herdr pane split "$ROOT_PANE" --direction right --ratio 0.35 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
+  # Right pane: live state dashboard. NOTE: --ratio is the fraction given to
+  # the pane being split (ROOT_PANE / left / Claude), not the new pane — so
+  # 0.7 here means Claude gets 70% of the width and the dashboard gets the
+  # remaining 30%. (Verified empirically: split ratio=0.2 on a pane left it
+  # at 20% width with the new pane taking the other 80%.)
+  RIGHT_PANE="$(herdr pane split "$ROOT_PANE" --direction right --ratio 0.7 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
 
   # Left pane (root): live Claude Code session, dropped straight into an
   # interactive chat cwd'd into the target repo with permissions bypassed —
