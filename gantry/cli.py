@@ -94,18 +94,35 @@ def cmd_run(args) -> int:
 
 
 def cmd_stage(args) -> int:
+    from .advance import label
     eng = _engine()
     res = eng.run_agent_stage(args.run, args.stage, resume=args.resume)
+    # Notify regardless of trigger (manual `gantry stage` or the `advance` cron) —
+    # a human watching a terminal for a 10+ minute stage is not a safe assumption.
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    notifier.send(f"[{args.run}] {label(status)}", meta=res)
     return _out(res)
 
 
 def cmd_checks(args) -> int:
-    return _out(_engine().run_checks(args.run))
+    from .advance import label
+    eng = _engine()
+    res = eng.run_checks(args.run)
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    notifier.send(f"[{args.run}] {label(status)}", meta=res)
+    return _out(res)
 
 
 def cmd_review(args) -> int:
+    from .advance import label
     eng = _engine()
-    return _out(run_review(eng.store, args.run, eng.cfg, eng.work_dir(args.run)))
+    res = run_review(eng.store, args.run, eng.cfg, eng.work_dir(args.run))
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    notifier.send(f"[{args.run}] {label(status)}", meta=res)
+    return _out(res)
 
 
 def cmd_approve(args) -> int:
