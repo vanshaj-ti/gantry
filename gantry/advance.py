@@ -54,6 +54,70 @@ def label(status: str) -> str:
     return STATUS_LABELS.get(status, status)
 
 
+def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] | None = None) -> str:
+    """Build a self-contained Telegram body: what happened, why, and what to do next.
+
+    A bare status label ("Blocked — needs input") tells you nothing you can act
+    on away from a terminal. Every message below states the concrete failure
+    (or agent question) and the exact command to run next.
+    """
+    header = f"[{run_id}] {label(status)}"
+    result = result or {}
+
+    if status == "blocked":
+        blocked_on = store.state(run_id).get("blocked_on", "checks")
+        checks = store.read_result(run_id, "checks.json")
+        detail = ""
+        if checks and not checks.get("pass"):
+            scope = checks.get("scope", {})
+            if scope.get("forbidden_files") or scope.get("unexpected_files"):
+                bad = scope.get("forbidden_files", []) + scope.get("unexpected_files", [])
+                detail = "Scope violation — files outside the plan: " + ", ".join(bad[:8])
+            else:
+                failing = [c["command"] for c in checks.get("checks", {}).get("results", []) if not c.get("pass")]
+                detail = "Failing command(s): " + ", ".join(failing) if failing else "Checks failed (see checks.json for detail)."
+        return (f"{header}\n"
+                f"Blocked on: {blocked_on}\n"
+                f"{detail}\n"
+                f"Options: (1) fix the issue and run `gantry checks --run {run_id}` to re-check and unblock, "
+                f"or (2) `gantry revise --run {run_id} --stage build \"<comments>\"` to send it back with guidance.")
+
+    if status.endswith("_failed"):
+        subtype = result.get("raw", {}).get("subtype") if isinstance(result.get("raw"), dict) else None
+        agent_text = (result.get("raw", {}).get("result") or "")[:500] if isinstance(result.get("raw"), dict) else ""
+        if subtype == "error_max_turns":
+            return (f"{header}\n"
+                    f"Ran out of turns before finishing the stage.\n"
+                    f"Options: (1) raise [models.{status.removesuffix('_failed')}].max_turns in gantry.toml and "
+                    f"`gantry stage {status.removesuffix('_failed')} --run {run_id} --resume` to continue the same "
+                    f"session, or (2) inspect .agent-runs/{run_id}/logs/ and decide manually.")
+        return (f"{header}\n"
+                f"Stage errored (subtype={subtype or 'unknown'}).\n"
+                f"{agent_text}\n"
+                f"Options: (1) `gantry stage {status.removesuffix('_failed')} --run {run_id} --resume` to retry, "
+                f"or (2) inspect .agent-runs/{run_id}/logs/ for the full transcript.")
+
+    if status == "review_escalated":
+        verdict = result.get("verdict") or store.read_result(run_id, "review.json")
+        note = verdict.get("note", "") if isinstance(verdict, dict) else ""
+        return (f"{header}\n{note[:800]}\n"
+                f"Options: (1) `gantry approve --run {run_id} --stage review` to accept as-is, or "
+                f"(2) `gantry revise --run {run_id} --stage build \"<comments>\"` to send back for changes.")
+
+    # Agent asked a clarifying question mid-stage instead of erroring (common on
+    # plan/build when the request under-specifies an architecture decision).
+    agent_text = ""
+    if isinstance(result.get("raw"), dict):
+        agent_text = (result["raw"].get("result") or "")
+    if agent_text and "?" in agent_text[-200:]:
+        return (f"{header}\n"
+                f"Agent has a question before continuing:\n{agent_text[:800]}\n"
+                f"Reply by writing .agent-runs/{run_id}/answers/{{stage}}.md with your decision, then "
+                f"`gantry stage {{stage}} --run {run_id} --resume`.")
+
+    return header
+
+
 def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
     """Fire the appropriate next stage for a single run based on its status.
     Returns {advanced: bool, from, action, ...}. No-op for gated/terminal states."""

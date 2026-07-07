@@ -94,34 +94,34 @@ def cmd_run(args) -> int:
 
 
 def cmd_stage(args) -> int:
-    from .advance import label
+    from .advance import notify_message
     eng = _engine()
     res = eng.run_agent_stage(args.run, args.stage, resume=args.resume)
     # Notify regardless of trigger (manual `gantry stage` or the `advance` cron) —
     # a human watching a terminal for a 10+ minute stage is not a safe assumption.
     notifier = get_notifier(eng.cfg.notify)
     status = eng.store.state(args.run).get("status", "")
-    notifier.send(f"[{args.run}] {label(status)}", meta=res)
+    notifier.send(notify_message(eng.store, args.run, status, res), meta=res)
     return _out(res)
 
 
 def cmd_checks(args) -> int:
-    from .advance import label
+    from .advance import notify_message
     eng = _engine()
     res = eng.run_checks(args.run)
     notifier = get_notifier(eng.cfg.notify)
     status = eng.store.state(args.run).get("status", "")
-    notifier.send(f"[{args.run}] {label(status)}", meta=res)
+    notifier.send(notify_message(eng.store, args.run, status, res), meta=res)
     return _out(res)
 
 
 def cmd_review(args) -> int:
-    from .advance import label
+    from .advance import notify_message
     eng = _engine()
     res = run_review(eng.store, args.run, eng.cfg, eng.work_dir(args.run))
     notifier = get_notifier(eng.cfg.notify)
     status = eng.store.state(args.run).get("status", "")
-    notifier.send(f"[{args.run}] {label(status)}", meta=res)
+    notifier.send(notify_message(eng.store, args.run, status, res), meta=res)
     return _out(res)
 
 
@@ -172,19 +172,22 @@ def cmd_status(args) -> int:
 
 
 def cmd_advance(args) -> int:
-    from .advance import advance_all, advance_run, label
+    from .advance import advance_all, advance_run, notify_message
     tgt = _target()
     cfg = load_config(tgt)
     if args.all:
         results = advance_all(tgt, cfg)
-        # notify on any state change
+        # Notify on every result, not just successful advances — a run that
+        # stalled at blocked/checks_failed/review_escalated needs a human to
+        # see it just as much as one that progressed, arguably more.
         if results:
             notifier = get_notifier(cfg.notify)
             store = RunStore(tgt)
             for r in results:
-                if r.get("advanced"):
-                    st = store.state(r["run_id"]).get("status", "")
-                    notifier.send(f"[{r['run_id']}] {label(st)}", meta=r)
+                if r.get("action") == "skipped_locked":
+                    continue
+                st = store.state(r["run_id"]).get("status", "")
+                notifier.send(notify_message(store, r["run_id"], st, r), meta=r)
         return _out(results)
     eng = Engine(tgt, cfg)
     return _out(advance_run(eng, args.run))

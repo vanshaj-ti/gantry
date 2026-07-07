@@ -21,8 +21,28 @@ from .config import ChecksConfig, ScopeConfig
 from .state import RunStore
 
 
+def _merge_base(cwd: Path, base: str) -> str:
+    """Resolve the fixed commit the run's branch actually forked from.
+
+    `base` (cfg.git.base_branch, e.g. "origin/staging") is a moving ref — if
+    the base branch advances after the worktree's branch was cut, diffing
+    against it directly picks up every unrelated commit merged upstream since,
+    not just this run's own changes. Diff against the merge-base instead, a
+    fixed point in history, so the scope guard only ever sees what this run
+    actually touched.
+    """
+    proc = subprocess.run(["git", "merge-base", "HEAD", base],
+                          cwd=str(cwd), capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        # Fall back to the moving ref if merge-base can't be resolved (e.g.
+        # base was force-pushed past history) rather than hard-failing checks.
+        return base
+    return proc.stdout.strip() or base
+
+
 def _changed_files(cwd: Path, base: str) -> list[str]:
-    proc = subprocess.run(["git", "diff", "--name-only", base, "--"],
+    fixed_base = _merge_base(cwd, base)
+    proc = subprocess.run(["git", "diff", "--name-only", fixed_base, "--"],
                           cwd=str(cwd), capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr or proc.stdout)

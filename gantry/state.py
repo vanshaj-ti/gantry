@@ -95,6 +95,9 @@ class RunStore:
         self._write(p, data)
         return p
 
+    def read_result(self, run_id: str, name: str) -> Any:
+        return self._load(self.run_dir(run_id) / name, {})
+
     def write_log(self, run_id: str, name: str, content: str) -> None:
         (self.run_dir(run_id) / "logs" / name).write_text(content)
 
