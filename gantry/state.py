@@ -24,6 +24,15 @@ def slugify(text: str) -> str:
     return slug[:60] or "run"
 
 
+def _iso_to_ts(iso: str | None) -> float:
+    if not iso:
+        return 0.0
+    try:
+        return datetime.fromisoformat(iso).timestamp()
+    except ValueError:
+        return 0.0
+
+
 class RunStore:
     def __init__(self, target_workspace: Path):
         self.target = target_workspace.resolve()
@@ -100,6 +109,31 @@ class RunStore:
 
     def write_log(self, run_id: str, name: str, content: str) -> None:
         (self.run_dir(run_id) / "logs" / name).write_text(content)
+
+    # --- Telegram message -> run mapping (chat-scoped, not per-run) ---
+    # Lets `gantry listen` resolve a Telegram *reply* to the exact run whose
+    # notification is being replied to, instead of guessing "the most recent
+    # run that needs input" — which breaks the moment two runs are stuck at
+    # once. One flat file: bounded, prunes entries older than 30 days on write
+    # so it never grows unbounded across a long-lived chat history.
+    def _message_map_path(self) -> Path:
+        return self.runs / "telegram-message-map.json"
+
+    def record_telegram_message(self, message_id: int, run_id: str) -> None:
+        path = self._message_map_path()
+        data = self._load(path, {}) or {}
+        data[str(message_id)] = {"run_id": run_id, "recorded_at": now_iso()}
+        cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
+        data = {
+            k: v for k, v in data.items()
+            if _iso_to_ts(v.get("recorded_at")) >= cutoff
+        }
+        self._write(path, data)
+
+    def run_for_telegram_message(self, message_id: int) -> str | None:
+        data = self._load(self._message_map_path(), {}) or {}
+        entry = data.get(str(message_id))
+        return entry.get("run_id") if entry else None
 
     def list_runs(self) -> list[dict[str, Any]]:
         if not self.runs.exists():

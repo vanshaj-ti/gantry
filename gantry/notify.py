@@ -105,5 +105,11 @@ def fetch_telegram_replies(offset: int | None, timeout: int = 25) -> tuple[list[
             continue  # ignore replies from any chat other than the configured one
         text = msg.get("text")
         if text:
-            messages.append({"text": text, "update_id": upd["update_id"], "date": msg.get("date")})
+            reply_to = msg.get("reply_to_message") or {}
+            messages.append({
+                "text": text,
+                "update_id": upd["update_id"],
+                "date": msg.get("date"),
+                "reply_to_message_id": reply_to.get("message_id"),
+            })
     return messages, next_offset

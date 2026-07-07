@@ -12,6 +12,7 @@ Verbs:
   gantry status [--run ID]           show run(s) status
   gantry doctor                      check the environment (runners, git, config)
   gantry listen                      poll Telegram replies, act on the pending run
+  gantry docs --run ID                render a run's spec/design/plan/evidence/review docs
 
 Target repo is $GANTRY_TARGET or the current working directory.
 """
@@ -36,9 +37,23 @@ from .state import RunStore
 
 # Statuses where a run is actually waiting on a human decision — the set
 # `gantry listen` matches replies against.
-NEEDS_INPUT_STATUSES = {"blocked", "review_escalated", "plan_failed", "build_failed", "evidence_failed"}
+NEEDS_INPUT_STATUSES = {
+    "blocked", "review_escalated",
+    "spec_complete", "design_complete",  # always human-gated — never auto-advanced
+    "spec_failed", "design_failed", "plan_failed", "build_failed", "evidence_failed",
+}
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+
+
+def _notify(store, notifier, run_id: str, text: str, meta: dict | None = None) -> dict:
+    """Send a notification and record which run it belongs to, so a Telegram
+    *reply* to this exact message resolves unambiguously to this run — even
+    with several runs stuck at once. See RunStore.record_telegram_message."""
+    res = notifier.send(text, meta=meta)
+    if res.get("sent") and res.get("message_id") is not None:
+        store.record_telegram_message(res["message_id"], run_id)
+    return res
 
 
 def _target() -> Path:
@@ -106,7 +121,7 @@ def cmd_stage(args) -> int:
     # a human watching a terminal for a 10+ minute stage is not a safe assumption.
     notifier = get_notifier(eng.cfg.notify)
     status = eng.store.state(args.run).get("status", "")
-    notifier.send(notify_message(eng.store, args.run, status, res), meta=res)
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
     return _out(res)
 
 
@@ -116,7 +131,7 @@ def cmd_checks(args) -> int:
     res = eng.run_checks(args.run)
     notifier = get_notifier(eng.cfg.notify)
     status = eng.store.state(args.run).get("status", "")
-    notifier.send(notify_message(eng.store, args.run, status, res), meta=res)
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
     return _out(res)
 
 
@@ -126,7 +141,7 @@ def cmd_review(args) -> int:
     res = run_review(eng.store, args.run, eng.cfg, eng.work_dir(args.run))
     notifier = get_notifier(eng.cfg.notify)
     status = eng.store.state(args.run).get("status", "")
-    notifier.send(notify_message(eng.store, args.run, status, res), meta=res)
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
     return _out(res)
 
 
@@ -192,7 +207,7 @@ def cmd_advance(args) -> int:
                 if r.get("action") == "skipped_locked":
                     continue
                 st = store.state(r["run_id"]).get("status", "")
-                notifier.send(notify_message(store, r["run_id"], st, r), meta=r)
+                _notify(store, notifier, r["run_id"], notify_message(store, r["run_id"], st, r), meta=r)
         return _out(results)
     eng = Engine(tgt, cfg)
     return _out(advance_run(eng, args.run))
@@ -267,10 +282,14 @@ def cmd_watch(args) -> int:
 
 
 def cmd_listen(args) -> int:
-    """Poll Telegram for replies and act on whichever run is currently waiting
-    on a human. Only ever considers the single most-recently-touched run in a
-    needs-input state — if two runs are stuck at once, reply about the newer
-    one first, or pass --run to target a specific one.
+    """Poll Telegram for replies and act on the run each reply targets.
+
+    Resolution order: (1) if the message is a Telegram *reply* to one of our
+    own notifications, resolve to that exact run — this is what makes replying
+    to an older stuck notification work correctly even with several runs
+    blocked at once; (2) --run if passed; (3) fall back to the single most-
+    recently-touched run in a needs-input state, for a bare "1"/"2" typed
+    without using Telegram's reply feature.
     """
     tgt = _target()
     cfg = load_config(tgt)
@@ -282,7 +301,8 @@ def cmd_listen(args) -> int:
         while True:
             messages, offset = fetch_telegram_replies(offset)
             for m in messages:
-                target_run = args.run
+                reply_to = m.get("reply_to_message_id")
+                target_run = (store.run_for_telegram_message(reply_to) if reply_to else None) or args.run
                 if not target_run:
                     pending = [r for r in store.list_runs() if r["status"] in NEEDS_INPUT_STATUSES]
                     if not pending:
@@ -302,36 +322,57 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
     eng = Engine(store.target, cfg)
     lowered = text.lower().strip()
 
+    if status in ("spec_complete", "design_complete"):
+        stage = status.removesuffix("_complete")
+        if lowered.startswith("1") or lowered in ("approve", "yes", "y"):
+            nxt = eng.approve(run_id, stage)
+            _notify(store, notifier, run_id, f"Approved *{run_id}* {stage} — moved to `{nxt}`.")
+        else:
+            # spec/design have no auto-resume transition (they're always
+            # human-gated), so write straight to answers/<stage>.md — the file
+            # run_agent_stage's resume path actually reads — and resume now,
+            # rather than calling revise() (which writes review-comments.md,
+            # a file only the build-resume auto-transition happens to consume).
+            comment = text[1:].strip() if lowered.startswith("2") else text
+            answer_path = store.artifact_path(run_id, f"answers/{stage}.md")
+            answer_path.parent.mkdir(parents=True, exist_ok=True)
+            answer_path.write_text(comment or "See Telegram reply.")
+            _notify(store, notifier, run_id, f"Rewriting *{run_id}* {stage} with your feedback…")
+            eng.run_agent_stage(run_id, stage, resume=True)
+            new_status = store.state(run_id).get("status", "")
+            _notify(store, notifier, run_id, f"*{run_id}* {stage}: {label(new_status)}")
+        return
+
     if status == "blocked":
         if lowered.startswith("1"):
             eng.run_checks(run_id)
             new_status = store.state(run_id).get("status", "")
-            notifier.send(f"Re-checked *{run_id}* — now: {label(new_status)}")
+            _notify(store, notifier, run_id, f"Re-checked *{run_id}* — now: {label(new_status)}")
         else:
             comment = text[1:].strip() if lowered.startswith("2") else text
             eng.revise(run_id, "build", comment or "See Telegram reply.")
-            notifier.send(f"Sent *{run_id}* back to build with your comment.")
+            _notify(store, notifier, run_id, f"Sent *{run_id}* back to build with your comment.")
         return
 
     if status.endswith("_failed"):
         stage = status.removesuffix("_failed")
         if lowered.startswith("1") or lowered in ("retry", "yes", "y"):
-            notifier.send(f"Resuming *{run_id}* stage `{stage}`…")
+            _notify(store, notifier, run_id, f"Resuming *{run_id}* stage `{stage}`…")
             eng.run_agent_stage(run_id, stage, resume=True)
             new_status = store.state(run_id).get("status", "")
-            notifier.send(f"*{run_id}* stage `{stage}`: {label(new_status)}")
+            _notify(store, notifier, run_id, f"*{run_id}* stage `{stage}`: {label(new_status)}")
         else:
-            notifier.send(f"Noted — *{run_id}* left as-is for you to inspect manually.")
+            _notify(store, notifier, run_id, f"Noted — *{run_id}* left as-is for you to inspect manually.")
         return
 
     if status == "review_escalated":
         if lowered.startswith("1") or lowered in ("approve", "yes", "y"):
             eng.approve(run_id, "review")
-            notifier.send(f"Approved *{run_id}* — proceeding.")
+            _notify(store, notifier, run_id, f"Approved *{run_id}* — proceeding.")
         else:
             comment = text[1:].strip() if lowered.startswith("2") else text
             eng.revise(run_id, "build", comment or "See Telegram reply.")
-            notifier.send(f"Sent *{run_id}* back to build with your comment.")
+            _notify(store, notifier, run_id, f"Sent *{run_id}* back to build with your comment.")
         return
 
     # Fallback: treat the reply as the answer to whatever the agent asked mid-stage
@@ -341,10 +382,63 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
     answer_path = store.artifact_path(run_id, f"answers/{stage}.md")
     answer_path.parent.mkdir(parents=True, exist_ok=True)
     answer_path.write_text(text)
-    notifier.send(f"Recorded your answer for *{run_id}* stage `{stage}`, resuming…")
+    _notify(store, notifier, run_id, f"Recorded your answer for *{run_id}* stage `{stage}`, resuming…")
     eng.run_agent_stage(run_id, stage, resume=True)
     new_status = store.state(run_id).get("status", "")
-    notifier.send(f"*{run_id}* stage `{stage}`: {label(new_status)}")
+    _notify(store, notifier, run_id, f"*{run_id}* stage `{stage}`: {label(new_status)}")
+
+
+# Doc-worthy artifacts in pipeline order — the exact list a stage's own review
+# prompt is told to read (see review.py). review-result.json is JSON, not
+# markdown; rendered separately by extracting its "result" text field.
+DOC_ARTIFACTS = [
+    ("intake.md", "Intake"),
+    ("product-spec.md", "Spec"),
+    ("architecture-design.md", "Design"),
+    ("implementation-plan.md", "Plan"),
+    ("build-summary.md", "Build summary"),
+    ("evidence-report.md", "Evidence"),
+]
+
+
+def cmd_docs(args) -> int:
+    """Render every doc a run has produced so far (spec, design, plan, evidence,
+    review) — the human-facing artifacts, never the implementation diff itself.
+    Pipes each through `glow` if installed (falls back to plain text), one
+    after another with a header per doc, skipping whichever haven't been
+    written yet at the run's current stage."""
+    store = RunStore(_target())
+    if not store.exists(args.run):
+        return _out({"ok": False, "error": f"run not found: {args.run}"})
+    glow = shutil.which("glow")
+    found_any = False
+    for filename, label_text in DOC_ARTIFACTS:
+        content = store.read_artifact(args.run, filename)
+        if content is None:
+            continue
+        found_any = True
+        _render_doc(f"{label_text} ({filename})", content, glow)
+    review = store.read_result(args.run, "review-result.json")
+    if review:
+        found_any = True
+        verdict = review.get("verdict", "?")
+        body = f"**Verdict: {verdict}**\n\n{review.get('result', '')}"
+        _render_doc(f"Review (verdict: {verdict})", body, glow)
+    if not found_any:
+        print(f"No docs written yet for {args.run} — its current stage is "
+              f"{store.state(args.run).get('status', 'unknown')}.")
+    return 0
+
+
+def _render_doc(heading: str, content: str, glow_path: str | None) -> None:
+    print(f"\n{'=' * 70}\n{heading}\n{'=' * 70}\n")
+    if glow_path:
+        try:
+            subprocess.run([glow_path, "-"], input=content, text=True, timeout=30)
+            return
+        except Exception:
+            pass  # fall through to plain print if glow itself misbehaves
+    print(content)
 
 
 def cmd_doctor(args) -> int:
@@ -394,8 +488,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run", help="explicit run id")
     s.set_defaults(func=cmd_run)
 
-    s = sub.add_parser("stage", help="run one agent stage")
-    s.add_argument("stage", choices=["plan", "build", "evidence"])
+    s = sub.add_parser("stage", help="run one stage (spec/design/plan/build/evidence)")
+    s.add_argument("stage", choices=["spec", "design", "plan", "build", "evidence"])
     s.add_argument("--run", required=True)
     s.add_argument("--resume", action="store_true")
     s.set_defaults(func=cmd_stage)
@@ -439,6 +533,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("listen", help="poll Telegram replies, act on the pending run")
     s.add_argument("--run", help="always apply replies to this run (default: the most recent needs-input run)")
     s.set_defaults(func=cmd_listen)
+
+    s = sub.add_parser("docs", help="render a run's spec/design/plan/evidence/review docs (via glow if installed)")
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_docs)
 
     s = sub.add_parser("watch", help="dashboard of all runs")
     s.add_argument("--live", action="store_true", help="refresh every 2s (default: one-shot)")

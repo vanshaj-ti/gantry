@@ -34,7 +34,13 @@ AUTO_TRANSITIONS = {
 # Human-friendly status labels for notifications.
 STATUS_LABELS = {
     "awaiting_spec": "Awaiting product spec (human)",
+    "spec_running": "Writing product spec",
+    "spec_complete": "Spec ready for review",
+    "spec_failed": "Spec stage errored",
     "awaiting_design": "Awaiting architecture design (human)",
+    "design_running": "Writing architecture design",
+    "design_complete": "Design ready for review",
+    "design_failed": "Design stage errored",
     "awaiting_plan": "Ready to plan",
     "plan_running": "Writing implementation plan",
     "plan_complete": "Plan complete",
@@ -54,55 +60,102 @@ def label(status: str) -> str:
     return STATUS_LABELS.get(status, status)
 
 
-def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] | None = None) -> str:
-    """Build a self-contained Telegram body: what happened, why, and what to do next.
+# Emoji glyphs by outcome family — scannable at a glance in a phone notification
+# list, before the message body is even opened.
+_STATUS_ICON = {
+    "blocked": "\U0001f6d1",           # 🛑
+    "review_escalated": "❗",       # ❗
+    "review_approved": "✅",        # ✅
+    "review_changes_requested": "\U0001f501",  # 🔁
+}
 
-    A bare status label ("Blocked — needs input") tells you nothing you can act
-    on away from a terminal. Every message below states the concrete failure
-    (or agent question) and the exact command to run next.
+
+def _icon(status: str) -> str:
+    if status in _STATUS_ICON:
+        return _STATUS_ICON[status]
+    if status.endswith("_failed"):
+        return "⚠️"  # ⚠️
+    if status.endswith("_running"):
+        return "⏳"  # ⏳
+    if status.endswith("_complete"):
+        return "✅"  # ✅
+    return "ℹ️"  # ℹ️
+
+
+def _escape_md(text: str) -> str:
+    """Escape Telegram legacy Markdown's four special chars in plain (non-code) text.
+    Command snippets stay inside backticks below, which Telegram renders verbatim."""
+    for ch in ("_", "*", "[", "`"):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] | None = None) -> str:
+    """Build a self-contained, Markdown-formatted Telegram body: what happened,
+    why, and how to respond. Written for a phone-only reader replying via
+    `gantry listen` (see cli.py) — no terminal access assumed, so every action
+    is expressed as a plain-text reply, never a CLI command to type out.
+
+    A bare status label ("Blocked — needs input") tells the reader nothing they
+    can act on. Every branch below states the concrete failure (or the agent's
+    own question) plus exactly what to reply.
     """
-    header = f"[{run_id}] {label(status)}"
+    icon = _icon(status)
+    header = f"{icon} *{_escape_md(run_id)}*\n{_escape_md(label(status))}"
     result = result or {}
+
+    if status in ("spec_complete", "design_complete"):
+        stage = status.removesuffix("_complete")
+        agent_text = ""
+        if isinstance(result.get("raw"), dict):
+            agent_text = (result["raw"].get("result") or "")[:600]
+        doc_note = f"\n{_escape_md(agent_text)}\n" if agent_text else ""
+        return (f"{header}\n{doc_note}\n"
+                f"*Reply 1* to approve and move on.\n"
+                f"*Reply 2* with feedback to have it rewritten.")
 
     if status == "blocked":
         blocked_on = store.state(run_id).get("blocked_on", "checks")
         checks = store.read_result(run_id, "checks.json")
-        detail = ""
+        detail = "Checks failed."
         if checks and not checks.get("pass"):
             scope = checks.get("scope", {})
             if scope.get("forbidden_files") or scope.get("unexpected_files"):
                 bad = scope.get("forbidden_files", []) + scope.get("unexpected_files", [])
-                detail = "Scope violation — files outside the plan: " + ", ".join(bad[:8])
+                file_list = "\n".join(f"  • `{f}`" for f in bad[:8])
+                detail = f"Scope violation — files outside the plan:\n{file_list}"
             else:
                 failing = [c["command"] for c in checks.get("checks", {}).get("results", []) if not c.get("pass")]
-                detail = "Failing command(s): " + ", ".join(failing) if failing else "Checks failed (see checks.json for detail)."
-        return (f"{header}\n"
-                f"Blocked on: {blocked_on}\n"
-                f"{detail}\n"
-                f"Options: (1) fix the issue and run `gantry checks --run {run_id}` to re-check and unblock, "
-                f"or (2) `gantry revise --run {run_id} --stage build \"<comments>\"` to send it back with guidance.")
+                if failing:
+                    detail = "Failing command(s):\n" + "\n".join(f"  • `{c}`" for c in failing)
+        return (f"{header}\n\n"
+                f"*Blocked on:* {blocked_on}\n"
+                f"{detail}\n\n"
+                f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere).\n"
+                f"*Reply 2* with guidance to send it back for a rebuild.")
 
     if status.endswith("_failed"):
+        stage = status.removesuffix("_failed")
         subtype = result.get("raw", {}).get("subtype") if isinstance(result.get("raw"), dict) else None
         agent_text = (result.get("raw", {}).get("result") or "")[:500] if isinstance(result.get("raw"), dict) else ""
         if subtype == "error_max_turns":
-            return (f"{header}\n"
-                    f"Ran out of turns before finishing the stage.\n"
-                    f"Options: (1) raise [models.{status.removesuffix('_failed')}].max_turns in gantry.toml and "
-                    f"`gantry stage {status.removesuffix('_failed')} --run {run_id} --resume` to continue the same "
-                    f"session, or (2) inspect .agent-runs/{run_id}/logs/ and decide manually.")
-        return (f"{header}\n"
-                f"Stage errored (subtype={subtype or 'unknown'}).\n"
-                f"{agent_text}\n"
-                f"Options: (1) `gantry stage {status.removesuffix('_failed')} --run {run_id} --resume` to retry, "
-                f"or (2) inspect .agent-runs/{run_id}/logs/ for the full transcript.")
+            return (f"{header}\n\n"
+                    f"Ran out of turns before finishing the *{stage}* stage.\n\n"
+                    f"*Reply 1* to retry the same stage.\n"
+                    f"*Reply 2* to leave it — you'll check the logs yourself later.")
+        return (f"{header}\n\n"
+                f"Stage errored (`{subtype or 'unknown'}`).\n"
+                f"{_escape_md(agent_text)}\n\n"
+                f"*Reply 1* to retry.\n"
+                f"*Reply 2* to leave it — you'll check the logs yourself later.")
 
     if status == "review_escalated":
         verdict = result.get("verdict") or store.read_result(run_id, "review.json")
         note = verdict.get("note", "") if isinstance(verdict, dict) else ""
-        return (f"{header}\n{note[:800]}\n"
-                f"Options: (1) `gantry approve --run {run_id} --stage review` to accept as-is, or "
-                f"(2) `gantry revise --run {run_id} --stage build \"<comments>\"` to send back for changes.")
+        return (f"{header}\n\n"
+                f"{_escape_md(note[:800])}\n\n"
+                f"*Reply 1* to approve as-is.\n"
+                f"*Reply 2* with guidance to send back for changes.")
 
     # Agent asked a clarifying question mid-stage instead of erroring (common on
     # plan/build when the request under-specifies an architecture decision).
@@ -110,10 +163,9 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
     if isinstance(result.get("raw"), dict):
         agent_text = (result["raw"].get("result") or "")
     if agent_text and "?" in agent_text[-200:]:
-        return (f"{header}\n"
-                f"Agent has a question before continuing:\n{agent_text[:800]}\n"
-                f"Reply by writing .agent-runs/{run_id}/answers/{{stage}}.md with your decision, then "
-                f"`gantry stage {{stage}} --run {run_id} --resume`.")
+        return (f"{header}\n\n"
+                f"*Agent has a question before continuing:*\n{_escape_md(agent_text[:800])}\n\n"
+                f"*Reply* with your decision.")
 
     return header
 
