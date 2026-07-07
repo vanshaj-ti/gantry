@@ -41,10 +41,10 @@ class Engine:
     def _set_status(self, run_id: str, status: str, **extra: Any) -> None:
         """Update run state and mirror the semantic status to herdr's sidebar
         when running inside a herdr pane (no-op otherwise)."""
-        self.store.update_state(run_id, status=status, **extra)
+        st = self.store.update_state(run_id, status=status, **extra)
         try:
             from . import herdr as _herdr
-            _herdr.report_state(run_id, status,
+            _herdr.report_state(run_id, status, title=st.get("title", ""),
                                 enabled=self.cfg.herdr.enabled and self.cfg.herdr.report_state)
         except Exception:
             pass  # herdr reporting is best-effort; never break the pipeline
@@ -88,19 +88,7 @@ class Engine:
 
     # --- run lifecycle ---
     def create_run(self, title: str, request: str, run_id: str | None = None) -> str:
-        # spec/design have no CLI verb yet (`gantry stage` only accepts
-        # plan/build/evidence) — a run whose first stage is spec/design gets
-        # permanently stuck at awaiting_spec/awaiting_design with no way to
-        # advance. Fail loudly at creation instead of writing an unrecoverable
-        # run_id someone discovers is dead days later.
         first = self.cfg.stages[0] if self.cfg.stages else "plan"
-        if first in DOC_STAGES:
-            raise ValueError(
-                f"stages[0] is {first!r}, but doc stages (spec/design) have no "
-                f"execution path yet (no `gantry stage {first}` verb exists) — "
-                f"this run would be stuck at awaiting_{first} forever. Drop "
-                f"spec/design from [stages] in gantry.toml, or write the "
-                f"spec/design framing directly into --request instead.")
         rid = self.store.new_run_id(title, run_id)
         self.store.create(rid, title)
         self.store.artifact_path(rid, "intake.md").write_text(f"# Intake\n\n{request.strip() or title}\n")

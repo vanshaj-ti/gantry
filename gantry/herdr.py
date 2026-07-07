@@ -3,9 +3,10 @@
 herdr (https://herdr.dev) is a terminal-native agent multiplexer. When Gantry
 runs inside a herdr-managed pane (HERDR_ENV=1), it can:
 
-  1. Report its SEMANTIC pipeline stage to the herdr sidebar, so herdr shows
-     "evidence_running" / "review_changes_requested" instead of a generic
-     working/blocked.
+  1. Report its SEMANTIC pipeline stage to the herdr sidebar — both the fixed
+     idle/working/blocked state herdr's own agent-state machine needs, and a
+     human-readable title/status ("MFA admin — Build complete" instead of a
+     raw run_id + status string) via report-metadata for the visible display.
   2. Wait event-driven on an agent pane reaching a state, instead of polling.
 
 This is entirely opt-in and degrades to no-ops: if herdr isn't present, isn't
@@ -31,10 +32,14 @@ import subprocess
 from typing import Any
 
 _STATE_MAP = {
+    "spec_running": "working", "design_running": "working",
     "plan_running": "working", "build_running": "working", "evidence_running": "working",
     "review_running": "working",
+    "spec_complete": "idle", "design_complete": "idle",
     "plan_complete": "idle", "build_complete": "idle", "evidence_complete": "idle",
     "review_approved": "idle",
+    "spec_failed": "blocked", "design_failed": "blocked",
+    "plan_failed": "blocked", "build_failed": "blocked", "evidence_failed": "blocked",
     "review_changes_requested": "blocked", "review_escalated": "blocked", "blocked": "blocked",
     "awaiting_spec": "blocked", "awaiting_design": "blocked", "awaiting_plan": "idle",
 }
@@ -63,24 +68,43 @@ def _current_pane() -> str | None:
         return None
 
 
-def report_state(run_id: str, status: str, *, enabled: bool = True,
+def report_state(run_id: str, status: str, *, title: str = "", enabled: bool = True,
                  pane: str | None = None) -> dict[str, Any]:
     """Report Gantry's pipeline stage to herdr's sidebar for the current pane.
-    No-op unless enabled AND running inside herdr with the binary present."""
+    No-op unless enabled AND running inside herdr with the binary present.
+
+    Two calls, not one: `report-agent` drives herdr's own idle/working/blocked
+    state machine (what `wait_for_done` observes below) — it needs a value from
+    that fixed enum, so it can't carry a human-readable label. `report-metadata`
+    is display-only and takes free-text title/custom-status, which is what
+    actually makes the sidebar entry readable at a glance instead of showing a
+    raw run_id and status string like `20260707T091143-soc2-admin-mfa: blocked`.
+    """
     if not enabled or not _herdr_available():
         return {"reported": False, "reason": "herdr-not-active"}
     pane_id = pane or _current_pane()
     if not pane_id:
         return {"reported": False, "reason": "could-not-resolve-pane"}
     state = _STATE_MAP.get(status, "unknown")
-    cmd = ["herdr", "pane", "report-agent", pane_id,
-           "--source", SOURCE, "--agent", "gantry",
-           "--state", state, "--custom-status", status[:32],
-           "--message", f"{run_id}: {status}"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        return {"reported": proc.returncode == 0, "state": state, "pane": pane_id,
-                "output": (proc.stdout + proc.stderr)[-300:]}
+        from .advance import label as _label
+        human_status = _label(status)
+    except Exception:
+        human_status = status
+    display_title = f"{title} — {human_status}" if title else human_status
+
+    agent_cmd = ["herdr", "pane", "report-agent", pane_id,
+                 "--source", SOURCE, "--agent", "gantry",
+                 "--state", state, "--message", f"{run_id}: {status}"]
+    meta_cmd = ["herdr", "pane", "report-metadata", pane_id,
+                "--source", SOURCE, "--agent", "gantry",
+                "--title", display_title[:80], "--custom-status", human_status[:32]]
+    try:
+        agent_proc = subprocess.run(agent_cmd, capture_output=True, text=True, timeout=15)
+        meta_proc = subprocess.run(meta_cmd, capture_output=True, text=True, timeout=15)
+        return {"reported": agent_proc.returncode == 0 and meta_proc.returncode == 0,
+                "state": state, "pane": pane_id, "title": display_title,
+                "output": (agent_proc.stdout + agent_proc.stderr + meta_proc.stdout + meta_proc.stderr)[-300:]}
     except Exception as exc:
         return {"reported": False, "error": str(exc)}
 
