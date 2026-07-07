@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # gantry-herdr — open a herdr dashboard workspace pre-wired for a Gantry
-# target repo: left pane = live interactive `claude --dangerously-skip-
-# permissions` session cwd'd into the repo (your assistant for driving
-# gantry runs, with the global gantry-pipeline skill available), right
-# pane = live `gantry watch --live` state dashboard. Reuses the workspace
-# if one for this repo is already open instead of spawning duplicates.
+# target repo, three panes:
+#
+#   +----------------------------------------------------------+
+#   |  gantry watch --live  (full width, thin — status is just |
+#   |  info: title/status/updated-at, doesn't need real estate) |
+#   +---------------------------------+--------------------------+
+#   |                                 |  gantry docs --pick       |
+#   |  claude --dangerously-skip-     |  (interactive: choose a   |
+#   |  permissions  (your assistant   |  run, then a doc, Esc to  |
+#   |  driving gantry runs)           |  go back a level)         |
+#   +---------------------------------+--------------------------+
+#
+# Reuses the workspace if one for this repo is already open instead of
+# spawning duplicates.
 #
 # Usage: gantry-herdr [target-repo-path]
 #   Defaults to ~/edupaid if no path given.
@@ -54,24 +63,35 @@ if [ -n "$EXISTING_WS" ]; then
 else
   echo "Creating new herdr workspace for $REPO_NAME" >&2
   CREATE_JSON="$(herdr workspace create --cwd "$TARGET" --label "$LABEL" --focus)"
-  ROOT_PANE="$(echo "$CREATE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")"
+  TOP_PANE="$(echo "$CREATE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")"
 
-  # Right pane: live state dashboard. NOTE: --ratio is the fraction given to
-  # the pane being split (ROOT_PANE / left / Claude), not the new pane — so
-  # 0.7 here means Claude gets 70% of the width and the dashboard gets the
-  # remaining 30%. (Verified empirically: split ratio=0.2 on a pane left it
-  # at 20% width with the new pane taking the other 80%.)
-  RIGHT_PANE="$(herdr pane split "$ROOT_PANE" --direction right --ratio 0.7 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
+  # Split off the top status bar first. NOTE: --ratio is the fraction kept by
+  # the pane being split (the *original* pane), not the new one — so ratio
+  # 0.12 here means TOP_PANE keeps 12% of the height and the new BOTTOM_PANE
+  # gets the remaining 88%. (Verified empirically against an earlier version
+  # of this script that split --direction right.)
+  BOTTOM_PANE="$(herdr pane split "$TOP_PANE" --direction down --ratio 0.12 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
 
-  # Left pane (root): live Claude Code session, dropped straight into an
+  # Split the bottom region into Claude (left, wider) and the docs viewer
+  # (right, narrower) using the same original-pane-keeps-the-ratio rule.
+  DOCS_PANE="$(herdr pane split "$BOTTOM_PANE" --direction right --ratio 0.65 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
+
+  # Top: live state dashboard — full width, thin. It's just info (title,
+  # status, updated-at), doesn't need a full pane's worth of screen.
+  herdr pane run "$TOP_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry watch --live"
+
+  # Bottom-left: live Claude Code session, dropped straight into an
   # interactive chat cwd'd into the target repo with permissions bypassed —
   # this IS the assistant driving gantry runs. Venv activated + GANTRY_TARGET
   # exported first so any `gantry ...` shell-outs Claude runs actually resolve
   # the binary and default to the right repo.
-  herdr pane run "$ROOT_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && claude --dangerously-skip-permissions"
+  herdr pane run "$BOTTOM_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && claude --dangerously-skip-permissions"
 
-  # Right pane: live dashboard.
-  herdr pane run "$RIGHT_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry watch --live"
+  # Bottom-right: interactive docs viewer. --pick lets you fuzzy-choose a run
+  # then a doc for it (Esc to go back a level, Esc again to return to the run
+  # list); each doc waits on Enter before returning to the doc list, so it
+  # behaves like a real nav stack rather than a one-shot dump.
+  herdr pane run "$DOCS_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry docs --pick"
 fi
 
 echo "Attaching to herdr..." >&2
