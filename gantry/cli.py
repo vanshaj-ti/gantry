@@ -401,33 +401,140 @@ DOC_ARTIFACTS = [
 ]
 
 
-def cmd_docs(args) -> int:
-    """Render every doc a run has produced so far (spec, design, plan, evidence,
-    review) — the human-facing artifacts, never the implementation diff itself.
-    Pipes each through `glow` if installed (falls back to plain text), one
-    after another with a header per doc, skipping whichever haven't been
-    written yet at the run's current stage."""
-    store = RunStore(_target())
-    if not store.exists(args.run):
-        return _out({"ok": False, "error": f"run not found: {args.run}"})
-    glow = shutil.which("glow")
+def _render_run_docs(store: RunStore, run_id: str, glow: str | None) -> None:
     found_any = False
     for filename, label_text in DOC_ARTIFACTS:
-        content = store.read_artifact(args.run, filename)
+        content = store.read_artifact(run_id, filename)
         if content is None:
             continue
         found_any = True
         _render_doc(f"{label_text} ({filename})", content, glow)
-    review = store.read_result(args.run, "review-result.json")
+    review = store.read_result(run_id, "review-result.json")
     if review:
         found_any = True
         verdict = review.get("verdict", "?")
         body = f"**Verdict: {verdict}**\n\n{review.get('result', '')}"
         _render_doc(f"Review (verdict: {verdict})", body, glow)
     if not found_any:
-        print(f"No docs written yet for {args.run} — its current stage is "
-              f"{store.state(args.run).get('status', 'unknown')}.")
-    return 0
+        print(f"No docs written yet for {run_id} — its current stage is "
+              f"{store.state(run_id).get('status', 'unknown')}.")
+
+
+def _run_doc_list(store: RunStore, run_id: str) -> list[tuple[str, str]]:
+    """(label, filename) pairs for whichever docs this run has actually written,
+    plus a synthetic "All docs" entry to render everything at once."""
+    out = [("All docs", "")]
+    for filename, label_text in DOC_ARTIFACTS:
+        if store.read_artifact(run_id, filename) is not None:
+            out.append((f"{label_text} ({filename})", filename))
+    if store.read_result(run_id, "review-result.json"):
+        out.append(("Review", "review-result.json"))
+    return out
+
+
+def _fzf_pick(options: list[str], prompt: str) -> str | None:
+    """Run fzf over a list of lines, return the picked line or None (Esc/no match/no fzf)."""
+    fzf = shutil.which("fzf")
+    if not fzf or not options:
+        return None
+    try:
+        proc = subprocess.run([fzf, "--prompt", prompt, "--height", "40%", "--layout=reverse"],
+                              input="\n".join(options), text=True, capture_output=True)
+        picked = proc.stdout.strip()
+        return picked or None
+    except Exception:
+        return None
+
+
+def cmd_docs(args) -> int:
+    """Render docs a run has produced so far (spec, design, plan, evidence,
+    review) — the human-facing artifacts, never the implementation diff itself.
+    Pipes through `glow` if installed (falls back to plain text).
+
+    --run + --doc: render exactly that doc (or all, if --doc omitted) and exit.
+    --run omitted, no --pick/--follow: renders all docs for the most-recently-
+    touched run and exits.
+    --pick: interactive nav via fzf — pick a run, then a doc for that run, Esc
+    to go back a level, Esc again to quit. Requires fzf on PATH.
+    --follow: auto-refreshes to whichever run is most recently touched,
+    whenever that run's updated_at changes — no interaction, for a
+    docs-viewer pane that should just always show what's currently happening.
+    """
+    import time
+    store = RunStore(_target())
+    glow = shutil.which("glow")
+
+    def resolve_run() -> str | None:
+        if args.run:
+            return args.run if store.exists(args.run) else None
+        runs = store.list_runs()
+        return runs[0]["id"] if runs else None
+
+    if args.pick:
+        if not shutil.which("fzf"):
+            return _out({"ok": False, "error": "fzf not found on PATH — required for --pick"})
+        while True:
+            runs = store.list_runs()
+            if not runs:
+                print("No runs exist yet.")
+                return 0
+            run_lines = [f"{r['id']}  [{r['status']}]  {r['title']}" for r in runs]
+            picked_run = _fzf_pick(run_lines, "run> ")
+            if picked_run is None:
+                return 0  # Esc at the top level: quit
+            run_id = picked_run.split("  ", 1)[0]
+            while True:
+                docs = _run_doc_list(store, run_id)
+                doc_lines = [label for label, _ in docs]
+                picked_doc = _fzf_pick(doc_lines, f"{run_id} doc> ")
+                if picked_doc is None:
+                    break  # Esc: back to run picker
+                filename = dict(docs)[picked_doc]
+                print("\033[2J\033[H", end="")
+                if filename:
+                    content = store.read_artifact(run_id, filename)
+                    if filename == "review-result.json":
+                        review = store.read_result(run_id, filename)
+                        content = f"**Verdict: {review.get('verdict', '?')}**\n\n{review.get('result', '')}"
+                    _render_doc(f"{picked_doc}", content or "(empty)", glow)
+                else:
+                    _render_run_docs(store, run_id, glow)
+                input("\n[Enter to go back] ")
+
+    if args.doc:
+        run_id = resolve_run()
+        if not run_id:
+            return _out({"ok": False, "error": f"run not found: {args.run}" if args.run else "no runs exist yet"})
+        content = store.read_artifact(run_id, args.doc)
+        if content is None:
+            return _out({"ok": False, "error": f"{args.doc} not found for {run_id}"})
+        _render_doc(args.doc, content, glow)
+        return 0
+
+    if not args.follow:
+        run_id = resolve_run()
+        if not run_id:
+            return _out({"ok": False, "error": f"run not found: {args.run}" if args.run else "no runs exist yet"})
+        _render_run_docs(store, run_id, glow)
+        return 0
+
+    last_key = None
+    try:
+        while True:
+            run_id = resolve_run()
+            key = (run_id, store.state(run_id).get("updated_at") if run_id else None)
+            if key != last_key:
+                last_key = key
+                print("\033[2J\033[H", end="")  # clear screen, home cursor
+                if run_id:
+                    title = store.state(run_id).get("title", "")
+                    print(f"Following: {run_id}" + (f" ({title})" if title else "") + "\n")
+                    _render_run_docs(store, run_id, glow)
+                else:
+                    print("No runs exist yet.")
+            time.sleep(3)
+    except KeyboardInterrupt:
+        return 0
 
 
 def _render_doc(heading: str, content: str, glow_path: str | None) -> None:
@@ -535,7 +642,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_listen)
 
     s = sub.add_parser("docs", help="render a run's spec/design/plan/evidence/review docs (via glow if installed)")
-    s.add_argument("--run", required=True)
+    s.add_argument("--run", help="default: the most recently touched run")
+    s.add_argument("--doc", help="a specific artifact filename (e.g. architecture-design.md); default: all")
+    s.add_argument("--pick", action="store_true", help="interactive fzf nav: pick a run, then a doc, Esc to go back")
+    s.add_argument("--follow", action="store_true", help="auto-refresh to whichever run is most recently touched")
     s.set_defaults(func=cmd_docs)
 
     s = sub.add_parser("watch", help="dashboard of all runs")
