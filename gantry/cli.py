@@ -11,6 +11,7 @@ Verbs:
   gantry ship --run ID                commit + push + open a PR (review_approved only)
   gantry status [--run ID]           show run(s) status
   gantry doctor                      check the environment (runners, git, config)
+  gantry listen                      poll Telegram replies, act on the pending run
 
 Target repo is $GANTRY_TARGET or the current working directory.
 """
@@ -28,10 +29,14 @@ from . import __version__
 from .config import CONFIG_FILENAME, load_config
 from .engine import Engine
 from .git import branch_name, commit_all, create_pr, push
-from .notify import get_notifier
+from .notify import fetch_telegram_replies, get_notifier
 from .review import run_review
 from .runners import _RUNNERS
 from .state import RunStore
+
+# Statuses where a run is actually waiting on a human decision — the set
+# `gantry listen` matches replies against.
+NEEDS_INPUT_STATUSES = {"blocked", "review_escalated", "plan_failed", "build_failed", "evidence_failed"}
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
@@ -261,6 +266,87 @@ def cmd_watch(args) -> int:
         return 0
 
 
+def cmd_listen(args) -> int:
+    """Poll Telegram for replies and act on whichever run is currently waiting
+    on a human. Only ever considers the single most-recently-touched run in a
+    needs-input state — if two runs are stuck at once, reply about the newer
+    one first, or pass --run to target a specific one.
+    """
+    tgt = _target()
+    cfg = load_config(tgt)
+    store = RunStore(tgt)
+    notifier = get_notifier(cfg.notify)
+    offset = None
+    print(json.dumps({"listening": True, "chat_scope": "configured GANTRY_TELEGRAM_CHAT_ID"}))
+    try:
+        while True:
+            messages, offset = fetch_telegram_replies(offset)
+            for m in messages:
+                target_run = args.run
+                if not target_run:
+                    pending = [r for r in store.list_runs() if r["status"] in NEEDS_INPUT_STATUSES]
+                    if not pending:
+                        notifier.send("No run is currently waiting on input — nothing to apply that reply to.")
+                        continue
+                    target_run = pending[0]["id"]
+                _handle_reply(store, cfg, notifier, target_run, m["text"].strip())
+    except KeyboardInterrupt:
+        return 0
+
+
+def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
+    from .advance import label
+    from .engine import Engine
+    st = store.state(run_id)
+    status = st.get("status", "")
+    eng = Engine(store.target, cfg)
+    lowered = text.lower().strip()
+
+    if status == "blocked":
+        if lowered.startswith("1"):
+            eng.run_checks(run_id)
+            new_status = store.state(run_id).get("status", "")
+            notifier.send(f"Re-checked *{run_id}* — now: {label(new_status)}")
+        else:
+            comment = text[1:].strip() if lowered.startswith("2") else text
+            eng.revise(run_id, "build", comment or "See Telegram reply.")
+            notifier.send(f"Sent *{run_id}* back to build with your comment.")
+        return
+
+    if status.endswith("_failed"):
+        stage = status.removesuffix("_failed")
+        if lowered.startswith("1") or lowered in ("retry", "yes", "y"):
+            notifier.send(f"Resuming *{run_id}* stage `{stage}`…")
+            eng.run_agent_stage(run_id, stage, resume=True)
+            new_status = store.state(run_id).get("status", "")
+            notifier.send(f"*{run_id}* stage `{stage}`: {label(new_status)}")
+        else:
+            notifier.send(f"Noted — *{run_id}* left as-is for you to inspect manually.")
+        return
+
+    if status == "review_escalated":
+        if lowered.startswith("1") or lowered in ("approve", "yes", "y"):
+            eng.approve(run_id, "review")
+            notifier.send(f"Approved *{run_id}* — proceeding.")
+        else:
+            comment = text[1:].strip() if lowered.startswith("2") else text
+            eng.revise(run_id, "build", comment or "See Telegram reply.")
+            notifier.send(f"Sent *{run_id}* back to build with your comment.")
+        return
+
+    # Fallback: treat the reply as the answer to whatever the agent asked mid-stage
+    # (the "clarifying question" branch of notify_message). We don't know which
+    # exact stage without re-deriving it from status — best-effort from current_stage.
+    stage = st.get("current_stage", "build")
+    answer_path = store.artifact_path(run_id, f"answers/{stage}.md")
+    answer_path.parent.mkdir(parents=True, exist_ok=True)
+    answer_path.write_text(text)
+    notifier.send(f"Recorded your answer for *{run_id}* stage `{stage}`, resuming…")
+    eng.run_agent_stage(run_id, stage, resume=True)
+    new_status = store.state(run_id).get("status", "")
+    notifier.send(f"*{run_id}* stage `{stage}`: {label(new_status)}")
+
+
 def cmd_doctor(args) -> int:
     tgt = _target()
     cfg = load_config(tgt)
@@ -349,6 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("doctor", help="check environment")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("listen", help="poll Telegram replies, act on the pending run")
+    s.add_argument("--run", help="always apply replies to this run (default: the most recent needs-input run)")
+    s.set_defaults(func=cmd_listen)
 
     s = sub.add_parser("watch", help="dashboard of all runs")
     s.add_argument("--live", action="store_true", help="refresh every 2s (default: one-shot)")

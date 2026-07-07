@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -31,7 +32,10 @@ class TelegramNotifier(Notifier):
         chat_id = os.environ.get("GANTRY_TELEGRAM_CHAT_ID")
         if not token or not chat_id:
             return {"sent": False, "backend": "telegram", "error": "missing env GANTRY_TELEGRAM_BOT_TOKEN/GANTRY_TELEGRAM_CHAT_ID"}
-        payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+        payload = json.dumps({
+            "chat_id": chat_id, "text": text,
+            "parse_mode": "Markdown",  # notify_message() emits *bold*/`code` for readability
+        }).encode()
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=payload, headers={"Content-Type": "application/json"},
@@ -67,3 +71,39 @@ def get_notifier(cfg: NotifyConfig) -> Notifier:
     if cfg.backend == "webhook":
         return WebhookNotifier(cfg.webhook_url)
     return NoopNotifier()
+
+
+def fetch_telegram_replies(offset: int | None, timeout: int = 25) -> tuple[list[dict[str, Any]], int | None]:
+    """Long-poll Telegram's getUpdates for new messages in the configured chat.
+
+    Returns (messages, next_offset). `offset` is the update_id to resume after —
+    None fetches from whatever Telegram currently has buffered. Telegram's
+    long-poll `timeout` param holds the HTTP connection open server-side until a
+    message arrives or it elapses, so this call blocks up to ~`timeout` seconds
+    per invocation — callers loop it, they do not need their own sleep.
+    """
+    token = os.environ.get("GANTRY_TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("GANTRY_TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return [], offset
+    params = {"timeout": timeout}
+    if offset is not None:
+        params["offset"] = offset
+    url = f"https://api.telegram.org/bot{token}/getUpdates?" + urllib.parse.urlencode(params)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout + 10) as resp:
+            body = json.loads(resp.read().decode())
+    except Exception:
+        return [], offset
+    results = body.get("result", []) if isinstance(body, dict) else []
+    messages = []
+    next_offset = offset
+    for upd in results:
+        next_offset = upd["update_id"] + 1
+        msg = upd.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != str(chat_id):
+            continue  # ignore replies from any chat other than the configured one
+        text = msg.get("text")
+        if text:
+            messages.append({"text": text, "update_id": upd["update_id"], "date": msg.get("date")})
+    return messages, next_offset
