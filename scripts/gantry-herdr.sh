@@ -60,6 +60,63 @@ for ws in data.get('result', {}).get('workspaces', []):
 if [ -n "$EXISTING_WS" ]; then
   echo "Reusing existing workspace $EXISTING_WS for $REPO_NAME" >&2
   herdr workspace focus "$EXISTING_WS" >/dev/null
+
+  # The three panes we set up earlier may have had their commands exit
+  # (crash, Ctrl+C, `exit`, etc.) since this workspace was created — in
+  # which case focusing it just shows three bare shells. Detect which of
+  # the three roles (status/claude/docs) are sitting at a bare shell and
+  # re-launch only those, identified by pane geometry (top / bottom-left /
+  # bottom-right) rather than assuming pane IDs are stable across runs.
+  ROLE_PANES="$(python3 -c "
+import json, subprocess, sys
+
+ws = '$EXISTING_WS'
+panes = json.loads(subprocess.run(['herdr', 'pane', 'list', '--workspace', ws],
+                                   capture_output=True, text=True).stdout)['result']['panes']
+
+# Group panes by tab, then find the tab that has exactly our 3-pane layout
+# (the workspace may have extra user-created tabs we shouldn't touch).
+by_tab = {}
+for p in panes:
+    by_tab.setdefault(p['tab_id'], []).append(p)
+tab_id, tab_panes = next(((t, ps) for t, ps in by_tab.items() if len(ps) == 3), (None, None))
+if not tab_panes:
+    sys.exit(0)
+
+layout = json.loads(subprocess.run(['herdr', 'pane', 'layout', '--pane', tab_panes[0]['pane_id']],
+                                    capture_output=True, text=True).stdout)['result']['layout']
+rects = {p['pane_id']: p['rect'] for p in layout['panes']}
+
+top_id = min(rects, key=lambda pid: rects[pid]['y'])
+bottom = [pid for pid in rects if pid != top_id]
+left_id, right_id = sorted(bottom, key=lambda pid: rects[pid]['x'])
+
+for role, pid in (('top', top_id), ('claude', left_id), ('docs', right_id)):
+    info = json.loads(subprocess.run(['herdr', 'pane', 'process-info', '--pane', pid],
+                                      capture_output=True, text=True).stdout)
+    fg = info['result']['process_info']['foreground_processes']
+    is_bare_shell = len(fg) == 1 and fg[0]['name'] in ('zsh', 'bash', 'sh')
+    print(f'{role} {pid} {1 if is_bare_shell else 0}')
+" 2>/dev/null || true)"
+
+  while read -r ROLE PANE_ID DEAD; do
+    [ -z "$ROLE" ] && continue
+    [ "$DEAD" = "1" ] || continue
+    case "$ROLE" in
+      top)
+        echo "Re-launching gantry watch in $PANE_ID (previous process had exited)" >&2
+        herdr pane run "$PANE_ID" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry watch --live"
+        ;;
+      claude)
+        echo "Re-launching claude in $PANE_ID (previous process had exited)" >&2
+        herdr pane run "$PANE_ID" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && claude --dangerously-skip-permissions"
+        ;;
+      docs)
+        echo "Re-launching gantry docs --pick in $PANE_ID (previous process had exited)" >&2
+        herdr pane run "$PANE_ID" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry docs --pick"
+        ;;
+    esac
+  done <<< "$ROLE_PANES"
 else
   echo "Creating new herdr workspace for $REPO_NAME" >&2
   CREATE_JSON="$(herdr workspace create --cwd "$TARGET" --label "$LABEL" --focus)"
