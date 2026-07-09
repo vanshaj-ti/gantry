@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
-from gantry.docnav import _next_state, NavState, LEVEL_RUNS, LEVEL_DOCS, LEVEL_CONTENT
+from gantry.docnav import _next_state, _render_via_glow, NavState, LEVEL_RUNS, LEVEL_DOCS, LEVEL_CONTENT
 
 
 RUNS = [
@@ -86,6 +87,38 @@ class TestContentLevel(unittest.TestCase):
     def test_quit_from_content_level(self):
         s = _next_state(self._at_content(), "q", RUNS, DOCS)
         self.assertTrue(s.quit)
+
+
+class TestRenderViaGlow(unittest.TestCase):
+    def test_falls_back_to_splitlines_when_glow_not_on_path(self):
+        with patch("shutil.which", return_value=None):
+            lines = _render_via_glow("line1\nline2", 40)
+        self.assertEqual(lines, ["line1", "line2"])
+
+    def test_falls_back_when_glow_exits_nonzero(self):
+        with patch("shutil.which", return_value="/usr/bin/glow"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="")
+            lines = _render_via_glow("line1\nline2", 40)
+        self.assertEqual(lines, ["line1", "line2"])
+
+    def test_falls_back_when_subprocess_raises(self):
+        with patch("shutil.which", return_value="/usr/bin/glow"), \
+             patch("subprocess.run", side_effect=OSError("boom")):
+            lines = _render_via_glow("line1\nline2", 40)
+        self.assertEqual(lines, ["line1", "line2"])
+
+    def test_strips_stray_ansi_codes_from_glow_output(self):
+        with patch("shutil.which", return_value="/usr/bin/glow"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="\x1b[1mHeading\x1b[0m\nplain")
+            lines = _render_via_glow("# Heading\n\nplain", 40)
+        self.assertEqual(lines, ["Heading", "plain"])
+
+    def test_empty_content_returns_single_blank_line(self):
+        with patch("shutil.which", return_value=None):
+            lines = _render_via_glow("", 40)
+        self.assertEqual(lines, [""])
 
 
 if __name__ == "__main__":

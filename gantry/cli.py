@@ -301,7 +301,7 @@ def _watch_color_family(status: str) -> str:
 def cmd_watch(args) -> int:
     """Live/one-shot dashboard of all runs in the target repo."""
     import time
-    from .advance import _icon, label
+    from .advance import label
     store = RunStore(_target())
     colorize = sys.stdout.isatty()
 
@@ -328,28 +328,32 @@ def cmd_watch(args) -> int:
             return f"{int(secs // 3600)}h ago"
         return f"{int(secs // 86400)}d ago"
 
+    def running_session(run_id: str, status: str) -> tuple[str, str, str]:
+        """(runner, model, short_session_id) for a *_running stage, all
+        blank if the run isn't currently running an agent stage."""
+        if not status.endswith("_running"):
+            return "", "", ""
+        stage = status.removesuffix("_running")
+        session = store.get_session(run_id, stage)
+        runner = session.get("runner", "")
+        model = session.get("model") or "default"
+        sid = session.get("session_id", "")
+        sid_short = f"{sid[:8]}…" if sid else ""
+        return runner, model, sid_short
+
     def detail_for(run_id: str, status: str) -> str:
-        """Extra context for states that carry more than a label: retry
-        progress on blocked/checks_escalated, or the agent/model/session
-        actually driving a *_running stage — so a stuck or in-flight run's
-        real situation is visible without opening `gantry docs`."""
-        if status in ("blocked", "checks_escalated"):
-            st = store.state(run_id)
-            blocked_on = st.get("blocked_on", "")
-            retry = st.get("checks_retry_count")
-            cfg_cap = load_config(_target()).checks.retry_checks
-            if retry is not None and blocked_on:
-                return f"{blocked_on} (retry {retry}/{cfg_cap})"
-            return blocked_on
-        if status.endswith("_running"):
-            stage = status.removesuffix("_running")
-            session = store.get_session(run_id, stage)
-            runner = session.get("runner", "")
-            model = session.get("model") or "default"
-            sid = session.get("session_id", "")
-            sid_short = f"{sid[:8]}…" if sid else ""
-            return f"{runner}/{model} {sid_short}".strip()
-        return ""
+        """Retry/blocked context only — agent/model/session now have their
+        own columns (see running_session), so this stays scoped to what a
+        stuck run is actually blocked on."""
+        if status not in ("blocked", "checks_escalated"):
+            return ""
+        st = store.state(run_id)
+        blocked_on = st.get("blocked_on", "")
+        retry = st.get("checks_retry_count")
+        cfg_cap = load_config(_target()).checks.retry_checks
+        if retry is not None and blocked_on:
+            return f"{blocked_on} (retry {retry}/{cfg_cap})"
+        return blocked_on
 
     def paint(text: str, status: str) -> str:
         if not colorize:
@@ -365,18 +369,21 @@ def cmd_watch(args) -> int:
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
 
-        status_w, detail_w, updated_w = 30, 34, 10
-        title_w = max(20, cols - status_w - detail_w - updated_w - 4)
+        status_w, agent_w, model_w, session_w, detail_w, updated_w = 26, 12, 16, 10, 20, 10
+        fixed = status_w + agent_w + model_w + session_w + detail_w + updated_w
+        title_w = max(20, cols - fixed - 6)
 
-        print(f"{trunc('TITLE', title_w)} {trunc('STATUS', status_w)} "
-              f"{trunc('DETAIL', detail_w)} UPDATED")
-        print("-" * min(cols, title_w + status_w + detail_w + updated_w + 4))
+        headers = ("TITLE", "STATUS", "AGENT", "MODEL", "SESSION", "DETAIL", "UPDATED")
+        widths = (title_w, status_w, agent_w, model_w, session_w, detail_w, updated_w)
+        print(" ".join(trunc(h, w) for h, w in zip(headers, widths)))
+        print("-" * min(cols, sum(widths) + 6))
         for r in runs:
             title = r["title"] or r["id"]
-            status_text = f"{_icon(r['status'])} {label(r['status'])}"
+            status_text = label(r["status"])
+            runner, model, sid = running_session(r["id"], r["status"])
             detail_text = detail_for(r["id"], r["status"])
-            row = (f"{trunc(title, title_w)} {trunc(status_text, status_w)} "
-                   f"{trunc(detail_text, detail_w)} {age(r['mtime'])}")
+            row = " ".join(trunc(v, w) for v, w in zip(
+                (title, status_text, runner, model, sid, detail_text, age(r["mtime"])), widths))
             print(paint(row, r["status"]))
 
     if not args.live:

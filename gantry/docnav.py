@@ -14,12 +14,17 @@ curses needs one, so CI can't exercise the loop itself.
 from __future__ import annotations
 
 import curses
+import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .advance import _icon, label
+from .advance import label
 from .state import RunStore
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 DOC_ARTIFACTS = [
     ("intake.md", "Intake"),
@@ -120,7 +125,7 @@ def _next_state(state: NavState, key: str, runs: list[dict], docs: list[tuple[st
     return state
 
 
-def _draw_list(stdscr, title: str, items: list[str], selected: int, icons: list[str] | None = None) -> None:
+def _draw_list(stdscr, title: str, items: list[str], selected: int) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
     stdscr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
@@ -129,28 +134,45 @@ def _draw_list(stdscr, title: str, items: list[str], selected: int, icons: list[
         row = i + 3
         if row >= h - 1:
             break
-        prefix = icons[i] + " " if icons else ""
-        text = f"{prefix}{item}"
         attr = curses.A_REVERSE if i == selected else curses.A_NORMAL
-        stdscr.addnstr(row, 0, text, w - 1, attr)
-    footer = "↓/↑ move  →/Enter open  ←/Esc back  q quit"
+        stdscr.addnstr(row, 0, item, w - 1, attr)
+    footer = "up/down move  right/enter open  left/esc back  q quit"
     stdscr.addnstr(h - 1, 0, footer, w - 1, curses.A_DIM)
     stdscr.refresh()
 
 
-def _draw_content(stdscr, title: str, content: str, scroll: int) -> int:
-    """Renders content starting at line `scroll`; returns the clamped scroll
-    actually used (so the caller's state stays in bounds)."""
+def _render_via_glow(content: str, width: int) -> list[str]:
+    """Word-wrap markdown content at `width` via glow, plain (no ANSI) output
+    — `-s notty` renders without color/style codes, which is what a curses
+    window needs (compositing real ANSI into curses attrs would need a full
+    escape-sequence parser; not worth it for what was actually asked here,
+    which is correct wrapping). Falls back to raw splitlines (unwrapped) if
+    glow isn't on PATH or the call fails for any reason."""
+    glow = shutil.which("glow")
+    if not glow:
+        return content.splitlines() or [""]
+    try:
+        proc = subprocess.run([glow, "-w", str(max(20, width)), "-s", "notty", "-"],
+                              input=content, text=True, capture_output=True, timeout=10)
+        if proc.returncode != 0 or not proc.stdout:
+            return content.splitlines() or [""]
+        return _ANSI_RE.sub("", proc.stdout).splitlines() or [""]
+    except Exception:
+        return content.splitlines() or [""]
+
+
+def _draw_content(stdscr, title: str, lines: list[str], scroll: int) -> int:
+    """Renders pre-rendered `lines` starting at line `scroll`; returns the
+    clamped scroll actually used (so the caller's state stays in bounds)."""
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    lines = content.splitlines() or [""]
     max_scroll = max(0, len(lines) - (h - 3))
     scroll = max(0, min(scroll, max_scroll))
     stdscr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
     stdscr.addnstr(1, 0, "-" * min(w - 1, len(title)), w - 1)
     for i, line in enumerate(lines[scroll:scroll + (h - 3)]):
         stdscr.addnstr(2 + i, 0, line, w - 1)
-    footer = "↓/↑ scroll  ←/Esc back  q quit"
+    footer = "up/down scroll  left/esc back  q quit"
     stdscr.addnstr(h - 1, 0, footer, w - 1, curses.A_DIM)
     stdscr.refresh()
     return scroll
@@ -167,6 +189,9 @@ def _run_loop(stdscr, store: RunStore) -> None:
     runs: list[dict] = []
     docs: list[tuple[str, str]] = []
     last_poll = 0.0
+
+    last_content_key: Any = None
+    rendered_lines: list[str] = [""]
 
     while not state.quit:
         now = time.time()
@@ -185,17 +210,21 @@ def _run_loop(stdscr, store: RunStore) -> None:
                     docs = new_docs
 
         if state.level == LEVEL_RUNS:
-            items = [r["title"] or r["id"] for r in runs]
-            icons = [f"{_icon(r['status'])} " for r in runs]
-            _draw_list(stdscr, f"GANTRY RUNS ({len(runs)})", items, state.run_selected, icons)
+            items = [f"{(r['title'] or r['id'])}  [{label(r['status'])}]" for r in runs]
+            _draw_list(stdscr, f"GANTRY RUNS ({len(runs)})", items, state.run_selected)
         elif state.level == LEVEL_DOCS:
             items = [d[0] for d in docs] or ["(no docs yet for this run)"]
             title = f"DOCS — {state.run_id}"
             _draw_list(stdscr, title, items, state.doc_selected if docs else 0)
         else:
             content = read_doc_content(store, state.run_id, state.doc_filename)
+            width = stdscr.getmaxyx()[1]
+            content_key = (state.doc_filename, width, content)
+            if content_key != last_content_key:
+                last_content_key = content_key
+                rendered_lines = _render_via_glow(content, width)
             title = f"{state.doc_filename} — {state.run_id}"
-            state.content_scroll = _draw_content(stdscr, title, content, state.content_scroll)
+            state.content_scroll = _draw_content(stdscr, title, rendered_lines, state.content_scroll)
 
         try:
             key = stdscr.getkey()
