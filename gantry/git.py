@@ -73,9 +73,41 @@ def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
         runs_target.mkdir(parents=True, exist_ok=True)
         runs_link.symlink_to(runs_target, target_is_directory=True)
 
+    _copy_env_files_if_present(target, wt)
     _install_deps_if_npm_project(wt)
 
     return wt
+
+
+def _copy_env_files_if_present(target: Path, wt: Path) -> None:
+    """Best-effort copy of gitignored .env files from the main repo into the
+    fresh worktree.
+
+    `.env` files are (correctly) gitignored, so a bare `git worktree add`
+    never carries them — every agent stage/check that needs one (e.g. a
+    Next.js app reading `NEXT_PUBLIC_*` at build time) fails with an error
+    that looks identical to a real code regression, burning retries on an
+    infra problem no code change can fix. Discovers .env files dynamically
+    (root + one level under any top-level directory) rather than a hardcoded
+    per-project list, so it works on any repo shape without gantry.toml
+    needing to enumerate them.
+    """
+    root_env = target / ".env"
+    if root_env.exists():
+        (wt / ".env").write_text(root_env.read_text())
+    # Covers both one-level (foo/.env) and two-level (apps/core/.env,
+    # supabase/functions/.env) project layouts.
+    for pattern in ("*/.env", "*/*/.env"):
+        for src in target.glob(pattern):
+            if ".worktrees" in src.parts or "node_modules" in src.parts:
+                continue
+            rel = src.relative_to(target)
+            dst = wt / rel
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(src.read_text())
+            except OSError:
+                pass
 
 
 def _install_deps_if_npm_project(wt: Path) -> None:

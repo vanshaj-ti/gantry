@@ -111,11 +111,17 @@ class ChecksConfig:
     gates on exit code. Works on any repo/language."""
     commands: list[str] = field(default_factory=list)  # e.g. ["npm run lint", "npm run build"]
     timeout: int = 900
+    retry_checks: int = 3  # auto-resume build with failure feedback this many times
+                           # before escalating to a human (checks_escalated)
 
 
 @dataclass
 class GitConfig:
     base_branch: str = "main"             # diff base for scope/review (was origin/staging)
+    auto_ship: bool = False                # if True, advance_run ships automatically
+                                            # on review_approved — no human `gantry ship`
+                                            # call required. Opt-in: a failed/misjudged
+                                            # ship opens a real PR with zero human review.
 
 
 @dataclass
@@ -278,9 +284,12 @@ def load_config(target_workspace: Path) -> GantryConfig:
         )
     if "checks" in raw:
         c = raw["checks"]
-        cfg.checks = ChecksConfig(commands=c.get("commands", []), timeout=int(c.get("timeout", 900)))
+        cfg.checks = ChecksConfig(commands=c.get("commands", []), timeout=int(c.get("timeout", 900)),
+                                  retry_checks=int(c.get("retry_checks", 3)))
     if "git" in raw:
-        cfg.git = GitConfig(base_branch=raw["git"].get("base_branch", "main"))
+        g = raw["git"]
+        cfg.git = GitConfig(base_branch=g.get("base_branch", "main"),
+                            auto_ship=bool(g.get("auto_ship", False)))
     if "notify" in raw:
         n = raw["notify"]
         cfg.notify = NotifyConfig(backend=n.get("backend", "none"), webhook_url=n.get("webhook_url", ""))

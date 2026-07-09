@@ -32,6 +32,7 @@ from .review import run_review
 # the stage itself rather than waiting for a manual `gantry stage <name>`.
 AUTO_TRANSITIONS = {
     "plan_complete", "build_complete", "evidence_complete", "review_changes_requested",
+    "blocked",
     *(f"awaiting_{stage}" for stage in AGENT_STAGES),
 }
 
@@ -69,6 +70,7 @@ def label(status: str) -> str:
 _STATUS_ICON = {
     "blocked": "\U0001f6d1",           # 🛑
     "review_escalated": "❗",       # ❗
+    "checks_escalated": "❗",       # ❗
     "review_approved": "✅",        # ✅
     "review_changes_requested": "\U0001f501",  # 🔁
 }
@@ -92,6 +94,26 @@ def _escape_md(text: str) -> str:
     for ch in ("_", "*", "[", "`"):
         text = text.replace(ch, "\\" + ch)
     return text
+
+
+def _checks_failure_detail(store: Any, run_id: str) -> str:
+    """Extract a concrete, actionable description of why checks failed: the
+    scope violation's file list, or the failing command name(s). Shared
+    between the human-facing notify message and the feedback text fed back
+    into a resumed build attempt — both need the same real detail, not a
+    bare 'checks failed' label."""
+    checks = store.read_result(run_id, "checks.json")
+    if not checks or checks.get("pass"):
+        return "Checks failed."
+    scope = checks.get("scope", {})
+    if scope.get("forbidden_files") or scope.get("unexpected_files"):
+        bad = scope.get("forbidden_files", []) + scope.get("unexpected_files", [])
+        file_list = "\n".join(f"  • `{f}`" for f in bad[:8])
+        return f"Scope violation — files outside the plan:\n{file_list}"
+    failing = [c["command"] for c in checks.get("checks", {}).get("results", []) if not c.get("pass")]
+    if failing:
+        return "Failing command(s):\n" + "\n".join(f"  • `{c}`" for c in failing)
+    return "Checks failed."
 
 
 def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] | None = None) -> str:
@@ -120,23 +142,22 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
 
     if status == "blocked":
         blocked_on = store.state(run_id).get("blocked_on", "checks")
-        checks = store.read_result(run_id, "checks.json")
-        detail = "Checks failed."
-        if checks and not checks.get("pass"):
-            scope = checks.get("scope", {})
-            if scope.get("forbidden_files") or scope.get("unexpected_files"):
-                bad = scope.get("forbidden_files", []) + scope.get("unexpected_files", [])
-                file_list = "\n".join(f"  • `{f}`" for f in bad[:8])
-                detail = f"Scope violation — files outside the plan:\n{file_list}"
-            else:
-                failing = [c["command"] for c in checks.get("checks", {}).get("results", []) if not c.get("pass")]
-                if failing:
-                    detail = "Failing command(s):\n" + "\n".join(f"  • `{c}`" for c in failing)
+        retry_count = store.state(run_id).get("checks_retry_count", 0)
+        detail = _checks_failure_detail(store, run_id)
         return (f"{header}\n\n"
-                f"*Blocked on:* {blocked_on}\n"
+                f"*Blocked on:* {blocked_on} (auto-retry attempt {retry_count})\n"
                 f"{detail}\n\n"
                 f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere).\n"
                 f"*Reply 2* with guidance to send it back for a rebuild.")
+
+    if status == "checks_escalated":
+        detail = _checks_failure_detail(store, run_id)
+        retry_count = store.state(run_id).get("checks_retry_count", 0)
+        return (f"{header}\n\n"
+                f"Auto-retry exhausted after {retry_count} attempt(s).\n"
+                f"{detail}\n\n"
+                f"*Reply 1* with guidance to send it back for a rebuild.\n"
+                f"*Reply 2* to leave it — you'll investigate yourself.")
 
     if status.endswith("_failed"):
         stage = status.removesuffix("_failed")
@@ -207,6 +228,33 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
     if status == "review_changes_requested":
         engine.run_agent_stage(run_id, "build", resume=True)
         return {"advanced": True, "from": status, "action": "resume_build"}
+
+    if status == "review_approved" and engine.cfg.git.auto_ship:
+        from .ship import ship_run
+        out = ship_run(engine, run_id)
+        return {"advanced": True, "from": status,
+                "action": "auto_shipped" if out.get("ok") else "auto_ship_failed",
+                "pr_url": (out.get("pr") or {}).get("url")}
+
+    if status == "blocked":
+        blocked_on = engine.store.state(run_id).get("blocked_on")
+        if blocked_on not in ("scope", "checks"):
+            return {"advanced": False, "from": status, "action": "no_auto_transition"}
+        retry_count = engine.store.state(run_id).get("checks_retry_count", 0)
+        if retry_count >= engine.cfg.checks.retry_checks:
+            engine.store.update_state(run_id, status="checks_escalated")
+            return {"advanced": False, "from": status, "action": "checks_escalated",
+                    "retry_count": retry_count}
+        detail = _checks_failure_detail(engine.store, run_id)
+        engine.store.artifact_path(run_id, "answers/build.md").parent.mkdir(
+            parents=True, exist_ok=True)
+        engine.store.artifact_path(run_id, "answers/build.md").write_text(
+            f"# Checks failed (auto-retry {retry_count + 1}/{engine.cfg.checks.retry_checks})\n\n"
+            f"{detail}\n\nFix the above and ensure checks pass this time.\n")
+        engine.store.update_state(run_id, checks_retry_count=retry_count + 1)
+        engine.run_agent_stage(run_id, "build", resume=True)
+        return {"advanced": True, "from": status, "action": "retry_build_after_checks_failure",
+                "retry_count": retry_count + 1}
 
     return {"advanced": False, "from": status, "action": "no_auto_transition"}
 

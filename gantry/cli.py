@@ -30,7 +30,6 @@ from pathlib import Path
 from . import __version__
 from .config import CONFIG_FILENAME, load_config
 from .engine import Engine
-from .git import branch_name, commit_all, create_pr, push
 from .notify import fetch_telegram_replies, get_notifier
 from .review import run_review
 from .runners import _RUNNERS
@@ -158,34 +157,17 @@ def cmd_revise(args) -> int:
 
 def cmd_ship(args) -> int:
     """Commit the worktree, push the branch, open a PR. Only valid once review
-    has approved — never fires automatically; requires an explicit human call."""
+    has approved — requires an explicit human call, UNLESS [git].auto_ship is
+    enabled, in which case advance_run (advance.py) calls ship_run directly
+    on review_approved without this command being invoked at all."""
+    from .ship import ship_run
     eng = _engine()
     run_id = args.run
     state = eng.store.state(run_id)
     if state.get("status") != "review_approved" and not args.force:
         return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
                     f"not review_approved (use --force to override)"})
-
-    wt = eng.work_dir(run_id)
-    branch = branch_name(run_id)
-
-    from .shipmeta import draft_ship_meta
-    meta = draft_ship_meta(eng.store, run_id, eng.cfg, wt)
-    title, body, remote_branch = meta["title"], meta["body"], meta["branch_slug"]
-
-    commit_res = commit_all(wt, title)
-    if not commit_res["ok"]:
-        return _out({"ok": False, "stage": "commit", **commit_res})
-
-    push_res = push(wt, branch, remote_branch=remote_branch)
-    if not push_res["ok"]:
-        return _out({"ok": False, "stage": "push", **push_res})
-
-    pr_res = create_pr(wt, remote_branch, eng.cfg.git.base_branch, title, body)
-    eng.store.update_state(run_id, status="shipped" if pr_res["ok"] else "ship_failed",
-                           pr_url=pr_res.get("url"))
-    return _out({"ok": pr_res["ok"], "commit": commit_res, "push": push_res, "pr": pr_res,
-                 "branch": remote_branch, "title": title})
+    return _out(ship_run(eng, run_id))
 
 
 def cmd_status(args) -> int:
