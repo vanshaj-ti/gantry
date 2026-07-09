@@ -40,6 +40,16 @@ def session_exists(name: str) -> bool:
     return _tmux("has-session", "-t", name).returncode == 0
 
 
+def kill_cockpit(name: str) -> dict:
+    """Kill the cockpit tmux session if it exists. Returns {ok, killed}."""
+    if not session_exists(name):
+        return {"ok": True, "killed": False}
+    proc = _tmux("kill-session", "-t", name)
+    if proc.returncode != 0:
+        return {"ok": False, "error": proc.stderr.strip() or "tmux kill-session failed"}
+    return {"ok": True, "killed": True}
+
+
 def _pane_cmd(target: Path, cmd: str) -> str:
     return f"export GANTRY_TARGET={target}; cd {target}; {cmd}"
 

@@ -740,11 +740,14 @@ def cmd_doctor(args) -> int:
 
 def cmd_cockpit(args) -> int:
     """Open (or reuse) a tmux workspace pre-wired for this target repo:
-    status bar on top, doc viewer + live claude session below."""
-    from .cockpit import attach, build_cockpit, session_name
+    status bar on top, doc viewer + live claude session below.
+    --kill tears down an existing cockpit session instead (fresh start)."""
+    from .cockpit import attach, build_cockpit, kill_cockpit, session_name
     if not shutil.which("tmux"):
         return _out({"ok": False, "error": "tmux not found on PATH — required for `gantry cockpit`"})
     tgt = _target()
+    if getattr(args, "kill", False):
+        return _out(kill_cockpit(session_name(tgt)))
     result = build_cockpit(tgt)
     if not result["ok"]:
         return _out(result)
@@ -883,6 +886,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("cockpit", help="open a tmux workspace pre-wired for this repo "
                                         "(status bar + doc viewer + live claude session)")
+    s.add_argument("--kill", action="store_true",
+                    help="kill this repo's existing cockpit tmux session instead of opening it")
     s.set_defaults(func=cmd_cockpit)
 
     s = sub.add_parser("update", help="git pull + reinstall the gantry checkout this install runs from")
