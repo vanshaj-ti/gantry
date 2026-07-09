@@ -14,16 +14,14 @@ curses needs one, so CI can't exercise the loop itself.
 from __future__ import annotations
 
 import curses
-import os
-import pty
+import io
 import re
-import select
-import shutil
-import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from rich.console import Console
+from rich.markdown import Markdown
 
 from .advance import label
 from .state import RunStore
@@ -155,6 +153,20 @@ _ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 # not a crash).
 _SGR_ATTR = {"1": curses.A_BOLD, "3": curses.A_ITALIC, "4": curses.A_UNDERLINE}
 
+# Basic 16-color SGR codes -> curses color index. Standard ANSI ordering
+# (black/red/green/yellow/blue/magenta/cyan/white); the "bright" 90-97/
+# 100-107 range has no distinct curses base-16 equivalent without extended
+# color support (which the 256-color path above already provides), so
+# bright variants alias to their base color — a small fidelity loss, not a
+# correctness bug. Verified rich's Console emits this range alongside the
+# 256-indexed form (e.g. "1;35" for bold magenta), not just one or the other.
+_BASE16 = [curses.COLOR_BLACK, curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW,
+           curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE]
+_BASIC_FG = {str(30 + i): c for i, c in enumerate(_BASE16)}
+_BASIC_FG.update({str(90 + i): c for i, c in enumerate(_BASE16)})  # bright fg
+_BASIC_BG = {str(40 + i): c for i, c in enumerate(_BASE16)}
+_BASIC_BG.update({str(100 + i): c for i, c in enumerate(_BASE16)})  # bright bg
+
 # (fg, bg) 256-color index pair -> registered curses color-pair number.
 # Populated lazily via _color_pair_for() the first time each combination is
 # seen — a single markdown style's palette is small (headers/code/quotes/
@@ -225,6 +237,10 @@ def _parse_ansi_line(line: str) -> list[tuple[str, int]]:
             elif code == "48" and i + 2 < len(codes) and codes[i + 1] == "5":
                 bg = int(codes[i + 2]) if codes[i + 2].isdigit() else -1
                 i += 2
+            elif code in _BASIC_FG:
+                fg = _BASIC_FG[code]
+            elif code in _BASIC_BG:
+                bg = _BASIC_BG[code]
             i += 1
     tail = line[pos:]
     if tail:
@@ -232,92 +248,27 @@ def _parse_ansi_line(line: str) -> list[tuple[str, int]]:
     return segments or [("", curses.A_NORMAL)]
 
 
-def _run_glow_via_pty(path: str, width: int, timeout: float = 10.0) -> str | None:
-    """Run glow with its stdout attached to a real pty and return the raw
-    ANSI output, or None on any failure.
+def _render_markdown(content: str, width: int) -> list[list[tuple[str, int]]]:
+    """Render markdown content at `width` via rich, in-process, parsed into
+    (text, curses_attr) segments per line so headers/bold/italic/underline/
+    code/tables render with matching curses attributes instead of literal
+    `**`/`#` characters.
 
-    glow detects whether its stdout is a real terminal and silently
-    downgrades to flat bold-only styling (no color at all) when it isn't —
-    confirmed directly: piping through subprocess.run's captured stdout
-    (a pipe, not a tty) discards every 256-color code glow's `-s dark` style
-    would otherwise emit. A pty makes glow believe it's talking to a real
-    terminal, which is the only way to get its actual color output.
-
-    Must drain the pty's master fd WHILE waiting for the process, not after
-    — glow can fill the pty's kernel buffer and block on write() while we'd
-    otherwise be blocked on proc.wait(), deadlocking both sides.
-    """
-    glow = shutil.which("glow")
-    if not glow:
-        return None
-    master, slave = pty.openpty()
-    proc = None
+    Previously this shelled out to `glow` through a manually-managed pty
+    (glow silently downgrades to flat bold-only output when its stdout
+    isn't a real terminal, which piping through subprocess.run always is) —
+    replaced with rich's Console/Markdown, which renders correctly with no
+    subprocess, no pty, no deadlock-prone drain loop, and no external binary
+    dependency at all."""
+    buf = io.StringIO()
+    console = Console(file=buf, width=max(20, width), force_terminal=True,
+                      color_system="256", legacy_windows=False)
     try:
-        proc = subprocess.Popen(
-            [glow, "-w", str(max(20, width)), "-s", "dark", path],
-            stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, close_fds=True,
-        )
-        os.close(slave)
-        slave = -1  # sentinel: already closed, don't double-close in finally
-        chunks: list[bytes] = []
-        deadline = time.time() + timeout
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            ready, _, _ = select.select([master], [], [], remaining)
-            if not ready:
-                break
-            try:
-                chunk = os.read(master, 65536)
-            except OSError:
-                break  # child closed its end of the pty
-            if not chunk:
-                break
-            chunks.append(chunk)
-        proc.wait(timeout=2)
-        return b"".join(chunks).decode(errors="replace")
+        console.print(Markdown(content))
     except Exception:
-        if proc is not None:
-            proc.kill()
-        return None
-    finally:
-        if slave != -1:
-            try:
-                os.close(slave)
-            except OSError:
-                pass
-        try:
-            os.close(master)
-        except OSError:
-            pass
-
-
-def _render_via_glow(content: str, width: int) -> list[list[tuple[str, int]]]:
-    """Word-wrap markdown content at `width` via glow, parsed into
-    (text, curses_attr) segments per line so headers/bold/italic/underline
-    AND real 256-color styling render with matching curses attributes
-    instead of literal `**`/`#` characters or flat bold-only text. Falls
-    back to plain unstyled splitlines (still segment-list shaped, just one
-    A_NORMAL segment per line) if glow isn't on PATH or the call fails for
-    any reason."""
-    plain_fallback = [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
-    if not shutil.which("glow"):
-        return plain_fallback
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write(content)
-            path = f.name
-        try:
-            output = _run_glow_via_pty(path, width)
-        finally:
-            os.unlink(path)
-        if not output:
-            return plain_fallback
-        lines = output.splitlines() or [""]
-        return [_parse_ansi_line(ln) for ln in lines]
-    except Exception:
-        return plain_fallback
+        return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
+    lines = buf.getvalue().splitlines() or [""]
+    return [_parse_ansi_line(ln) for ln in lines]
 
 
 def _draw_content(stdscr, title: str, lines: list[list[tuple[str, int]]], scroll: int) -> int:
@@ -412,7 +363,7 @@ def _run_loop(stdscr, store: RunStore) -> None:
             content_key = (state.doc_filename, width, content)
             if content_key != last_content_key:
                 last_content_key = content_key
-                rendered_lines = _render_via_glow(content, width)
+                rendered_lines = _render_markdown(content, width)
             title = f"{state.doc_filename} — {state.run_id}"
             state.content_scroll = _draw_content(stdscr, title, rendered_lines, state.content_scroll)
 

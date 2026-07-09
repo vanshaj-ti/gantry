@@ -180,19 +180,21 @@ gantry cockpit                    # uses $GANTRY_TARGET, or run from inside the 
   one level (quits from the run list), `q` quits from anywhere. Auto-refreshes
   on a new run or doc appearing without resetting your current position.
   Every render is a clean full-screen redraw — no scroll-history leakage.
-  Doc content is rendered through `glow` (run inside a pty so it emits its
-  real 256-color output, not the flat bold-only text it downgrades to when
-  piped — word-wrapped to the pane's actual width, headers/code/tables
-  render in color like glow does in a normal terminal, not literal `**`/`#`
-  characters) and falls back to plain unwrapped, unstyled text if `glow`
-  isn't installed.
+  Doc content is rendered via [`rich`](https://github.com/Textualize/rich)'s
+  `Markdown`, in-process (a real Python dependency, not an external
+  binary/subprocess) — word-wrapped to the pane's actual width, with real
+  colored headers/code/tables instead of literal `**`/`#` characters.
 - **Claude session** (bottom-right, gets the larger share of the split): a
   live `claude --dangerously-skip-permissions` session cwd'd into the repo —
   your assistant for driving Gantry runs.
 
 Mouse mode is enabled for the cockpit's tmux session only — click-drag pane
-borders to resize, click to switch focus — without touching your global tmux
-config.
+borders to resize, click to switch focus, wheel to scroll — without touching
+your global tmux config. Mouse mode intercepts click-drag for tmux/curses
+itself, which normally blocks the terminal's own text selection — most
+terminal emulators (iTerm2, Terminal.app, Alacritty) let you hold a modifier
+key (usually `Option` on macOS, `Shift` elsewhere) while dragging to select
+and copy text as if mouse mode were off.
 
 Re-running `gantry cockpit` against the same repo reuses the existing tmux
 session (named `gantry-<repo-name>`) instead of spawning a duplicate —

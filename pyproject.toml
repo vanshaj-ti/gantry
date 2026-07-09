@@ -11,7 +11,11 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Vanshaj" }]
 keywords = ["agent", "pipeline", "claude-code", "cursor", "automation", "ci"]
-dependencies = []  # stdlib-only core (tomllib, urllib, subprocess)
+dependencies = [
+    "rich>=13",  # in-process markdown rendering for `gantry docs --nav`'s
+                 # content pane (headers/tables/code, real terminal color) —
+                 # everything else stays stdlib-only (tomllib, urllib, subprocess)
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

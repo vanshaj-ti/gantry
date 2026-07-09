@@ -1,9 +1,8 @@
 import curses
 import unittest
-from unittest.mock import MagicMock, patch
 
 from gantry.docnav import (
-    _next_state, _parse_ansi_line, _render_via_glow,
+    _next_state, _parse_ansi_line, _render_markdown,
     NavState, LEVEL_RUNS, LEVEL_DOCS, LEVEL_CONTENT,
 )
 
@@ -93,43 +92,40 @@ class TestContentLevel(unittest.TestCase):
         self.assertTrue(s.quit)
 
 
-class TestRenderViaGlow(unittest.TestCase):
-    """_render_via_glow now returns list[list[(text, attr)]] — one segment
-    list per line — so styled (bold/italic/underline/color) runs carry their
-    own curses attribute instead of the whole line being A_NORMAL. The
-    actual glow invocation runs through a pty (_run_glow_via_pty) — that
-    function needs a real pty/subprocess and isn't unit tested here (covered
-    by manual real-terminal verification instead); these tests mock it at
-    the _run_glow_via_pty boundary."""
+class TestRenderMarkdown(unittest.TestCase):
+    """_render_markdown renders via rich's Console/Markdown in-process (no
+    subprocess/pty, unlike the prior glow-based implementation) — these
+    tests exercise the real rich import directly, no mocking needed."""
 
-    def test_falls_back_to_splitlines_when_glow_not_on_path(self):
-        with patch("shutil.which", return_value=None):
-            lines = _render_via_glow("line1\nline2", 40)
-        self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
+    def test_returns_segment_list_shape(self):
+        lines = _render_markdown("plain text", 40)
+        self.assertIsInstance(lines, list)
+        self.assertTrue(all(isinstance(l, list) for l in lines))
+        self.assertTrue(all(isinstance(seg, tuple) and len(seg) == 2
+                            for l in lines for seg in l))
 
-    def test_falls_back_when_pty_run_returns_none(self):
-        with patch("shutil.which", return_value="/usr/bin/glow"), \
-             patch("gantry.docnav._run_glow_via_pty", return_value=None):
-            lines = _render_via_glow("line1\nline2", 40)
-        self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
+    def test_heading_produces_a_bold_segment(self):
+        lines = _render_markdown("# Heading", 40)
+        flat = [seg for line in lines for seg in line]
+        self.assertTrue(any(attr & curses.A_BOLD for _, attr in flat),
+                        f"expected at least one bold segment, got: {flat}")
 
-    def test_falls_back_when_render_raises(self):
-        with patch("shutil.which", return_value="/usr/bin/glow"), \
-             patch("gantry.docnav._run_glow_via_pty", side_effect=OSError("boom")):
-            lines = _render_via_glow("line1\nline2", 40)
-        self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
+    def test_bold_markdown_produces_a_bold_segment(self):
+        lines = _render_markdown("plain **bold** text", 40)
+        flat = [seg for line in lines for seg in line]
+        self.assertTrue(any(text == "bold" and attr & curses.A_BOLD for text, attr in flat),
+                        f"expected a 'bold' segment with A_BOLD, got: {flat}")
 
-    def test_parses_bold_ansi_from_pty_output_into_segments(self):
-        with patch("shutil.which", return_value="/usr/bin/glow"), \
-             patch("gantry.docnav._run_glow_via_pty",
-                   return_value="\x1b[1mHeading\x1b[0m\nplain"):
-            lines = _render_via_glow("# Heading\n\nplain", 40)
-        self.assertEqual(lines, [[("Heading", curses.A_BOLD)], [("plain", curses.A_NORMAL)]])
+    def test_malformed_input_does_not_raise(self):
+        # rich's Markdown parser is tolerant, but _render_markdown's own
+        # try/except should still catch anything unexpected without
+        # crashing the navigator.
+        lines = _render_markdown("# unterminated `code span", 40)
+        self.assertIsInstance(lines, list)
 
-    def test_empty_content_returns_single_blank_line(self):
-        with patch("shutil.which", return_value=None):
-            lines = _render_via_glow("", 40)
-        self.assertEqual(lines, [[("", curses.A_NORMAL)]])
+    def test_empty_content_returns_at_least_one_line(self):
+        lines = _render_markdown("", 40)
+        self.assertGreaterEqual(len(lines), 1)
 
 
 class TestParseAnsiLine(unittest.TestCase):
@@ -179,6 +175,22 @@ class TestParseAnsiLine(unittest.TestCase):
         # no-op here (no real curses screen) — style bits and color are
         # independent, only the latter needs curses initialization.
         self.assertEqual(segs, [("Header", curses.A_BOLD)])
+
+    def test_basic_16_color_bold_magenta_degrades_gracefully(self):
+        # rich emits both this basic-16 form ("1;35") and the 256-indexed
+        # form for different elements in the same document — confirmed
+        # directly against real rich output. Bold still applies without a
+        # real curses screen; color-pair registration is the no-op part.
+        segs = _parse_ansi_line("\x1b[1;35mBoldMagenta\x1b[0m")
+        self.assertEqual(segs, [("BoldMagenta", curses.A_BOLD)])
+
+    def test_basic_16_color_fg_and_bg_combined(self):
+        segs = _parse_ansi_line("\x1b[1;36;40mBoldCyanOnBlack\x1b[0m")
+        self.assertEqual(segs, [("BoldCyanOnBlack", curses.A_BOLD)])
+
+    def test_bright_variant_aliases_to_base_color_no_crash(self):
+        segs = _parse_ansi_line("\x1b[91mBrightRed\x1b[0m")
+        self.assertEqual(segs, [("BrightRed", curses.A_NORMAL)])
 
 
 if __name__ == "__main__":
