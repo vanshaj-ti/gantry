@@ -9,8 +9,13 @@ from gantry.advance import advance_run, notify_message, _checks_failure_detail
 
 
 def _init_scratch_repo(path: Path) -> None:
+    """Init a throwaway git repo for a test. Sets repo-local user.name/email
+    so this works on a fresh CI runner with no global git config (`git commit`
+    fails with exit 128 there otherwise — global config can't be assumed)."""
     import subprocess
     subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), check=True)
     subprocess.run(["git", "commit", "--allow-empty", "-m", "init", "-q"], cwd=str(path), check=True)
     subprocess.run(["git", "branch", "-M", "main"], cwd=str(path), check=True)
 
