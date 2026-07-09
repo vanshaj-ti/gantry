@@ -180,6 +180,14 @@ def _draw_content(stdscr, title: str, lines: list[str], scroll: int) -> int:
 
 def _run_loop(stdscr, store: RunStore) -> None:
     curses.curs_set(0)
+    # Without this, ncurses paints its own default background (often a flat
+    # grey/black block) instead of inheriting the real terminal/tmux pane
+    # background — reads as a mismatched "overlay" against the rest of the
+    # pane. -1 means "whatever the terminal's actual bg/fg already is".
+    try:
+        curses.use_default_colors()
+    except curses.error:
+        pass  # terminal doesn't support it — harmless no-op
     stdscr.nodelay(True)
     stdscr.timeout(200)  # ms — poll interval for both keypress and refresh
 

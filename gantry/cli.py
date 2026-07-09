@@ -371,7 +371,11 @@ def cmd_watch(args) -> int:
 
         status_w, agent_w, model_w, session_w, detail_w, updated_w = 26, 12, 16, 10, 20, 10
         fixed = status_w + agent_w + model_w + session_w + detail_w + updated_w
-        title_w = max(20, cols - fixed - 6)
+        # Titles are short slugs in practice (run_id-derived) — absorbing
+        # every leftover column in a wide status bar just leaves a huge
+        # empty gap, not more useful information. Cap it well below "all
+        # remaining space".
+        title_w = max(20, min(40, cols - fixed - 6))
 
         headers = ("TITLE", "STATUS", "AGENT", "MODEL", "SESSION", "DETAIL", "UPDATED")
         widths = (title_w, status_w, agent_w, model_w, session_w, detail_w, updated_w)
