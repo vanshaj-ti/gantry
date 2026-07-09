@@ -753,9 +753,25 @@ def cmd_cockpit(args) -> int:
 
 
 def cmd_update(args) -> int:
-    """git pull + reinstall the gantry checkout this install runs from."""
+    """git pull + reinstall the gantry checkout this install runs from.
+    Prints a plain status line, not JSON — this is a command run
+    interactively by a person, unlike the rest of the CLI (which stays
+    JSON for scriptability)."""
     from .update import update_gantry
-    return _out(update_gantry())
+    result = update_gantry()
+    if not result["ok"]:
+        print(f"gantry update failed: {result.get('error') or result.get('output', 'unknown error')}")
+        if result.get("dirty_files"):
+            print("Dirty files:")
+            for f in result["dirty_files"]:
+                print(f"  {f}")
+        return 1
+    if not result["updated"]:
+        print(f"Already up to date ({result['commit'][:8]}).")
+    else:
+        print(f"Updated {result['from_commit'][:8]} -> {result['to_commit'][:8]} "
+              f"in {result['repo']}. Reinstalled.")
+    return 0
 
 
 def cmd_daemon(args) -> int:
