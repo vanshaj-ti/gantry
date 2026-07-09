@@ -33,9 +33,10 @@ gracefully without them):
 | Tool | Used by |
 |---|---|
 | `gh` | `gantry ship` (opens the PR) |
+| `tmux` | `gantry cockpit` (the shipped-in-the-box workspace, see below) |
 | `fzf` | `gantry docs --pick` (interactive picker; falls back to non-interactive without it) |
 | `glow` | `gantry docs` (pretty-prints markdown; falls back to plain `print` without it) |
-| `herdr` | optional cockpit integration, see below |
+| `herdr` | optional enhanced cockpit alternative, see below |
 
 ## Environment variables
 
@@ -133,17 +134,52 @@ are cleaned up the same way any other `.worktrees/`-based branch is in this
 convention (e.g. a merged-branch prune cron) — Gantry does not delete them
 itself.
 
-## Recommended cockpit: herdr
+## Cockpit: `gantry cockpit`
 
-Gantry drives one task through quality stages; [herdr](https://herdr.dev) — a
-terminal-native agent multiplexer — is the recommended way to *watch* your fleet
-while it does. Run Gantry inside a herdr pane and you get a real terminal per
-run, detach/reattach over SSH (even from your phone), and a sidebar that rolls
-each pane up to blocked / working / done.
+`gantry cockpit` opens a tmux workspace pre-wired for the target repo — no
+manual pane setup, no extra tool to install beyond tmux (which most
+developers already have). Ships with Gantry, works out of the box:
 
-The integration is **optional and auto-detected** — Gantry works identically with
-no herdr present (CI, cron, Docker, headless), and lights up extra behavior only
-when it detects `HERDR_ENV=1`:
+```bash
+gantry cockpit                    # uses $GANTRY_TARGET, or run from inside the repo
+```
+
+```
++----------------------------------------------------------+
+|  status bar (gantry watch --live) — full width, thin      |
++---------------------------+--------------------------------+
+|                           |                                |
+|  doc viewer (left)        |  claude session (right)         |
+|  gantry docs --follow     |  claude --dangerously-skip-...  |
+|                           |                                |
++---------------------------+--------------------------------+
+```
+
+- **Status bar** (top): `gantry watch --live` — colorized, icon-labeled per
+  run (matches the same status vocabulary used in Telegram notifications),
+  shows retry progress for `blocked`/`checks_escalated` runs.
+- **Doc viewer** (bottom-left): `gantry docs --follow` — auto-refreshes on a
+  new doc appearing, a stage transition, *or* a terminal resize (re-wraps to
+  the new width; it doesn't just sit there stale).
+- **Claude session** (bottom-right): a live `claude --dangerously-skip-permissions`
+  session cwd'd into the repo — your assistant for driving Gantry runs.
+
+Re-running `gantry cockpit` against the same repo reuses the existing tmux
+session (named `gantry-<repo-name>`) instead of spawning a duplicate —
+`tmux attach` picks up right where you left it.
+
+`gantry doctor` reports whether `tmux` is available.
+
+### Optional enhanced integration: herdr
+
+[herdr](https://herdr.dev) — a terminal-native agent multiplexer — is an
+**optional** alternative to `gantry cockpit`'s tmux workspace, for anyone who
+already has it: detach/reattach over SSH (even from your phone), and a
+sidebar that rolls each pane up to blocked / working / done.
+
+The integration is **auto-detected** — Gantry works identically with no herdr
+present (CI, cron, Docker, headless, or just using `gantry cockpit` instead),
+and lights up extra behavior only when it detects `HERDR_ENV=1`:
 
 - **Semantic stage in the sidebar.** Gantry reports its pipeline status
   (`evidence_running`, `review_approved`, …) to herdr via `pane report-agent`, so
@@ -151,37 +187,18 @@ when it detects `HERDR_ENV=1`:
 - **Event-driven advance.** When inside herdr, Gantry can `herdr wait` on a pane
   reaching `done` instead of polling.
 
-`gantry doctor` reports whether herdr is installed and active. Configure under
-`[herdr]` in `gantry.toml` (both flags default on; harmless when herdr is absent).
-
-> Note: `gantry watch` (Gantry's own dashboard) shows *pipeline-stage* state
-> across runs; herdr shows the *live terminals*. They complement each other.
-
-### One-command dashboard: `gantry-herdr`
-
-`scripts/gantry-herdr.sh` opens a herdr workspace pre-wired for a target repo in
-one command — no manual pane setup. Install once:
+Configure under `[herdr]` in `gantry.toml` (both flags default on; harmless
+when herdr is absent). `scripts/gantry-herdr.sh` opens a herdr-based workspace
+the same way `gantry cockpit` opens a tmux one, for anyone who prefers it:
 
 ```bash
 ln -s /path/to/gantry/scripts/gantry-herdr.sh ~/.local/bin/gantry-herdr
-chmod +x ~/.local/bin/gantry-herdr
-```
-
-Then:
-
-```bash
-gantry-herdr ~/some-repo          # explicit target
-# or:
 export GANTRY_TARGET=~/some-repo
-gantry-herdr                      # falls back to $GANTRY_TARGET
+gantry-herdr
 ```
 
-Opens (or refocuses, if one already exists for that repo) a workspace with two
-panes: **left** = a live `claude --dangerously-skip-permissions` session cwd'd
-into the repo — this is your assistant for driving Gantry runs, with the
-`gantry-pipeline` Claude Code skill (see below) available; **right** =
-`gantry watch --live`, the auto-refreshing run-state dashboard. Reuses an
-existing workspace by label instead of spawning duplicates on repeat runs.
+> Note: `gantry watch` (Gantry's own dashboard) shows *pipeline-stage* state
+> across runs; herdr shows the *live terminals*. They complement each other.
 
 ### Claude Code skill: `gantry-pipeline`
 
@@ -246,6 +263,9 @@ gantry docs [--run ID] [--pick] [--doc D] [--follow]
                                          via glow if installed)
 gantry listen [--run ID]                poll Telegram replies, act on the pending run
 gantry mcp [--list]                     register/list MCP servers for the active runner
+gantry cockpit                          open a tmux workspace pre-wired for this repo
+gantry daemon {install|uninstall|status} [--interval S]
+                                         24/7 auto-advance background job (launchd/systemd)
 gantry doctor                           environment / config health
 ```
 

@@ -13,6 +13,7 @@ Verbs:
   gantry doctor                      check the environment (runners, git, config)
   gantry listen                      poll Telegram replies, act on the pending run
   gantry docs --run ID                render a run's spec/design/plan/evidence/review docs
+  gantry cockpit                      open a tmux workspace pre-wired for this repo
 
 Target repo is $GANTRY_TARGET or the current working directory.
 """
@@ -281,10 +282,27 @@ def cmd_mcp(args) -> int:
     return _out(results)
 
 
+_WATCH_COLOR = {
+    "green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m", "reset": "\033[0m",
+}
+
+
+def _watch_color_family(status: str) -> str:
+    if status in ("shipped", "shipped_manually") or status.endswith("_complete") or status == "review_approved":
+        return "green"
+    if status in ("blocked",) or status.endswith("_escalated") or status.endswith("_failed"):
+        return "red"
+    if status.endswith("_running"):
+        return "yellow"
+    return ""
+
+
 def cmd_watch(args) -> int:
     """Live/one-shot dashboard of all runs in the target repo."""
     import time
+    from .advance import _icon, label
     store = RunStore(_target())
+    colorize = sys.stdout.isatty()
 
     def trunc(s: str, width: int) -> str:
         """Fixed-width truncation with ellipsis. Plain `{s:<width}` only pads
@@ -309,15 +327,47 @@ def cmd_watch(args) -> int:
             return f"{int(secs // 3600)}h ago"
         return f"{int(secs // 86400)}d ago"
 
+    def detail_for(run_id: str, status: str) -> str:
+        """Extra context for states that carry more than a label: retry
+        progress on blocked/checks_escalated, so a stuck run's actual
+        situation is visible without opening `gantry docs`."""
+        if status not in ("blocked", "checks_escalated"):
+            return ""
+        st = store.state(run_id)
+        blocked_on = st.get("blocked_on", "")
+        retry = st.get("checks_retry_count")
+        cfg_cap = load_config(_target()).checks.retry_checks
+        if retry is not None and blocked_on:
+            return f"{blocked_on} (retry {retry}/{cfg_cap})"
+        return blocked_on
+
+    def paint(text: str, status: str) -> str:
+        if not colorize:
+            return text
+        family = _watch_color_family(status)
+        if not family:
+            return text
+        return f"{_WATCH_COLOR[family]}{text}{_WATCH_COLOR['reset']}"
+
     def render() -> None:
+        cols = shutil.get_terminal_size().columns
         runs = store.list_runs()
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
-        print(f"{trunc('TITLE', 40)} {trunc('STATUS', 24)} UPDATED")
-        print("-" * 90)
+
+        status_w, detail_w, updated_w = 30, 22, 10
+        title_w = max(20, cols - status_w - detail_w - updated_w - 4)
+
+        print(f"{trunc('TITLE', title_w)} {trunc('STATUS', status_w)} "
+              f"{trunc('DETAIL', detail_w)} UPDATED")
+        print("-" * min(cols, title_w + status_w + detail_w + updated_w + 4))
         for r in runs:
             title = r["title"] or r["id"]
-            print(f"{trunc(title, 40)} {trunc(r['status'], 24)} {age(r['mtime'])}")
+            status_text = f"{_icon(r['status'])} {label(r['status'])}"
+            detail_text = detail_for(r["id"], r["status"])
+            row = (f"{trunc(title, title_w)} {trunc(status_text, status_w)} "
+                   f"{trunc(detail_text, detail_w)} {age(r['mtime'])}")
+            print(paint(row, r["status"]))
 
     if not args.live:
         render()
@@ -482,6 +532,23 @@ def _run_doc_list(store: RunStore, run_id: str) -> list[tuple[str, str]]:
     return out
 
 
+def _docs_fingerprint(store: RunStore, run_id: str) -> tuple:
+    """A cheap signature of "everything that could change what --follow
+    should show right now": each existing doc's mtime, sorted. A new doc
+    appearing (or an existing one being rewritten) changes this even when it
+    doesn't happen to coincide with a state.json write — the previous
+    (run_id, updated_at) key could miss that."""
+    mtimes = []
+    for filename, _ in DOC_ARTIFACTS:
+        p = store.artifact_path(run_id, filename)
+        if p.exists():
+            mtimes.append((filename, p.stat().st_mtime))
+    review_path = store.run_dir(run_id) / "review-result.json"
+    if review_path.exists():
+        mtimes.append(("review-result.json", review_path.stat().st_mtime))
+    return tuple(sorted(mtimes))
+
+
 def _fzf_pick(options: list[str], prompt: str) -> str | None:
     """Run fzf over a list of lines, return the picked line or None (Esc/no match/no fzf)."""
     fzf = shutil.which("fzf")
@@ -572,7 +639,18 @@ def cmd_docs(args) -> int:
     try:
         while True:
             run_id = resolve_run()
-            key = (run_id, store.state(run_id).get("updated_at") if run_id else None)
+            width = shutil.get_terminal_size().columns
+            # Re-render on: a different run being followed, a state.json write
+            # (updated_at), a new/rewritten doc appearing (fingerprint — catches
+            # a doc written mid-stage that doesn't coincide with a state write),
+            # or the terminal being resized (width) — glow re-wraps correctly
+            # per invocation, but the loop must actually decide to re-invoke it.
+            key = (
+                run_id,
+                store.state(run_id).get("updated_at") if run_id else None,
+                _docs_fingerprint(store, run_id) if run_id else None,
+                width,
+            )
             if key != last_key:
                 last_key = key
                 print("\033[2J\033[H", end="")  # clear screen, home cursor
@@ -611,7 +689,8 @@ def cmd_doctor(args) -> int:
     inside_herdr = os.environ.get("HERDR_ENV") == "1"
     herdr_status = ("active (inside pane)" if (herdr_installed and inside_herdr)
                     else "installed (run Gantry inside a herdr pane to activate)" if herdr_installed
-                    else "not installed — recommended cockpit: https://herdr.dev")
+                    else "not installed (optional enhanced integration — see README)")
+    tmux_available = bool(shutil.which("tmux"))
     return _out({
         "target": str(tgt),
         "config_present": (tgt / CONFIG_FILENAME).exists(),
@@ -624,8 +703,23 @@ def cmd_doctor(args) -> int:
         "mandated_skills": cfg.skills.enabled,
         "mcp_enabled": cfg.mcp.enabled,
         "mcp_available": sorted(cfg.mcp.servers.keys()),
+        "tmux": tmux_available if tmux_available else "not installed — required for `gantry cockpit`",
         "herdr": herdr_status,
     })
+
+
+def cmd_cockpit(args) -> int:
+    """Open (or reuse) a tmux workspace pre-wired for this target repo:
+    status bar on top, doc viewer + live claude session below."""
+    from .cockpit import attach, build_cockpit, session_name
+    if not shutil.which("tmux"):
+        return _out({"ok": False, "error": "tmux not found on PATH — required for `gantry cockpit`"})
+    tgt = _target()
+    result = build_cockpit(tgt)
+    if not result["ok"]:
+        return _out(result)
+    attach(session_name(tgt))
+    return 0  # unreachable on success — attach() execs into tmux
 
 
 def cmd_daemon(args) -> int:
@@ -732,6 +826,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interval", type=int, default=60,
                    help="seconds between ticks for a new install (default 60)")
     s.set_defaults(func=cmd_daemon)
+
+    s = sub.add_parser("cockpit", help="open a tmux workspace pre-wired for this repo "
+                                        "(status bar + doc viewer + live claude session)")
+    s.set_defaults(func=cmd_cockpit)
     return p
 
 

@@ -58,6 +58,10 @@ STATUS_LABELS = {
     "review_changes_requested": "Review requested changes — rebuilding",
     "review_escalated": "Review ESCALATED — human decision needed",
     "blocked": "Blocked — needs input",
+    "checks_escalated": "Checks ESCALATED — auto-retry exhausted",
+    "shipped": "Shipped — PR open",
+    "shipped_manually": "Shipped (manual) — PR open",
+    "ship_failed": "Ship FAILED — push/PR error",
 }
 
 
@@ -73,6 +77,9 @@ _STATUS_ICON = {
     "checks_escalated": "❗",       # ❗
     "review_approved": "✅",        # ✅
     "review_changes_requested": "\U0001f501",  # 🔁
+    "shipped": "\U0001f680",           # 🚀
+    "shipped_manually": "\U0001f680",  # 🚀
+    "ship_failed": "⚠️",            # ⚠️
 }
 
 
