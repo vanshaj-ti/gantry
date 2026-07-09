@@ -83,6 +83,12 @@ class RunStore:
         sessions = self._load(self.run_dir(run_id) / "sessions.json", {}) or {}
         return (sessions.get(stage) or {}).get("session_id")
 
+    def get_session(self, run_id: str, stage: str) -> dict[str, Any]:
+        """Full per-stage session record — runner, model, session_id — for
+        display (e.g. `gantry watch`'s detail column), not just the id."""
+        sessions = self._load(self.run_dir(run_id) / "sessions.json", {}) or {}
+        return sessions.get(stage) or {}
+
     def save_session(self, run_id: str, stage: str, **data: Any) -> None:
         path = self.run_dir(run_id) / "sessions.json"
         sessions = self._load(path, {}) or {}

@@ -118,6 +118,12 @@ class Engine:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
         self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume)
+        # Record runner/model before invoking (not just after, in save_session
+        # below) so a live *_running status shows what's actually driving it
+        # right now — session_id isn't known until the agent returns, but
+        # which runner/model is in flight is, and that's the useful part for
+        # `gantry watch`'s detail column while a stage is still running.
+        self.store.save_session(run_id, stage, model=sm.model, runner=runner.name)
         result = runner.run(
             cwd=work_dir,
             prompt=prompt,

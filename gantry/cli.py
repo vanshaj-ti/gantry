@@ -330,17 +330,26 @@ def cmd_watch(args) -> int:
 
     def detail_for(run_id: str, status: str) -> str:
         """Extra context for states that carry more than a label: retry
-        progress on blocked/checks_escalated, so a stuck run's actual
-        situation is visible without opening `gantry docs`."""
-        if status not in ("blocked", "checks_escalated"):
-            return ""
-        st = store.state(run_id)
-        blocked_on = st.get("blocked_on", "")
-        retry = st.get("checks_retry_count")
-        cfg_cap = load_config(_target()).checks.retry_checks
-        if retry is not None and blocked_on:
-            return f"{blocked_on} (retry {retry}/{cfg_cap})"
-        return blocked_on
+        progress on blocked/checks_escalated, or the agent/model/session
+        actually driving a *_running stage — so a stuck or in-flight run's
+        real situation is visible without opening `gantry docs`."""
+        if status in ("blocked", "checks_escalated"):
+            st = store.state(run_id)
+            blocked_on = st.get("blocked_on", "")
+            retry = st.get("checks_retry_count")
+            cfg_cap = load_config(_target()).checks.retry_checks
+            if retry is not None and blocked_on:
+                return f"{blocked_on} (retry {retry}/{cfg_cap})"
+            return blocked_on
+        if status.endswith("_running"):
+            stage = status.removesuffix("_running")
+            session = store.get_session(run_id, stage)
+            runner = session.get("runner", "")
+            model = session.get("model") or "default"
+            sid = session.get("session_id", "")
+            sid_short = f"{sid[:8]}…" if sid else ""
+            return f"{runner}/{model} {sid_short}".strip()
+        return ""
 
     def paint(text: str, status: str) -> str:
         if not colorize:
@@ -356,7 +365,7 @@ def cmd_watch(args) -> int:
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
 
-        status_w, detail_w, updated_w = 30, 22, 10
+        status_w, detail_w, updated_w = 30, 34, 10
         title_w = max(20, cols - status_w - detail_w - updated_w - 4)
 
         print(f"{trunc('TITLE', title_w)} {trunc('STATUS', status_w)} "
