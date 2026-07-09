@@ -22,9 +22,22 @@ from typing import Any
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.theme import Theme
 
 from .advance import label
 from .state import RunStore
+
+# rich's default markdown theme distinguishes heading levels mostly by
+# weight/underline (all one hue) — too subtle to tell apart at a glance in
+# a terminal pane. Force a distinct, high-contrast color per level instead.
+_MARKDOWN_THEME = Theme({
+    "markdown.h1": "bold cyan",
+    "markdown.h2": "bold yellow",
+    "markdown.h3": "bold green",
+    "markdown.h4": "bold blue",
+    "markdown.h5": "bold magenta",
+    "markdown.h6": "bold red",
+})
 
 DOC_ARTIFACTS = [
     ("intake.md", "Intake"),
@@ -262,7 +275,7 @@ def _render_markdown(content: str, width: int) -> list[list[tuple[str, int]]]:
     dependency at all."""
     buf = io.StringIO()
     console = Console(file=buf, width=max(20, width), force_terminal=True,
-                      color_system="256", legacy_windows=False)
+                      color_system="256", legacy_windows=False, theme=_MARKDOWN_THEME)
     try:
         console.print(Markdown(content))
     except Exception:
