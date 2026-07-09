@@ -577,10 +577,19 @@ def cmd_docs(args) -> int:
     --follow: auto-refreshes to whichever run is most recently touched,
     whenever that run's updated_at changes — no interaction, for a
     docs-viewer pane that should just always show what's currently happening.
+    --nav: persistent full-screen arrow-key navigator (curses) — run list ->
+    doc list -> doc content, →/Enter drills in, ←/Esc backs out, q quits.
+    Auto-refreshes in place without resetting your position. This is what
+    `gantry cockpit`'s doc-viewer pane runs.
     """
     import time
     store = RunStore(_target())
     glow = shutil.which("glow")
+
+    if args.nav:
+        from .docnav import run_navigator
+        run_navigator(store)
+        return 0
 
     def resolve_run() -> str | None:
         if args.run:
@@ -816,6 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--doc", help="a specific artifact filename (e.g. architecture-design.md); default: all")
     s.add_argument("--pick", action="store_true", help="interactive fzf nav: pick a run, then a doc, Esc to go back")
     s.add_argument("--follow", action="store_true", help="auto-refresh to whichever run is most recently touched")
+    s.add_argument("--nav", action="store_true",
+                   help="persistent arrow-key navigator (curses): run list -> doc list -> content")
     s.set_defaults(func=cmd_docs)
 
     s = sub.add_parser("watch", help="dashboard of all runs")

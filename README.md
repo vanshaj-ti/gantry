@@ -161,22 +161,30 @@ gantry cockpit                    # uses $GANTRY_TARGET, or run from inside the 
 ```
 +----------------------------------------------------------+
 |  status bar (gantry watch --live) — full width, thin      |
-+---------------------------+--------------------------------+
-|                           |                                |
-|  doc viewer (left)        |  claude session (right)         |
-|  gantry docs --follow     |  claude --dangerously-skip-...  |
-|                           |                                |
-+---------------------------+--------------------------------+
++-----------------------+------------------------------------+
+|                       |                                    |
+|  doc viewer           |  claude session (larger)            |
+|  gantry docs --nav    |  claude --dangerously-skip-...      |
+|                       |                                    |
++-----------------------+------------------------------------+
 ```
 
 - **Status bar** (top): `gantry watch --live` — colorized, icon-labeled per
   run (matches the same status vocabulary used in Telegram notifications),
   shows retry progress for `blocked`/`checks_escalated` runs.
-- **Doc viewer** (bottom-left): `gantry docs --follow` — auto-refreshes on a
-  new doc appearing, a stage transition, *or* a terminal resize (re-wraps to
-  the new width; it doesn't just sit there stale).
-- **Claude session** (bottom-right): a live `claude --dangerously-skip-permissions`
-  session cwd'd into the repo — your assistant for driving Gantry runs.
+- **Doc viewer** (bottom-left): `gantry docs --nav` — a persistent, full-screen
+  arrow-key navigator (curses): run list → doc list → doc content.
+  `↓`/`↑` move, `→`/Enter drills in, `←`/Esc backs out one level (quits from
+  the run list), `q` quits from anywhere. Auto-refreshes on a new run or doc
+  appearing without resetting your current position. Every render is a clean
+  full-screen redraw — no scroll-history leakage.
+- **Claude session** (bottom-right, gets the larger share of the split): a
+  live `claude --dangerously-skip-permissions` session cwd'd into the repo —
+  your assistant for driving Gantry runs.
+
+Mouse mode is enabled for the cockpit's tmux session only — click-drag pane
+borders to resize, click to switch focus — without touching your global tmux
+config.
 
 Re-running `gantry cockpit` against the same repo reuses the existing tmux
 session (named `gantry-<repo-name>`) instead of spawning a duplicate —

@@ -9,7 +9,7 @@ Layout (status bar thin, claude session gets the larger right-hand share):
     +-----------------------+------------------------------------+
     |                       |                                    |
     |  doc viewer           |  claude session (larger)            |
-    |  gantry docs --follow |  claude --dangerously-skip-...      |
+    |  gantry docs --nav    |  claude --dangerously-skip-...      |
     |                       |                                    |
     +-----------------------+------------------------------------+
 
@@ -93,7 +93,7 @@ def build_cockpit(target: Path) -> dict:
     _tmux("send-keys", "-t", status_pane,
           _pane_cmd(target, "gantry watch --live"), "Enter")
     _tmux("send-keys", "-t", docs_pane,
-          _pane_cmd(target, "gantry docs --follow"), "Enter")
+          _pane_cmd(target, "gantry docs --nav"), "Enter")
     _tmux("send-keys", "-t", claude_pane,
           _pane_cmd(target, "claude --dangerously-skip-permissions"), "Enter")
     _tmux("select-pane", "-t", claude_pane)
