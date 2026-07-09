@@ -180,10 +180,12 @@ gantry cockpit                    # uses $GANTRY_TARGET, or run from inside the 
   one level (quits from the run list), `q` quits from anywhere. Auto-refreshes
   on a new run or doc appearing without resetting your current position.
   Every render is a clean full-screen redraw — no scroll-history leakage.
-  Doc content is rendered through `glow` (word-wrapped to the pane's actual
-  width, headers/bold/italic/underline render with real emphasis, not
-  literal `**`/`#` characters) and falls back to plain unwrapped, unstyled
-  text if `glow` isn't installed.
+  Doc content is rendered through `glow` (run inside a pty so it emits its
+  real 256-color output, not the flat bold-only text it downgrades to when
+  piped — word-wrapped to the pane's actual width, headers/code/tables
+  render in color like glow does in a normal terminal, not literal `**`/`#`
+  characters) and falls back to plain unwrapped, unstyled text if `glow`
+  isn't installed.
 - **Claude session** (bottom-right, gets the larger share of the split): a
   live `claude --dangerously-skip-permissions` session cwd'd into the repo —
   your assistant for driving Gantry runs.

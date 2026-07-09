@@ -95,31 +95,34 @@ class TestContentLevel(unittest.TestCase):
 
 class TestRenderViaGlow(unittest.TestCase):
     """_render_via_glow now returns list[list[(text, attr)]] — one segment
-    list per line — so styled (bold/italic/underline) runs carry their own
-    curses attribute instead of the whole line being A_NORMAL."""
+    list per line — so styled (bold/italic/underline/color) runs carry their
+    own curses attribute instead of the whole line being A_NORMAL. The
+    actual glow invocation runs through a pty (_run_glow_via_pty) — that
+    function needs a real pty/subprocess and isn't unit tested here (covered
+    by manual real-terminal verification instead); these tests mock it at
+    the _run_glow_via_pty boundary."""
 
     def test_falls_back_to_splitlines_when_glow_not_on_path(self):
         with patch("shutil.which", return_value=None):
             lines = _render_via_glow("line1\nline2", 40)
         self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
 
-    def test_falls_back_when_glow_exits_nonzero(self):
+    def test_falls_back_when_pty_run_returns_none(self):
         with patch("shutil.which", return_value="/usr/bin/glow"), \
-             patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="")
+             patch("gantry.docnav._run_glow_via_pty", return_value=None):
             lines = _render_via_glow("line1\nline2", 40)
         self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
 
-    def test_falls_back_when_subprocess_raises(self):
+    def test_falls_back_when_render_raises(self):
         with patch("shutil.which", return_value="/usr/bin/glow"), \
-             patch("subprocess.run", side_effect=OSError("boom")):
+             patch("gantry.docnav._run_glow_via_pty", side_effect=OSError("boom")):
             lines = _render_via_glow("line1\nline2", 40)
         self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
 
-    def test_parses_bold_ansi_from_glow_output_into_segments(self):
+    def test_parses_bold_ansi_from_pty_output_into_segments(self):
         with patch("shutil.which", return_value="/usr/bin/glow"), \
-             patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="\x1b[1mHeading\x1b[0m\nplain")
+             patch("gantry.docnav._run_glow_via_pty",
+                   return_value="\x1b[1mHeading\x1b[0m\nplain"):
             lines = _render_via_glow("# Heading\n\nplain", 40)
         self.assertEqual(lines, [[("Heading", curses.A_BOLD)], [("plain", curses.A_NORMAL)]])
 
@@ -160,8 +163,22 @@ class TestParseAnsiLine(unittest.TestCase):
         self.assertEqual(segs, [("", curses.A_NORMAL)])
 
     def test_unknown_code_defaults_to_normal(self):
+        segs = _parse_ansi_line("\x1b[9mStruckthrough\x1b[0m")
+        self.assertEqual(segs, [("Struckthrough", curses.A_NORMAL)])
+
+    def test_256_color_foreground_without_real_curses_degrades_to_normal(self):
+        # Outside a real curses.wrapper, curses.COLOR_PAIRS doesn't exist
+        # at all — _color_pair_for degrades to A_NORMAL rather than
+        # crashing. This is the actual environment plain unittest runs in.
         segs = _parse_ansi_line("\x1b[38;5;200mColored\x1b[0m")
         self.assertEqual(segs, [("Colored", curses.A_NORMAL)])
+
+    def test_256_color_combined_with_bold_degrades_gracefully(self):
+        segs = _parse_ansi_line("\x1b[38;5;228;48;5;63;1mHeader\x1b[0m")
+        # Bold bit still applies even though color-pair registration is a
+        # no-op here (no real curses screen) — style bits and color are
+        # independent, only the latter needs curses initialization.
+        self.assertEqual(segs, [("Header", curses.A_BOLD)])
 
 
 if __name__ == "__main__":

@@ -14,9 +14,13 @@ curses needs one, so CI can't exercise the loop itself.
 from __future__ import annotations
 
 import curses
+import os
+import pty
 import re
+import select
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -141,61 +145,179 @@ def _draw_list(stdscr, title: str, items: list[str], selected: int) -> None:
 
 _ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
-# glow's "dark"/"light" glamour styles only ever emit these style codes for
-# markdown emphasis (verified against real output — no color codes in this
-# theme, just bold/italic/underline/reset) — a small, fully-known set, not a
-# general ANSI interpreter. Unknown codes are silently ignored (forward
-# compatible: a future glow version adding a code we don't map just renders
-# as A_NORMAL for that run, not a crash).
+# glow's "dark" glamour style emits only these style bits for markdown
+# emphasis (verified against real pty-captured output) — bold/italic/
+# underline, plus indexed 256-color foreground (38;5;N) and background
+# (48;5;N) for headers/code/tables. No truecolor (38;2;r;g;b) in this
+# version. A small, fully-known set, not a general ANSI interpreter —
+# unknown codes are silently ignored (forward compatible: a future glow
+# version adding a code we don't map just renders as A_NORMAL for that run,
+# not a crash).
 _SGR_ATTR = {"1": curses.A_BOLD, "3": curses.A_ITALIC, "4": curses.A_UNDERLINE}
+
+# (fg, bg) 256-color index pair -> registered curses color-pair number.
+# Populated lazily via _color_pair_for() the first time each combination is
+# seen — a single markdown style's palette is small (headers/code/quotes/
+# links, roughly a dozen combinations), well within curses.COLOR_PAIRS.
+_COLOR_PAIR_CACHE: dict[tuple[int, int], int] = {}
+_next_pair_number = 1
+
+
+def _color_pair_for(fg: int, bg: int) -> int:
+    """Register (or reuse) a curses color pair for this 256-color (fg, bg)
+    combination, returning the curses.color_pair() attribute bitmask.
+    Requires curses.start_color() to have already been called (done once in
+    _run_loop). No-op-safe if curses isn't initialized (e.g. under
+    unittest without a real screen) — falls back to A_NORMAL rather than
+    raising, since color is a visual nicety, not correctness-critical."""
+    global _next_pair_number
+    key = (fg, bg)
+    if key in _COLOR_PAIR_CACHE:
+        return curses.color_pair(_COLOR_PAIR_CACHE[key])
+    # COLOR_PAIRS only exists once initscr()/start_color() have run (e.g.
+    # inside curses.wrapper) — absent entirely under plain unittest, which
+    # has no real screen. Treat that the same as "no color available."
+    max_pairs = getattr(curses, "COLOR_PAIRS", 0)
+    if _next_pair_number >= max_pairs:
+        return curses.A_NORMAL  # no color support / palette exhausted
+    try:
+        curses.init_pair(_next_pair_number, fg, bg)
+    except curses.error:
+        return curses.A_NORMAL  # e.g. color_content unsupported in this term
+    _COLOR_PAIR_CACHE[key] = _next_pair_number
+    pair_attr = curses.color_pair(_next_pair_number)
+    _next_pair_number += 1
+    return pair_attr
 
 
 def _parse_ansi_line(line: str) -> list[tuple[str, int]]:
     """Split one line of glow's ANSI output into (text, curses_attr) segments,
-    tracking bold/italic/underline state across SGR codes within the line.
-    Pure function — no curses/tty needed, unit-testable directly."""
+    tracking bold/italic/underline/256-color foreground+background state
+    across SGR codes within the line. Pure function apart from the color-pair
+    side table (curses-dependent, but degrades to A_NORMAL when curses isn't
+    initialized) — unit-testable directly."""
     segments: list[tuple[str, int]] = []
-    attr = curses.A_NORMAL
+    style_bits = curses.A_NORMAL
+    fg = bg = -1  # -1 == default/unset (curses convention for "terminal default")
     pos = 0
+
+    def current_attr() -> int:
+        if fg == -1 and bg == -1:
+            return style_bits
+        return style_bits | _color_pair_for(fg, bg)
+
     for m in _ANSI_SGR_RE.finditer(line):
         text = line[pos:m.start()]
         if text:
-            segments.append((text, attr))
+            segments.append((text, current_attr()))
         pos = m.end()
         codes = m.group(1).split(";") if m.group(1) else ["0"]
-        for code in codes:
+        i = 0
+        while i < len(codes):
+            code = codes[i]
             if code in ("", "0"):
-                attr = curses.A_NORMAL
+                style_bits, fg, bg = curses.A_NORMAL, -1, -1
             elif code in _SGR_ATTR:
-                attr |= _SGR_ATTR[code]
+                style_bits |= _SGR_ATTR[code]
+            elif code == "38" and i + 2 < len(codes) and codes[i + 1] == "5":
+                fg = int(codes[i + 2]) if codes[i + 2].isdigit() else -1
+                i += 2
+            elif code == "48" and i + 2 < len(codes) and codes[i + 1] == "5":
+                bg = int(codes[i + 2]) if codes[i + 2].isdigit() else -1
+                i += 2
+            i += 1
     tail = line[pos:]
     if tail:
-        segments.append((tail, attr))
+        segments.append((tail, current_attr()))
     return segments or [("", curses.A_NORMAL)]
+
+
+def _run_glow_via_pty(path: str, width: int, timeout: float = 10.0) -> str | None:
+    """Run glow with its stdout attached to a real pty and return the raw
+    ANSI output, or None on any failure.
+
+    glow detects whether its stdout is a real terminal and silently
+    downgrades to flat bold-only styling (no color at all) when it isn't —
+    confirmed directly: piping through subprocess.run's captured stdout
+    (a pipe, not a tty) discards every 256-color code glow's `-s dark` style
+    would otherwise emit. A pty makes glow believe it's talking to a real
+    terminal, which is the only way to get its actual color output.
+
+    Must drain the pty's master fd WHILE waiting for the process, not after
+    — glow can fill the pty's kernel buffer and block on write() while we'd
+    otherwise be blocked on proc.wait(), deadlocking both sides.
+    """
+    glow = shutil.which("glow")
+    if not glow:
+        return None
+    master, slave = pty.openpty()
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [glow, "-w", str(max(20, width)), "-s", "dark", path],
+            stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, close_fds=True,
+        )
+        os.close(slave)
+        slave = -1  # sentinel: already closed, don't double-close in finally
+        chunks: list[bytes] = []
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([master], [], [], remaining)
+            if not ready:
+                break
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break  # child closed its end of the pty
+            if not chunk:
+                break
+            chunks.append(chunk)
+        proc.wait(timeout=2)
+        return b"".join(chunks).decode(errors="replace")
+    except Exception:
+        if proc is not None:
+            proc.kill()
+        return None
+    finally:
+        if slave != -1:
+            try:
+                os.close(slave)
+            except OSError:
+                pass
+        try:
+            os.close(master)
+        except OSError:
+            pass
 
 
 def _render_via_glow(content: str, width: int) -> list[list[tuple[str, int]]]:
     """Word-wrap markdown content at `width` via glow, parsed into
     (text, curses_attr) segments per line so headers/bold/italic/underline
-    render with real curses attributes instead of literal `**`/`#`
-    characters. Falls back to plain unstyled splitlines (still segment-list
-    shaped, just one A_NORMAL segment per line) if glow isn't on PATH or the
-    call fails for any reason."""
-    glow = shutil.which("glow")
-    if not glow:
-        return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
+    AND real 256-color styling render with matching curses attributes
+    instead of literal `**`/`#` characters or flat bold-only text. Falls
+    back to plain unstyled splitlines (still segment-list shaped, just one
+    A_NORMAL segment per line) if glow isn't on PATH or the call fails for
+    any reason."""
+    plain_fallback = [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
+    if not shutil.which("glow"):
+        return plain_fallback
     try:
-        # -s dark pinned explicitly (not "auto") for determinism — auto's
-        # terminal-detection has nothing meaningful to detect inside a
-        # subprocess call from within curses.
-        proc = subprocess.run([glow, "-w", str(max(20, width)), "-s", "dark", "-"],
-                              input=content, text=True, capture_output=True, timeout=10)
-        if proc.returncode != 0 or not proc.stdout:
-            return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
-        lines = proc.stdout.splitlines() or [""]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write(content)
+            path = f.name
+        try:
+            output = _run_glow_via_pty(path, width)
+        finally:
+            os.unlink(path)
+        if not output:
+            return plain_fallback
+        lines = output.splitlines() or [""]
         return [_parse_ansi_line(ln) for ln in lines]
     except Exception:
-        return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
+        return plain_fallback
 
 
 def _draw_content(stdscr, title: str, lines: list[list[tuple[str, int]]], scroll: int) -> int:
@@ -224,6 +346,14 @@ def _draw_content(stdscr, title: str, lines: list[list[tuple[str, int]]], scroll
 
 def _run_loop(stdscr, store: RunStore) -> None:
     curses.curs_set(0)
+    # Needed before init_pair()/color_pair() work at all (_color_pair_for,
+    # used by the glow-ANSI parser to render real 256-color markdown
+    # styling). Must come before use_default_colors() below.
+    try:
+        curses.start_color()
+    except curses.error:
+        pass  # terminal doesn't support color — glow rendering falls back
+              # to style bits only (bold/italic/underline), no crash
     # Without this, ncurses paints its own default background (often a flat
     # grey/black block) instead of inheriting the real terminal/tmux pane
     # background — reads as a mismatched "overlay" against the rest of the
