@@ -2,16 +2,19 @@
 inherently with gantry (no external tool dependency, unlike the optional
 herdr integration — see scripts/gantry-herdr.sh and README's herdr section).
 
-Layout:
+Layout (status bar thin, claude session gets the larger right-hand share):
 
     +----------------------------------------------------------+
     |  status bar (gantry watch --live) — full width, thin     |
-    +---------------------------+--------------------------------+
-    |                           |                                |
-    |  doc viewer (left)        |  claude session (right)         |
-    |  gantry docs --follow     |  claude --dangerously-skip-...  |
-    |                           |                                |
-    +---------------------------+--------------------------------+
+    +-----------------------+------------------------------------+
+    |                       |                                    |
+    |  doc viewer           |  claude session (larger)            |
+    |  gantry docs --follow |  claude --dangerously-skip-...      |
+    |                       |                                    |
+    +-----------------------+------------------------------------+
+
+Mouse mode is enabled for this session only (click-drag pane borders to
+resize, click to switch focus) — doesn't touch the user's global tmux config.
 
 Re-running `gantry cockpit` against the same target reuses the existing tmux
 session (by name) instead of spawning a duplicate.
@@ -21,7 +24,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-STATUS_BAR_HEIGHT = 6
+STATUS_BAR_HEIGHT = 3
+CLAUDE_PANE_PERCENT = 60  # right pane (claude session) gets the larger share
 
 
 def session_name(target: Path) -> str:
@@ -63,10 +67,18 @@ def build_cockpit(target: Path) -> dict:
         return {"ok": False, "error": proc.stderr.strip() or "tmux split-window (status) failed"}
 
     # Split the bottom pane left/right: doc viewer left, claude session right.
-    proc = _tmux("split-window", "-t", f"{name}.1", "-h", "-p", "50")
+    # `-p N` on the ORIGINAL pane gives the NEW pane N% — the split target
+    # (.1, the doc viewer) is the original, so the new (claude) pane gets
+    # CLAUDE_PANE_PERCENT.
+    proc = _tmux("split-window", "-t", f"{name}.1", "-h", "-p", str(CLAUDE_PANE_PERCENT))
     if proc.returncode != 0:
         _tmux("kill-session", "-t", name)
         return {"ok": False, "error": proc.stderr.strip() or "tmux split-window (left/right) failed"}
+
+    # Per-session mouse mode: click-drag pane borders to resize, click to
+    # switch focus. Scoped to this session only — doesn't touch the user's
+    # global tmux config/other sessions.
+    _tmux("set-option", "-t", name, "mouse", "on")
 
     panes = _tmux("list-panes", "-t", name, "-F", "#{pane_id} #{pane_top} #{pane_left}")
     pane_lines = [ln.split() for ln in panes.stdout.strip().splitlines() if ln.strip()]
