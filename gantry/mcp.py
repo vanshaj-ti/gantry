@@ -1,11 +1,13 @@
 """MCP server registration for the active agent runner.
 
 Gantry doesn't run MCP servers itself — it ensures the agent runner (Claude Code /
-Cursor) has them registered, so the agent can call their tools during a stage.
+Cursor / Codex) has them registered, so the agent can call their tools during a stage.
 
-Two registration paths:
+Three registration paths:
   - claude-code: `claude mcp add <name> ...` (idempotent; we check `claude mcp list` first)
   - cursor-cli : write/merge the standard mcpServers JSON into .cursor/mcp.json
+  - codex-cli  : `codex mcp add <name> -- <command> <args...>` (idempotent; we check
+    `codex mcp list` first)
 
 Curated servers (opt-in via [mcp].enabled):
   - codebase-memory : structural code intelligence (architecture, call graph,
@@ -59,10 +61,34 @@ def _register_cursor(name: str, srv: MCPServer, target: Path) -> dict[str, Any]:
     return {"server": name, "runner": "cursor-cli", "status": "registered", "path": str(cfg_path)}
 
 
-def ensure_mcp_for_stage(cfg: GantryConfig, stage: str, target: Path) -> list[dict[str, Any]]:
+def _codex_registered(name: str) -> bool:
+    try:
+        proc = subprocess.run(["codex", "mcp", "list"], capture_output=True, text=True, timeout=30)
+        return name in (proc.stdout + proc.stderr)
+    except Exception:
+        return False
+
+
+def _register_codex(name: str, srv: MCPServer) -> dict[str, Any]:
+    if _codex_registered(name):
+        return {"server": name, "runner": "codex-cli", "status": "already-registered"}
+    override = srv.register.get("codex-cli")
+    if override:
+        proc = subprocess.run(override, shell=True, capture_output=True, text=True, timeout=120)
+        cmd_display = override
+    else:
+        cmd = ["codex", "mcp", "add", name, "--", srv.command, *srv.args]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        cmd_display = " ".join(cmd)
+    return {"server": name, "runner": "codex-cli", "command": cmd_display,
+            "status": "registered" if proc.returncode == 0 else "failed",
+            "output": (proc.stdout + proc.stderr)[-400:]}
+
+
+def ensure_mcp_for_stage(cfg: GantryConfig, stage: str, runner: str, target: Path) -> list[dict[str, Any]]:
     """Register every enabled MCP server that applies to this stage, for the
-    active runner. Idempotent; safe to call before each stage. No-op if none enabled."""
-    runner = cfg.agent.runner
+    given (already-resolved, per-stage) runner name. Idempotent; safe to call
+    before each stage. No-op if none enabled."""
     results = []
     for name, srv in cfg.mcp.for_stage(stage).items():
         try:
@@ -70,6 +96,8 @@ def ensure_mcp_for_stage(cfg: GantryConfig, stage: str, target: Path) -> list[di
                 results.append(_register_claude(name, srv))
             elif runner == "cursor-cli":
                 results.append(_register_cursor(name, srv, target))
+            elif runner == "codex-cli":
+                results.append(_register_codex(name, srv))
             else:
                 results.append({"server": name, "runner": runner, "status": "unsupported-runner"})
         except Exception as exc:

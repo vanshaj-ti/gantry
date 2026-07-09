@@ -84,6 +84,7 @@ class StageModel:
     model: str
     max_turns: int = 60
     plan_mode: bool = False
+    runner: str = ""    # "" = inherit [agent].runner; else "claude-code"|"cursor-cli"|"codex-cli"
 
 
 @dataclass
@@ -213,6 +214,11 @@ class GantryConfig:
         # sensible default so a bare config still runs
         return StageModel(model="", max_turns=60, plan_mode=(stage == "plan"))
 
+    def runner_for(self, stage: str) -> str:
+        """Resolve which agent runner drives this stage: a per-stage override
+        in [models.<stage>].runner, falling back to [agent].runner."""
+        return self.model_for(stage).runner or self.agent.runner
+
     def artifact_for(self, stage: str) -> str:
         return STAGE_ARTIFACTS.get(stage, f"{stage}.md")
 
@@ -227,6 +233,7 @@ def _coerce_models(raw: dict[str, Any]) -> dict[str, StageModel]:
                 model=spec.get("model", ""),
                 max_turns=int(spec.get("max_turns", 60)),
                 plan_mode=bool(spec.get("plan_mode", stage == "plan")),
+                runner=spec.get("runner", ""),
             )
     return out
 

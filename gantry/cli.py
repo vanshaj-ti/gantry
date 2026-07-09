@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -167,21 +168,24 @@ def cmd_ship(args) -> int:
 
     wt = eng.work_dir(run_id)
     branch = branch_name(run_id)
-    title = state.get("title", run_id)
 
-    commit_res = commit_all(wt, f"{title}\n\ngantry run {run_id}")
+    from .shipmeta import draft_ship_meta
+    meta = draft_ship_meta(eng.store, run_id, eng.cfg, wt)
+    title, body, remote_branch = meta["title"], meta["body"], meta["branch_slug"]
+
+    commit_res = commit_all(wt, title)
     if not commit_res["ok"]:
         return _out({"ok": False, "stage": "commit", **commit_res})
 
-    push_res = push(wt, branch)
+    push_res = push(wt, branch, remote_branch=remote_branch)
     if not push_res["ok"]:
         return _out({"ok": False, "stage": "push", **push_res})
 
-    body = f"Automated PR from Gantry run `{run_id}`.\n\nSee `.agent-runs/{run_id}/` for the full trail (plan, build summary, evidence report, independent review verdict)."
-    pr_res = create_pr(wt, branch, eng.cfg.git.base_branch, title, body)
+    pr_res = create_pr(wt, remote_branch, eng.cfg.git.base_branch, title, body)
     eng.store.update_state(run_id, status="shipped" if pr_res["ok"] else "ship_failed",
                            pr_url=pr_res.get("url"))
-    return _out({"ok": pr_res["ok"], "commit": commit_res, "push": push_res, "pr": pr_res})
+    return _out({"ok": pr_res["ok"], "commit": commit_res, "push": push_res, "pr": pr_res,
+                 "branch": remote_branch, "title": title})
 
 
 def cmd_status(args) -> int:
@@ -213,6 +217,69 @@ def cmd_advance(args) -> int:
     return _out(advance_run(eng, args.run))
 
 
+# Statuses where a single-run loop should stop: the run is done, needs a human,
+# or has errored. Mirrors advance.py's AUTO_TRANSITIONS gate but from the other
+# side — these are exactly the statuses NOT in AUTO_TRANSITIONS that a bare
+# `advance --run` tick would refuse to touch, plus terminal ship states.
+_LOOP_STOP_SUFFIXES = ("_failed", "_approved", "_escalated", "_shipped")
+_LOOP_STOP_PREFIXES = ("awaiting_", "shipped")
+_LOOP_STOP_EXACT = {"blocked"}
+
+
+def _is_loop_terminal(status: str) -> bool:
+    if status in _LOOP_STOP_EXACT:
+        return True
+    if any(status.endswith(suf) for suf in _LOOP_STOP_SUFFIXES):
+        return True
+    if any(status.startswith(pre) for pre in _LOOP_STOP_PREFIXES):
+        return True
+    return False
+
+
+def cmd_loop(args) -> int:
+    """Repeatedly tick the pipeline (in-process, foreground) instead of relying
+    on an external cron calling `gantry advance --all` on a timer. With --run,
+    stops as soon as that run reaches a human-gated or terminal state; without
+    it, loops every run forever (Ctrl-C to stop), same transitions `--all` drives."""
+    from .advance import advance_all, advance_run, notify_message
+    tgt = _target()
+    cfg = load_config(tgt)
+    store = RunStore(tgt)
+    ticks = 0
+    print(f"gantry loop: interval={args.interval}s"
+          + (f" run={args.run}" if args.run else " (all runs)"), flush=True)
+    try:
+        while True:
+            ticks += 1
+            if args.run:
+                status = store.state(args.run).get("status", "")
+                print(f"[tick {ticks}] {args.run}: {status}", flush=True)
+                if _is_loop_terminal(status):
+                    print(f"gantry loop: stopping, reached {status}", flush=True)
+                    return 0
+                eng = Engine(tgt, cfg)
+                result = advance_run(eng, args.run)
+                print(f"[tick {ticks}] advance -> {result}", flush=True)
+            else:
+                results = advance_all(tgt, cfg)
+                if results:
+                    notifier = get_notifier(cfg.notify)
+                    for r in results:
+                        if r.get("action") == "skipped_locked":
+                            continue
+                        st = store.state(r["run_id"]).get("status", "")
+                        _notify(store, notifier, r["run_id"],
+                               notify_message(store, r["run_id"], st, r), meta=r)
+                print(f"[tick {ticks}] advance --all -> {len(results)} run(s) touched", flush=True)
+            if args.max_ticks and ticks >= args.max_ticks:
+                print(f"gantry loop: stopping, reached max-ticks={args.max_ticks}", flush=True)
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\ngantry loop: interrupted", flush=True)
+        return 130
+
+
 def cmd_mcp(args) -> int:
     from .mcp import ensure_mcp_for_stage
     tgt = _target()
@@ -223,7 +290,8 @@ def cmd_mcp(args) -> int:
                      "runner": cfg.agent.runner})
     seen, results = set(), []
     for stage in ["plan", "build", "evidence", "review"]:
-        for r in ensure_mcp_for_stage(cfg, stage, tgt):
+        runner = cfg.runner_for(stage)
+        for r in ensure_mcp_for_stage(cfg, stage, runner, tgt):
             key = (r.get("server"), r.get("status"))
             if key not in seen:
                 seen.add(key)
@@ -578,6 +646,16 @@ def cmd_doctor(args) -> int:
     })
 
 
+def cmd_daemon(args) -> int:
+    from .daemon import daemon_status, install_daemon, uninstall_daemon
+    if args.daemon_action == "install":
+        tgt = _target()
+        return _out(install_daemon(tgt, interval_seconds=args.interval))
+    if args.daemon_action == "uninstall":
+        return _out(uninstall_daemon())
+    return _out(daemon_status())
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gantry", description="Project-agnostic autonomous build pipeline")
     p.add_argument("--version", action="version", version=f"gantry {__version__}")
@@ -634,6 +712,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="tick every run (poller mode); notifies on change")
     s.set_defaults(func=cmd_advance)
 
+    s = sub.add_parser("loop", help="repeatedly tick the pipeline until terminal/human-gated "
+                                     "(foreground alternative to an external cron)")
+    s.add_argument("--run", help="loop a single run only (stops once it needs a human or finishes); "
+                                 "omit to loop every run like the cron poller does")
+    s.add_argument("--interval", type=int, default=15, help="seconds between ticks (default 15)")
+    s.add_argument("--max-ticks", type=int, default=0,
+                   help="stop after this many ticks regardless of state (0 = unbounded)")
+    s.set_defaults(func=cmd_loop)
+
     s = sub.add_parser("doctor", help="check environment")
     s.set_defaults(func=cmd_doctor)
 
@@ -655,6 +742,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("mcp", help="register/list MCP servers for the active runner")
     s.add_argument("--list", action="store_true", help="show enabled/available servers (default: register)")
     s.set_defaults(func=cmd_mcp)
+
+    s = sub.add_parser("daemon", help="install/uninstall a 24/7 background job "
+                                       "running `gantry advance --all` (launchd on "
+                                       "macOS, systemd user timer on Linux)")
+    s.add_argument("daemon_action", choices=["install", "uninstall", "status"])
+    s.add_argument("--interval", type=int, default=60,
+                   help="seconds between ticks for a new install (default 60)")
+    s.set_defaults(func=cmd_daemon)
     return p
 
 

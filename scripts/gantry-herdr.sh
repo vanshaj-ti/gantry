@@ -16,14 +16,21 @@
 # spawning duplicates.
 #
 # Usage: gantry-herdr [target-repo-path]
-#   Defaults to ~/edupaid if no path given.
+#   Target defaults to $GANTRY_TARGET if set; otherwise it's required.
 set -euo pipefail
 
-TARGET="${1:-$HOME/edupaid}"
+GANTRY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_ACTIVATE="$GANTRY_ROOT/.venv/bin/activate"
+
+TARGET="${1:-${GANTRY_TARGET:-}}"
+if [ -z "$TARGET" ]; then
+  echo "Usage: gantry-herdr <target-repo-path>" >&2
+  echo "  (or export GANTRY_TARGET and omit the argument)" >&2
+  exit 1
+fi
 TARGET="$(cd "$TARGET" && pwd)"   # normalize to absolute path
 REPO_NAME="$(basename "$TARGET")"
 LABEL="gantry: $REPO_NAME"
-VENV_ACTIVATE="$HOME/gantry/.venv/bin/activate"
 
 if [ ! -f "$TARGET/gantry.toml" ]; then
   echo "warning: $TARGET/gantry.toml not found — 'gantry doctor' will show config_present=false" >&2

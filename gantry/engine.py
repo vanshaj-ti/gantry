@@ -99,7 +99,7 @@ class Engine:
         if not self.store.exists(run_id):
             raise ValueError(f"Run not found: {run_id}")
         sm = self.cfg.model_for(stage)
-        runner = get_runner(self.cfg.agent.runner)
+        runner = get_runner(self.cfg.runner_for(stage))
 
         prompt = self.render_prompt(stage, run_id)
         if resume:
@@ -113,7 +113,7 @@ class Engine:
         # Register any enabled MCP servers for this stage before invoking the agent.
         from .mcp import ensure_mcp_for_stage
         work_dir = self.work_dir(run_id)
-        mcp_results = ensure_mcp_for_stage(self.cfg, stage, work_dir)
+        mcp_results = ensure_mcp_for_stage(self.cfg, stage, runner.name, work_dir)
         if mcp_results:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 

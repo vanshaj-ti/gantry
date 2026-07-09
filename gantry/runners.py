@@ -4,9 +4,10 @@ An AgentRunner turns a stage invocation (prompt, model, session, plan-mode,
 skip-permissions) into a concrete CLI command for a specific agent tool, runs
 it, and parses the JSON result into a normalized RunnerResult.
 
-Two runners ship in v1: claude-code and cursor-cli. Their command surfaces are
-nearly identical; the adapter is essentially a flag-mapping table plus shared
-JSON parsing. Add a runner by subclassing AgentRunner and registering it.
+Three runners ship: claude-code, cursor-cli, and codex-cli. claude-code and
+cursor-cli emit a single JSON blob on stdout and share the base `parse()`.
+codex-cli emits JSONL (one event per line) and overrides `run()` with its own
+parser. Add a runner by subclassing AgentRunner and registering it in _RUNNERS.
 """
 from __future__ import annotations
 
@@ -135,9 +136,95 @@ class CursorCliRunner(AgentRunner):
         return cmd
 
 
+class CodexRunner(AgentRunner):
+    """codex CLI (OpenAI, ChatGPT-auth). Unlike the other two runners, `codex
+    exec --json` streams JSONL events rather than a single JSON blob, so this
+    overrides `run()` with its own parser instead of reusing the base one."""
+    name = "codex-cli"
+
+    def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
+                       output_format, session_name, max_turns) -> list[str]:
+        # codex exec [resume <id>] --json -m <model> [--dangerously-bypass-approvals-and-sandbox] <prompt>
+        if session_id:
+            cmd = ["codex", "exec", "resume", session_id]
+        else:
+            cmd = ["codex", "exec"]
+        cmd += ["--json", "--skip-git-repo-check"]
+        if model:
+            cmd += ["-m", model]
+        if skip_permissions:
+            cmd += ["--dangerously-bypass-approvals-and-sandbox"]
+        # codex has no dedicated plan-mode flag or --max-turns/--name; let the
+        # prompt drive planning, same approach ClaudeCodeRunner uses.
+        cmd += [prompt]
+        return cmd
+
+    def run(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        model: str,
+        session_id: str | None = None,
+        plan_mode: bool = False,
+        skip_permissions: bool = True,
+        output_format: str = "json",
+        session_name: str = "gantry",
+        max_turns: int = 60,
+        timeout: int = 900,
+    ) -> RunnerResult:
+        cmd = self.build_command(
+            prompt=prompt, model=model, session_id=session_id, plan_mode=plan_mode,
+            skip_permissions=skip_permissions, output_format=output_format,
+            session_name=session_name, max_turns=max_turns,
+        )
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        return self._parse_jsonl(proc.stdout, proc.stderr, proc.returncode)
+
+    def _parse_jsonl(self, stdout: str, stderr: str, exit_code: int) -> RunnerResult:
+        thread_id: str | None = None
+        last_message: str | None = None
+        saw_turn_completed = False
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            etype = event.get("type")
+            if etype == "thread.started":
+                thread_id = event.get("thread_id")
+            elif etype == "item.completed":
+                item = event.get("item") or {}
+                if item.get("type") == "agent_message":
+                    last_message = item.get("text")
+            elif etype == "turn.completed":
+                saw_turn_completed = True
+
+        is_error = exit_code != 0 or not saw_turn_completed or last_message is None
+        raw = {
+            "type": "result",
+            "is_error": is_error,
+            "result": last_message if last_message is not None else stdout[:4000],
+            "session_id": thread_id,
+            "exit_code": exit_code,
+        }
+        return RunnerResult(
+            ok=not is_error,
+            session_id=thread_id,
+            raw=raw,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+        )
+
+
 _RUNNERS: dict[str, type[AgentRunner]] = {
     ClaudeCodeRunner.name: ClaudeCodeRunner,
     CursorCliRunner.name: CursorCliRunner,
+    CodexRunner.name: CodexRunner,
 }
 
 

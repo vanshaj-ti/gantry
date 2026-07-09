@@ -4,9 +4,9 @@
 
 Gantry wraps a spec → design → plan → build → evidence → review pipeline into a
 single CLI. You point it at any git repo, describe a task, and it drives a coding
-agent (Claude Code or Cursor) through the stages — pausing for human review where
-it matters, running deterministic guardrails, and getting an independent LLM review
-before anything ships.
+agent (Claude Code, Cursor, or Codex) through the stages — pausing for human review
+where it matters, running deterministic guardrails, and getting an independent LLM
+review before anything ships.
 
 The engine hardcodes no project, model, or tool. Everything specific to a repo
 lives in that repo's `gantry.toml`. Agent tools are pluggable adapters.
@@ -23,8 +23,31 @@ spec ──▶ design ──▶ plan ──▶ build ──▶ evidence ──�
 pip install -e .        # from a clone; publishes as `gantry-cli`, binary `gantry`
 ```
 
-Requires Python ≥ 3.11 and at least one agent runner on PATH (`claude` or
-`cursor-agent`). Check with `gantry doctor`.
+Requires Python ≥ 3.11 and at least one agent runner CLI on PATH: `claude`
+(Claude Code), `cursor-agent` (Cursor), or `codex` (Codex). Check with
+`gantry doctor`.
+
+**Other tools used by specific commands** (all optional — Gantry degrades
+gracefully without them):
+
+| Tool | Used by |
+|---|---|
+| `gh` | `gantry ship` (opens the PR) |
+| `fzf` | `gantry docs --pick` (interactive picker; falls back to non-interactive without it) |
+| `glow` | `gantry docs` (pretty-prints markdown; falls back to plain `print` without it) |
+| `herdr` | optional cockpit integration, see below |
+
+## Environment variables
+
+| Variable | Used for | Required? |
+|---|---|---|
+| `GANTRY_TARGET` | Which repo Gantry operates on. Falls back to the current working directory if unset. | No |
+| `GANTRY_TELEGRAM_BOT_TOKEN` / `GANTRY_TELEGRAM_CHAT_ID` | `[notify] backend = "telegram"` — sending/receiving pipeline notifications via a Telegram bot. | Only if using the `telegram` notify backend |
+
+```bash
+export GANTRY_TARGET=~/my-project
+gantry doctor
+```
 
 ## Quickstart
 
@@ -56,9 +79,12 @@ a human-review gate — advance with `gantry approve`, send back with
 runner with the stage's prompt. The `review` stage feeds the diff + artifacts to an
 independent LLM and parses an `APPROVE` / `REQUEST_CHANGES` / `ESCALATE` verdict.
 
-**Runners (pluggable).** `claude-code` and `cursor-cli` ship in v1. They share a
-near-identical command surface; the adapter is a flag-mapping table plus shared
-JSON-result parsing. Add one by subclassing `AgentRunner`.
+**Runners (pluggable).** `claude-code`, `cursor-cli`, and `codex-cli` ship in v1.
+Pick a runner globally via `[agent] runner = "..."`, or override per-stage via
+`[models.<stage>] runner = "..."` — any of the three can drive any stage,
+including an independent runner for `[review]` (e.g. build with `claude-code`,
+review with `codex-cli`, for a genuinely independent second opinion). Add a new
+runner by subclassing `AgentRunner`.
 
 **Guardrails (layered, deterministic).**
 - *Scope guard* (built-in): forbidden path globs + optional plan-scope enforcement
@@ -78,14 +104,19 @@ under `.agent-runs/<run_id>/` (artifacts, logs, `state.json`, sessions), so runs
 survive across invocations and machines.
 
 **Git isolation.** Each run gets its own worktree at
-`.worktrees/gantry/<run_id>` on a fresh branch `gantry/<run_id>` off
+`.worktrees/gantry/<run_id>` on a local branch `gantry/<run_id>` off
 `[git].base_branch` — agent stages, checks, and review all execute there, never
 in the main checkout. `.agent-runs/` is symlinked into the worktree so stage
 prompts see it at the expected relative path. `gantry ship --run ID` commits,
 pushes, and opens a PR (via `gh`) once a run reaches `review_approved`; it never
-fires automatically. Worktrees are cleaned up the same way any other
-`.worktrees/`-based branch is in this convention (e.g. a merged-branch prune
-cron) — Gantry does not delete them itself.
+fires automatically. The pushed/PR branch is NOT `gantry/<run_id>` — ship drafts
+a real title, body, and short branch slug (e.g. `chore/remove-dead-webhook`)
+from the run's own artifacts (spec, build summary, evidence) so the PR reads
+like normal engineering work, with no mention of the pipeline that produced it.
+The `gantry/<run_id>` name stays local-only, for worktree bookkeeping. Worktrees
+are cleaned up the same way any other `.worktrees/`-based branch is in this
+convention (e.g. a merged-branch prune cron) — Gantry does not delete them
+itself.
 
 ## Recommended cockpit: herdr
 
@@ -117,14 +148,17 @@ when it detects `HERDR_ENV=1`:
 one command — no manual pane setup. Install once:
 
 ```bash
-ln -s ~/gantry/scripts/gantry-herdr.sh ~/.local/bin/gantry-herdr
+ln -s /path/to/gantry/scripts/gantry-herdr.sh ~/.local/bin/gantry-herdr
 chmod +x ~/.local/bin/gantry-herdr
 ```
 
 Then:
 
 ```bash
-gantry-herdr ~/some-repo   # defaults to ~/edupaid if omitted
+gantry-herdr ~/some-repo          # explicit target
+# or:
+export GANTRY_TARGET=~/some-repo
+gantry-herdr                      # falls back to $GANTRY_TARGET
 ```
 
 Opens (or refocuses, if one already exists for that repo) a workspace with two
@@ -164,7 +198,7 @@ Generated by `gantry init`. Key sections:
 | Section | Purpose |
 |---|---|
 | `stages` | which stages run, in order |
-| `[agent]` | runner (`claude-code` / `cursor-cli`), skip-permissions |
+| `[agent]` | runner (`claude-code` / `cursor-cli` / `codex-cli`), skip-permissions |
 | `[models.<stage>]` | per-stage model + max_turns |
 | `[review]` | reviewer runner/model + verdict keywords |
 | `[scope]` | forbidden path globs, plan-scope enforcement |
@@ -187,8 +221,16 @@ gantry approve --run ID --stage S       pass a human-review gate, advance
 gantry revise --run ID --stage S "…"    send a stage back with comments
 gantry ship --run ID                    commit + push + open a PR (review_approved only)
 gantry advance [--run ID | --all]       drive the pipeline forward one tick
+gantry loop [--run ID] [--interval S] [--max-ticks N]
+                                         repeatedly tick in-process (foreground
+                                         alternative to an external cron)
 gantry status [--run ID]                run state (json)
 gantry watch [--live]                   dashboard of all runs
+gantry docs [--run ID] [--pick] [--doc D] [--follow]
+                                         render a run's stage docs (default: most recent run;
+                                         via glow if installed)
+gantry listen [--run ID]                poll Telegram replies, act on the pending run
+gantry mcp [--list]                     register/list MCP servers for the active runner
 gantry doctor                           environment / config health
 ```
 

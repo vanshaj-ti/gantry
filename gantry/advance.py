@@ -1,8 +1,7 @@
 """Auto-advance: drive the pipeline forward one tick based on run state.
 
-This is the engine-side of what used to be edupaid-auto-advancer.py. It inspects
-a run's status and fires the next stage automatically, for the transitions that
-don't require a human gate:
+It inspects a run's status and fires the next stage automatically, for the
+transitions that don't require a human gate:
 
   plan_complete            -> run build
   build_complete           -> run checks; if pass -> run evidence
@@ -22,13 +21,18 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import GantryConfig
+from .config import AGENT_STAGES, GantryConfig
 from .engine import Engine
 from .review import run_review
 
 # Transitions the poller drives automatically (no human gate).
+# awaiting_plan / awaiting_build / awaiting_evidence are NOT human-gated (only
+# awaiting_spec / awaiting_design are — see config.DOC_STAGES) — they just mean
+# "approved to start, hasn't been kicked off yet", so the poller should fire
+# the stage itself rather than waiting for a manual `gantry stage <name>`.
 AUTO_TRANSITIONS = {
     "plan_complete", "build_complete", "evidence_complete", "review_changes_requested",
+    *(f"awaiting_{stage}" for stage in AGENT_STAGES),
 }
 
 # Human-friendly status labels for notifications.
@@ -174,6 +178,13 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
     """Fire the appropriate next stage for a single run based on its status.
     Returns {advanced: bool, from, action, ...}. No-op for gated/terminal states."""
     status = engine.store.state(run_id).get("status", "")
+
+    if status.startswith("awaiting_"):
+        stage = status.removeprefix("awaiting_")
+        if stage in AGENT_STAGES:
+            engine.run_agent_stage(run_id, stage)
+            return {"advanced": True, "from": status, "action": f"start_{stage}"}
+        return {"advanced": False, "from": status, "action": "no_auto_transition"}
 
     if status == "plan_complete":
         engine.run_agent_stage(run_id, "build")

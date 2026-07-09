@@ -12,9 +12,18 @@ license = { text = "MIT" }
 authors = [{ name = "Vanshaj" }]
 keywords = ["agent", "pipeline", "claude-code", "cursor", "automation", "ci"]
 dependencies = []  # stdlib-only core (tomllib, urllib, subprocess)
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Software Development :: Build Tools",
+]
 
-[project.optional-dependencies]
-py310 = ["tomli>=2.0; python_version < '3.11'"]
+# [project.urls] — add Homepage/Repository once this is pushed to a remote.
 
 [project.scripts]
 gantry = "gantry.cli:main"

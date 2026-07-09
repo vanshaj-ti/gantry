@@ -6,9 +6,10 @@ collide, and nothing stopped a run from executing against main/staging.
 
 This gives each run its own worktree at `<target>/.worktrees/gantry/<run_id>`
 on a fresh branch `gantry/<run_id>` off `cfg.git.base_branch`. Convention
-matches the existing `.worktrees/` layout already pruned by the
-edupaid-worktree-prune cron, so no new cleanup infra is needed — merged/
-deleted branches get their worktrees reaped the same way.
+matches a `.worktrees/` layout that's easy to prune with a periodic script
+(or `git worktree list` + a merged-branch check) — merged/deleted branches
+get their worktrees reaped the same way, no gantry-specific cleanup infra
+needed.
 
 `.agent-runs/` (run state/artifacts) stays in the MAIN repo, not the worktree,
 so `gantry status`/`gantry watch` see every run without needing to know which
@@ -109,18 +110,26 @@ def commit_all(worktree: Path, message: str) -> dict:
             "output": (proc.stdout + proc.stderr)[-1000:]}
 
 
-def push(worktree: Path, branch: str) -> dict:
-    proc = _run(["git", "push", "--quiet", "-u", "origin", branch], worktree, timeout=120)
-    return {"ok": proc.returncode == 0, "output": (proc.stdout + proc.stderr)[-1000:]}
+def push(worktree: Path, branch: str, remote_branch: str | None = None) -> dict:
+    """Push `branch` (the worktree's local branch, always `gantry/<run_id>`) to
+    `remote_branch` on origin if given, else to a same-named remote branch.
+    Lets the pushed/PR branch read as normal engineering work (e.g.
+    `chore/remove-dead-webhook`) while the local/worktree branch keeps its
+    run_id-keyed name for Gantry's own bookkeeping."""
+    remote_branch = remote_branch or branch
+    refspec = f"{branch}:refs/heads/{remote_branch}"
+    proc = _run(["git", "push", "--quiet", "-u", "origin", refspec], worktree, timeout=120)
+    return {"ok": proc.returncode == 0, "output": (proc.stdout + proc.stderr)[-1000:],
+            "remote_branch": remote_branch}
 
 
-def create_pr(worktree: Path, branch: str, base_branch: str, title: str, body: str) -> dict:
+def create_pr(worktree: Path, remote_branch: str, base_branch: str, title: str, body: str) -> dict:
     """Uses `gh pr create`. Requires gh to be authenticated in the environment
     (GH_TOKEN or `gh auth login`). base_branch is normalized (strips 'origin/'
     since gh wants a plain branch name for --base)."""
     base = base_branch.removeprefix("origin/")
     proc = _run(
-        ["gh", "pr", "create", "--base", base, "--head", branch,
+        ["gh", "pr", "create", "--base", base, "--head", remote_branch,
          "--title", title, "--body", body],
         worktree, timeout=60,
     )

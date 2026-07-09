@@ -1,8 +1,13 @@
 """Independent LLM review stage.
 
-Runs after evidence. Feeds the diff + run artifacts to a reviewing agent
-(ideally a different model family than the builder) and parses a verdict from
-config-driven keywords. Verdicts:
+Runs after evidence, as a genuine agentic investigation — not a single prompt
+stuffed with truncated artifact snippets. The reviewing agent runs inside the
+run's own worktree (same `cwd` build/evidence used) with its normal file/shell
+tools, and is pointed at the full, untruncated artifacts (which live in the
+target repo's .agent-runs/<run_id>/, not the worktree) plus instructed to run
+its own `git diff` and cross-reference the plan/acceptance-criteria against
+what was actually implemented. Ideally a different model family than the
+builder. Verdicts:
 
   APPROVE          -> review_approved
   REQUEST_CHANGES  -> review_changes_requested (+ review-comments.md; resume build)
@@ -10,7 +15,7 @@ config-driven keywords. Verdicts:
 """
 from __future__ import annotations
 
-import subprocess
+import json
 from pathlib import Path
 from typing import Any
 
@@ -26,18 +31,29 @@ REVIEW_ARTIFACTS = [
 ]
 
 
-def _git_diff(cwd: Path, base: str) -> str:
-    proc = subprocess.run(["git", "diff", base, "--"], cwd=str(cwd),
-                          capture_output=True, text=True, timeout=120)
-    return proc.stdout[:50000]
-
-
 def _build_prompt(store: RunStore, run_id: str, cwd: Path, base: str, template: str) -> str:
-    parts = [template.replace("{RUN_ID}", run_id), "\n\n# Artifacts\n"]
+    run_dir = store.run_dir(run_id)
+    artifact_lines = []
     for name in REVIEW_ARTIFACTS:
-        content = store.read_artifact(run_id, name)
-        parts.append(f"\n--- {name} ---\n{(content or '<MISSING>')[:12000]}")
-    parts.append(f"\n\n# Git diff vs {base}\n{_git_diff(cwd, base)}")
+        path = store.artifact_path(run_id, name)
+        artifact_lines.append(f"- {path} {'(exists)' if path.exists() else '(missing)'}")
+    parts = [
+        template.replace("{RUN_ID}", run_id),
+        "\n\n# Investigation instructions\n",
+        f"You are running inside the implementation worktree at {cwd}. The run's "
+        f"planning/evidence artifacts live in a separate directory, {run_dir} "
+        f"(NOT inside this worktree) — read them directly with your file tools:\n",
+        "\n".join(artifact_lines),
+        f"\n\nTo see the actual code changes, run `git diff {base} --` yourself in "
+        f"this worktree — do not rely on any diff text pasted into this prompt, "
+        f"there isn't one; read the real files and the real diff.\n"
+        f"\nCross-reference: does the diff satisfy every acceptance criterion in "
+        f"product-spec.md? Does it match the scope and approach in "
+        f"implementation-plan.md? Do the claims in evidence-report.md hold up "
+        f"against what you can independently verify (read the actual test files, "
+        f"re-run tests/checks if useful)? Investigate as deeply as needed before "
+        f"deciding.\n",
+    ]
     return "".join(parts)
 
 
@@ -66,19 +82,31 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     prompts_dir = prompts_dir if prompts_dir.is_absolute() else (cwd / prompts_dir)
     tmpl_path = prompts_dir / "review.md"
     template = tmpl_path.read_text() if tmpl_path.exists() else (
-        "# Independent review\n\nReview the diff and artifacts below. Reply with exactly one of "
-        "APPROVE, REQUEST_CHANGES, or ESCALATE, followed by your reasoning.\n")
+        "# Independent review\n\nInvestigate the run's artifacts and this worktree's actual "
+        "diff (see instructions below). Reply with exactly one of APPROVE, REQUEST_CHANGES, "
+        "or ESCALATE, followed by your reasoning.\n")
 
     prompt = _build_prompt(store, run_id, cwd, base, template)
     store.write_log(run_id, "review-prompt.md", prompt)
 
     _report_herdr(cfg, run_id, "review_running")
     runner = get_runner(cfg.review.runner)
+
+    # Register any enabled MCP servers for review (e.g. codebase-memory), same
+    # as engine.run_agent_stage does for plan/build/evidence.
+    from .mcp import ensure_mcp_for_stage
+    mcp_results = ensure_mcp_for_stage(cfg, "review", runner.name, cwd)
+    if mcp_results:
+        store.write_log(run_id, "review-mcp.json", json.dumps(mcp_results, indent=2))
+
     session_id = store.get_session_id(run_id, "review")
+    # This is now an agentic investigation (the reviewer reads files, runs git
+    # diff, re-checks tests itself), so it needs the same headless auto-approve
+    # the other stages get, and more turns than a single-shot prompt needed.
     result = runner.run(
         cwd=cwd, prompt=prompt, model=cfg.review.model,
-        session_id=session_id, plan_mode=False, skip_permissions=False,
-        output_format="json", session_name=f"{run_id}-review", max_turns=40,
+        session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
+        output_format="json", session_name=f"{run_id}-review", max_turns=80,
     )
     store.save_session(run_id, "review", session_id=result.session_id, model=cfg.review.model)
 

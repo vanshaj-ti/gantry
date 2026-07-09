@@ -59,14 +59,25 @@ def _matches_any(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def _strip_fenced_code_blocks(text: str) -> str:
+    """Remove ```-fenced code blocks before scanning for single-backtick paths.
+    Without this, a stray single backtick inside a fenced snippet (e.g. an
+    apostrophe-adjacent backtick in embedded TS/SQL) pairs across the fence
+    boundary with an unrelated backtick elsewhere in the doc, silently
+    swallowing real single-line `path/to/file.ts` mentions into one bogus
+    multi-line "path" and dropping them from the allowlist."""
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+
+
 def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
     """Extract backtick-quoted paths from the implementation plan as the
     declared scope. Project-agnostic: no hardcoded file allowlist."""
     plan = store.read_artifact(run_id, "implementation-plan.md")
     if not plan:
         return []
+    plan = _strip_fenced_code_blocks(plan)
     paths = re.findall(r"`([^`]+)`", plan)
-    return [p for p in paths if "/" in p and not p.startswith(".")]
+    return [p for p in paths if "/" in p and not p.startswith(".") and "\n" not in p]
 
 
 def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, base: str) -> dict[str, Any]:
