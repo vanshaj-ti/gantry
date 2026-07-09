@@ -20,7 +20,21 @@ spec ──▶ design ──▶ plan ──▶ build ──▶ evidence ──�
 ## Install
 
 ```bash
-pip install -e .        # from a clone; publishes as `gantry-cli`, binary `gantry`
+git clone https://github.com/vanshaj-ti/gantry.git ~/gantry
+cd ~/gantry
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .        # publishes as `gantry-cli`, binary `gantry`
+```
+
+The `gantry` binary now lives in `~/gantry/.venv/bin` — on PATH only inside
+that activated venv. For `gantry` to work in every new shell without manually
+activating first, add the venv's `bin/` to your shell profile once:
+
+```bash
+echo 'export PATH="$HOME/gantry/.venv/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+source ~/.zshrc
+gantry --version   # should now work in a fresh shell
 ```
 
 Requires Python ≥ 3.11 and at least one agent runner CLI on PATH: `claude`
