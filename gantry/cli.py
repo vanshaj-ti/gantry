@@ -549,7 +549,7 @@ def _run_doc_list(store: RunStore, run_id: str) -> list[tuple[str, str]]:
         if store.read_artifact(run_id, filename) is not None:
             out.append((f"{label_text} ({filename})", filename))
     if store.read_result(run_id, "review-result.json"):
-        out.append(("Review", "review-result.json"))
+        out.append(("Review (review-result.json)", "review-result.json"))
     return out
 
 

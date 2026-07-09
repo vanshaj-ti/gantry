@@ -176,13 +176,14 @@ gantry cockpit                    # uses $GANTRY_TARGET, or run from inside the 
   color (green/yellow/red by outcome family) is the at-a-glance signal.
 - **Doc viewer** (bottom-left): `gantry docs --nav` — a persistent, full-screen
   arrow-key navigator (curses): run list → doc list → doc content.
-  `↓`/`↑` move, `→`/Enter drills in, `←`/Esc backs out one level (quits from
-  the run list), `q` quits from anywhere. Auto-refreshes on a new run or doc
-  appearing without resetting your current position. Every render is a clean
-  full-screen redraw — no scroll-history leakage. Doc content is rendered
-  through `glow` (word-wrapped to the pane's actual width, no color codes —
-  curses owns the screen) and falls back to plain unwrapped text if `glow`
-  isn't installed.
+  `↓`/`↑` (or mouse wheel) move/scroll, `→`/Enter drills in, `←`/Esc backs out
+  one level (quits from the run list), `q` quits from anywhere. Auto-refreshes
+  on a new run or doc appearing without resetting your current position.
+  Every render is a clean full-screen redraw — no scroll-history leakage.
+  Doc content is rendered through `glow` (word-wrapped to the pane's actual
+  width, headers/bold/italic/underline render with real emphasis, not
+  literal `**`/`#` characters) and falls back to plain unwrapped, unstyled
+  text if `glow` isn't installed.
 - **Claude session** (bottom-right, gets the larger share of the split): a
   live `claude --dangerously-skip-permissions` session cwd'd into the repo —
   your assistant for driving Gantry runs.

@@ -1,7 +1,11 @@
+import curses
 import unittest
 from unittest.mock import MagicMock, patch
 
-from gantry.docnav import _next_state, _render_via_glow, NavState, LEVEL_RUNS, LEVEL_DOCS, LEVEL_CONTENT
+from gantry.docnav import (
+    _next_state, _parse_ansi_line, _render_via_glow,
+    NavState, LEVEL_RUNS, LEVEL_DOCS, LEVEL_CONTENT,
+)
 
 
 RUNS = [
@@ -90,35 +94,74 @@ class TestContentLevel(unittest.TestCase):
 
 
 class TestRenderViaGlow(unittest.TestCase):
+    """_render_via_glow now returns list[list[(text, attr)]] — one segment
+    list per line — so styled (bold/italic/underline) runs carry their own
+    curses attribute instead of the whole line being A_NORMAL."""
+
     def test_falls_back_to_splitlines_when_glow_not_on_path(self):
         with patch("shutil.which", return_value=None):
             lines = _render_via_glow("line1\nline2", 40)
-        self.assertEqual(lines, ["line1", "line2"])
+        self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
 
     def test_falls_back_when_glow_exits_nonzero(self):
         with patch("shutil.which", return_value="/usr/bin/glow"), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout="")
             lines = _render_via_glow("line1\nline2", 40)
-        self.assertEqual(lines, ["line1", "line2"])
+        self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
 
     def test_falls_back_when_subprocess_raises(self):
         with patch("shutil.which", return_value="/usr/bin/glow"), \
              patch("subprocess.run", side_effect=OSError("boom")):
             lines = _render_via_glow("line1\nline2", 40)
-        self.assertEqual(lines, ["line1", "line2"])
+        self.assertEqual(lines, [[("line1", curses.A_NORMAL)], [("line2", curses.A_NORMAL)]])
 
-    def test_strips_stray_ansi_codes_from_glow_output(self):
+    def test_parses_bold_ansi_from_glow_output_into_segments(self):
         with patch("shutil.which", return_value="/usr/bin/glow"), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="\x1b[1mHeading\x1b[0m\nplain")
             lines = _render_via_glow("# Heading\n\nplain", 40)
-        self.assertEqual(lines, ["Heading", "plain"])
+        self.assertEqual(lines, [[("Heading", curses.A_BOLD)], [("plain", curses.A_NORMAL)]])
 
     def test_empty_content_returns_single_blank_line(self):
         with patch("shutil.which", return_value=None):
             lines = _render_via_glow("", 40)
-        self.assertEqual(lines, [""])
+        self.assertEqual(lines, [[("", curses.A_NORMAL)]])
+
+
+class TestParseAnsiLine(unittest.TestCase):
+    def test_no_codes_returns_single_normal_segment(self):
+        segs = _parse_ansi_line("plain text")
+        self.assertEqual(segs, [("plain text", curses.A_NORMAL)])
+
+    def test_bold_segment(self):
+        segs = _parse_ansi_line("\x1b[1mBold\x1b[0m")
+        self.assertEqual(segs, [("Bold", curses.A_BOLD)])
+
+    def test_italic_segment(self):
+        segs = _parse_ansi_line("\x1b[3mItalic\x1b[0m")
+        self.assertEqual(segs, [("Italic", curses.A_ITALIC)])
+
+    def test_underline_segment(self):
+        segs = _parse_ansi_line("\x1b[4mUnderline\x1b[0m")
+        self.assertEqual(segs, [("Underline", curses.A_UNDERLINE)])
+
+    def test_combined_bold_italic(self):
+        segs = _parse_ansi_line("\x1b[1;3mBoldItalic\x1b[0m")
+        self.assertEqual(segs, [("BoldItalic", curses.A_BOLD | curses.A_ITALIC)])
+
+    def test_mixed_plain_and_styled_segments(self):
+        segs = _parse_ansi_line("before \x1b[1mbold\x1b[0m after")
+        self.assertEqual(segs, [("before ", curses.A_NORMAL), ("bold", curses.A_BOLD),
+                                 (" after", curses.A_NORMAL)])
+
+    def test_empty_line_returns_single_empty_segment(self):
+        segs = _parse_ansi_line("")
+        self.assertEqual(segs, [("", curses.A_NORMAL)])
+
+    def test_unknown_code_defaults_to_normal(self):
+        segs = _parse_ansi_line("\x1b[38;5;200mColored\x1b[0m")
+        self.assertEqual(segs, [("Colored", curses.A_NORMAL)])
 
 
 if __name__ == "__main__":

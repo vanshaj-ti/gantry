@@ -24,8 +24,6 @@ from typing import Any
 from .advance import label
 from .state import RunStore
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
 DOC_ARTIFACTS = [
     ("intake.md", "Intake"),
     ("product-spec.md", "Spec"),
@@ -66,7 +64,7 @@ def run_doc_list(store: RunStore, run_id: str) -> list[tuple[str, str]]:
         if store.read_artifact(run_id, filename) is not None:
             out.append((f"{label_text} ({filename})", filename))
     if store.read_result(run_id, "review-result.json"):
-        out.append(("Review", "review-result.json"))
+        out.append(("Review (review-result.json)", "review-result.json"))
     return out
 
 
@@ -141,37 +139,83 @@ def _draw_list(stdscr, title: str, items: list[str], selected: int) -> None:
     stdscr.refresh()
 
 
-def _render_via_glow(content: str, width: int) -> list[str]:
-    """Word-wrap markdown content at `width` via glow, plain (no ANSI) output
-    — `-s notty` renders without color/style codes, which is what a curses
-    window needs (compositing real ANSI into curses attrs would need a full
-    escape-sequence parser; not worth it for what was actually asked here,
-    which is correct wrapping). Falls back to raw splitlines (unwrapped) if
-    glow isn't on PATH or the call fails for any reason."""
+_ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+# glow's "dark"/"light" glamour styles only ever emit these style codes for
+# markdown emphasis (verified against real output — no color codes in this
+# theme, just bold/italic/underline/reset) — a small, fully-known set, not a
+# general ANSI interpreter. Unknown codes are silently ignored (forward
+# compatible: a future glow version adding a code we don't map just renders
+# as A_NORMAL for that run, not a crash).
+_SGR_ATTR = {"1": curses.A_BOLD, "3": curses.A_ITALIC, "4": curses.A_UNDERLINE}
+
+
+def _parse_ansi_line(line: str) -> list[tuple[str, int]]:
+    """Split one line of glow's ANSI output into (text, curses_attr) segments,
+    tracking bold/italic/underline state across SGR codes within the line.
+    Pure function — no curses/tty needed, unit-testable directly."""
+    segments: list[tuple[str, int]] = []
+    attr = curses.A_NORMAL
+    pos = 0
+    for m in _ANSI_SGR_RE.finditer(line):
+        text = line[pos:m.start()]
+        if text:
+            segments.append((text, attr))
+        pos = m.end()
+        codes = m.group(1).split(";") if m.group(1) else ["0"]
+        for code in codes:
+            if code in ("", "0"):
+                attr = curses.A_NORMAL
+            elif code in _SGR_ATTR:
+                attr |= _SGR_ATTR[code]
+    tail = line[pos:]
+    if tail:
+        segments.append((tail, attr))
+    return segments or [("", curses.A_NORMAL)]
+
+
+def _render_via_glow(content: str, width: int) -> list[list[tuple[str, int]]]:
+    """Word-wrap markdown content at `width` via glow, parsed into
+    (text, curses_attr) segments per line so headers/bold/italic/underline
+    render with real curses attributes instead of literal `**`/`#`
+    characters. Falls back to plain unstyled splitlines (still segment-list
+    shaped, just one A_NORMAL segment per line) if glow isn't on PATH or the
+    call fails for any reason."""
     glow = shutil.which("glow")
     if not glow:
-        return content.splitlines() or [""]
+        return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
     try:
-        proc = subprocess.run([glow, "-w", str(max(20, width)), "-s", "notty", "-"],
+        # -s dark pinned explicitly (not "auto") for determinism — auto's
+        # terminal-detection has nothing meaningful to detect inside a
+        # subprocess call from within curses.
+        proc = subprocess.run([glow, "-w", str(max(20, width)), "-s", "dark", "-"],
                               input=content, text=True, capture_output=True, timeout=10)
         if proc.returncode != 0 or not proc.stdout:
-            return content.splitlines() or [""]
-        return _ANSI_RE.sub("", proc.stdout).splitlines() or [""]
+            return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
+        lines = proc.stdout.splitlines() or [""]
+        return [_parse_ansi_line(ln) for ln in lines]
     except Exception:
-        return content.splitlines() or [""]
+        return [[(ln, curses.A_NORMAL)] for ln in (content.splitlines() or [""])]
 
 
-def _draw_content(stdscr, title: str, lines: list[str], scroll: int) -> int:
-    """Renders pre-rendered `lines` starting at line `scroll`; returns the
-    clamped scroll actually used (so the caller's state stays in bounds)."""
+def _draw_content(stdscr, title: str, lines: list[list[tuple[str, int]]], scroll: int) -> int:
+    """Renders pre-rendered segment `lines` starting at line `scroll`;
+    returns the clamped scroll actually used (so the caller's state stays
+    in bounds)."""
     stdscr.erase()
     h, w = stdscr.getmaxyx()
     max_scroll = max(0, len(lines) - (h - 3))
     scroll = max(0, min(scroll, max_scroll))
     stdscr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
     stdscr.addnstr(1, 0, "-" * min(w - 1, len(title)), w - 1)
-    for i, line in enumerate(lines[scroll:scroll + (h - 3)]):
-        stdscr.addnstr(2 + i, 0, line, w - 1)
+    for i, segments in enumerate(lines[scroll:scroll + (h - 3)]):
+        row = 2 + i
+        col = 0
+        for text, attr in segments:
+            if col >= w - 1:
+                break
+            stdscr.addnstr(row, col, text, w - 1 - col, attr)
+            col += len(text)
     footer = "up/down scroll  left/esc back  q quit"
     stdscr.addnstr(h - 1, 0, footer, w - 1, curses.A_DIM)
     stdscr.refresh()
@@ -188,6 +232,14 @@ def _run_loop(stdscr, store: RunStore) -> None:
         curses.use_default_colors()
     except curses.error:
         pass  # terminal doesn't support it — harmless no-op
+    # Scroll wheel arrives as BUTTON4 (up) / BUTTON5 (down) — tmux passes
+    # these through once the pane's mouse mode is on (cockpit.py enables it
+    # for the whole session). Without registering the mask, wheel events are
+    # either swallowed or misread as raw escape bytes by getkey().
+    try:
+        curses.mousemask(curses.BUTTON4_PRESSED | curses.BUTTON5_PRESSED)
+    except curses.error:
+        pass  # terminal doesn't report mouse events — harmless no-op
     stdscr.nodelay(True)
     stdscr.timeout(200)  # ms — poll interval for both keypress and refresh
 
@@ -238,6 +290,22 @@ def _run_loop(stdscr, store: RunStore) -> None:
             key = stdscr.getkey()
         except curses.error:
             continue  # no input this tick — just re-poll/redraw
+
+        if key == "KEY_MOUSE":
+            try:
+                _, _, _, _, bstate = curses.getmouse()
+            except curses.error:
+                continue
+            # Wheel scroll becomes the same up/down keys that already work
+            # at every level — no new state-transition logic needed, mouse
+            # is just another input source feeding the existing pure
+            # _next_state function.
+            if bstate & curses.BUTTON4_PRESSED:
+                key = "KEY_UP"
+            elif bstate & curses.BUTTON5_PRESSED:
+                key = "KEY_DOWN"
+            else:
+                continue
 
         state = _next_state(state, key, runs, docs)
         if state.level == LEVEL_DOCS and state.run_id and not docs:
