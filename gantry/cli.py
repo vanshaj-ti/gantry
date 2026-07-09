@@ -14,6 +14,7 @@ Verbs:
   gantry listen                      poll Telegram replies, act on the pending run
   gantry docs --run ID                render a run's spec/design/plan/evidence/review docs
   gantry cockpit                      open a tmux workspace pre-wired for this repo
+  gantry update                       git pull + reinstall this gantry checkout
 
 Target repo is $GANTRY_TARGET or the current working directory.
 """
@@ -722,6 +723,12 @@ def cmd_cockpit(args) -> int:
     return 0  # unreachable on success — attach() execs into tmux
 
 
+def cmd_update(args) -> int:
+    """git pull + reinstall the gantry checkout this install runs from."""
+    from .update import update_gantry
+    return _out(update_gantry())
+
+
 def cmd_daemon(args) -> int:
     from .daemon import daemon_status, install_daemon, uninstall_daemon
     if args.daemon_action == "install":
@@ -830,6 +837,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("cockpit", help="open a tmux workspace pre-wired for this repo "
                                         "(status bar + doc viewer + live claude session)")
     s.set_defaults(func=cmd_cockpit)
+
+    s = sub.add_parser("update", help="git pull + reinstall the gantry checkout this install runs from")
+    s.set_defaults(func=cmd_update)
     return p
 
 
