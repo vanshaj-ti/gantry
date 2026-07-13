@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AGENT_STAGES, GantryConfig
+from .e2e import run_e2e_tests
 from .engine import Engine
 from .review import run_review
 
@@ -123,6 +124,18 @@ def _checks_failure_detail(store: Any, run_id: str) -> str:
     return "Checks failed."
 
 
+def _e2e_failure_detail(store: Any, run_id: str) -> str:
+    """Same purpose as _checks_failure_detail, for the deterministic e2e step
+    (e2e-report.json) — surfaces which app/spec failed, not just 'e2e failed'."""
+    report = store.read_result(run_id, "e2e-report.json")
+    if not report or report.get("pass"):
+        return "E2e tests failed."
+    failing = [a["app"] for a in report.get("apps", []) if not a.get("skipped") and not a.get("pass")]
+    if failing:
+        return "Failing e2e app(s):\n" + "\n".join(f"  • `{a}`" for a in failing)
+    return "E2e tests failed."
+
+
 def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] | None = None) -> str:
     """Build a self-contained, Markdown-formatted Telegram body: what happened,
     why, and how to respond. Written for a phone-only reader replying via
@@ -150,7 +163,7 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
     if status == "blocked":
         blocked_on = store.state(run_id).get("blocked_on", "checks")
         retry_count = store.state(run_id).get("checks_retry_count", 0)
-        detail = _checks_failure_detail(store, run_id)
+        detail = _e2e_failure_detail(store, run_id) if blocked_on == "e2e" else _checks_failure_detail(store, run_id)
         return (f"{header}\n\n"
                 f"*Blocked on:* {blocked_on} (auto-retry attempt {retry_count})\n"
                 f"{detail}\n\n"
@@ -158,7 +171,8 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                 f"*Reply 2* with guidance to send it back for a rebuild.")
 
     if status == "checks_escalated":
-        detail = _checks_failure_detail(store, run_id)
+        blocked_on = store.state(run_id).get("blocked_on", "checks")
+        detail = _e2e_failure_detail(store, run_id) if blocked_on == "e2e" else _checks_failure_detail(store, run_id)
         retry_count = store.state(run_id).get("checks_retry_count", 0)
         return (f"{header}\n\n"
                 f"Auto-retry exhausted after {retry_count} attempt(s).\n"
@@ -223,7 +237,23 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         if not checks["pass"]:
             return {"advanced": False, "from": status, "action": "checks_failed",
                     "blocked_on": engine.store.state(run_id).get("blocked_on")}
-        engine.run_agent_stage(run_id, "evidence")
+        # Deterministic e2e run (no LLM) between checks and the evidence stage —
+        # keeps a slow/hanging Playwright suite from burning or killing the
+        # expensive evidence agent turn. No-op (pass=True) when unconfigured.
+        e2e = run_e2e_tests(engine.store, run_id, engine.cfg.e2e, engine.work_dir(run_id),
+                            engine.cfg.git.base_branch)
+        if not e2e["pass"]:
+            engine.store.update_state(run_id, status="blocked", blocked_on="e2e", checks="pass")
+            return {"advanced": False, "from": status, "action": "e2e_failed"}
+        # Resume the prior evidence session if one exists for this run (e.g. a
+        # second pass after review sent build back for fixes) instead of always
+        # starting fresh — a fresh session re-does all evidence-gathering work
+        # from scratch (re-greps, re-reads every file, re-runs build/lint) even
+        # though the evidence.md prompt template's own "append ## Pass N, don't
+        # overwrite" instruction only prevents the *file* from being clobbered,
+        # not the redundant verification work a brand-new session repeats.
+        has_prior_evidence_session = bool(engine.store.get_session_id(run_id, "evidence"))
+        engine.run_agent_stage(run_id, "evidence", resume=has_prior_evidence_session)
         return {"advanced": True, "from": status, "action": "checks_passed->evidence"}
 
     if status == "evidence_complete":
@@ -245,19 +275,21 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
 
     if status == "blocked":
         blocked_on = engine.store.state(run_id).get("blocked_on")
-        if blocked_on not in ("scope", "checks"):
+        if blocked_on not in ("scope", "checks", "e2e"):
             return {"advanced": False, "from": status, "action": "no_auto_transition"}
         retry_count = engine.store.state(run_id).get("checks_retry_count", 0)
         if retry_count >= engine.cfg.checks.retry_checks:
             engine.store.update_state(run_id, status="checks_escalated")
             return {"advanced": False, "from": status, "action": "checks_escalated",
                     "retry_count": retry_count}
-        detail = _checks_failure_detail(engine.store, run_id)
+        detail = (_e2e_failure_detail(engine.store, run_id) if blocked_on == "e2e"
+                  else _checks_failure_detail(engine.store, run_id))
+        label_word = "E2e tests" if blocked_on == "e2e" else "Checks"
         engine.store.artifact_path(run_id, "answers/build.md").parent.mkdir(
             parents=True, exist_ok=True)
         engine.store.artifact_path(run_id, "answers/build.md").write_text(
-            f"# Checks failed (auto-retry {retry_count + 1}/{engine.cfg.checks.retry_checks})\n\n"
-            f"{detail}\n\nFix the above and ensure checks pass this time.\n")
+            f"# {label_word} failed (auto-retry {retry_count + 1}/{engine.cfg.checks.retry_checks})\n\n"
+            f"{detail}\n\nFix the above and ensure {label_word.lower()} pass this time.\n")
         engine.store.update_state(run_id, checks_retry_count=retry_count + 1)
         engine.run_agent_stage(run_id, "build", resume=True)
         return {"advanced": True, "from": status, "action": "retry_build_after_checks_failure",
@@ -291,11 +323,55 @@ def _release_lock(engine: Engine, run_id: str) -> None:
     _lock_path(engine, run_id).unlink(missing_ok=True)
 
 
+def _stage_timeout(cfg: GantryConfig, stage: str) -> int:
+    if stage == "checks":
+        return cfg.checks.timeout
+    if stage == "review":
+        return 900  # review.py has no configurable timeout today; matches its hardcoded default
+    return cfg.model_for(stage).timeout
+
+
+def _repair_stale_running(engine: Engine, run: dict[str, Any]) -> dict[str, Any] | None:
+    """A run's own agent subprocess dying without going through
+    Engine.run_agent_stage's normal return path (killed externally — OOM,
+    terminal closed, machine slept, or a `gantry stage`/`gantry advance --run`
+    invocation that itself got killed before reaching the TimeoutExpired
+    handler) leaves state.json stuck at "{stage}_running" forever: nothing
+    else ever writes to it again, so `gantry watch`/status lies about a dead
+    run still being in flight.
+
+    No PID is tracked anywhere (manual single-run invocations don't even
+    acquire .advance.lock), so liveness can't be checked directly. Wall-clock
+    staleness against the stage's own configured timeout is the only signal
+    available: if the process were still alive, it would have hit its own
+    subprocess timeout and transitioned to `_failed` by now. A run still
+    showing `_running` well past that point is provably dead.
+    """
+    status = run["status"]
+    if not status.endswith("_running"):
+        return None
+    stage = status.removesuffix("_running")
+    timeout = _stage_timeout(engine.cfg, stage)
+    age = time.time() - run["mtime"]
+    if age <= timeout + 120:  # grace period beyond the subprocess's own cap
+        return None
+    engine.store.write_log(run["id"], f"{stage}.stderr",
+                           f"Repaired stale status: {status} for {int(age)}s "
+                           f"(stage timeout {timeout}s) — process presumed dead.")
+    engine._set_status(run["id"], f"{stage}_failed")
+    return {"run_id": run["id"], "advanced": False, "action": "repaired_stale_running",
+            "was": status, "age_seconds": int(age)}
+
+
 def advance_all(target: Path, cfg: GantryConfig) -> list[dict[str, Any]]:
     engine = Engine(target, cfg)
     results = []
     for run in engine.store.list_runs():
         rid = run["id"]
+        repaired = _repair_stale_running(engine, run)
+        if repaired:
+            results.append(repaired)
+            continue
         if run["status"] not in AUTO_TRANSITIONS:
             continue
         if not _acquire_lock(engine, rid):

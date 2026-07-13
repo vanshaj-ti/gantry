@@ -100,15 +100,22 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
         store.write_log(run_id, "review-mcp.json", json.dumps(mcp_results, indent=2))
 
     session_id = store.get_session_id(run_id, "review")
+    # Save runner/model BEFORE invoking (mirrors engine.run_agent_stage) so
+    # `gantry watch`'s AGENT/MODEL columns aren't blank for the whole duration
+    # of review_running — session_id isn't known until the agent returns, but
+    # which runner/model is driving it right now is, and that's what the
+    # live-status columns are for.
+    store.save_session(run_id, "review", model=cfg.review.model, runner=runner.name)
     # This is now an agentic investigation (the reviewer reads files, runs git
     # diff, re-checks tests itself), so it needs the same headless auto-approve
     # the other stages get, and more turns than a single-shot prompt needed.
     result = runner.run(
         cwd=cwd, prompt=prompt, model=cfg.review.model,
         session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
-        output_format="json", session_name=f"{run_id}-review", max_turns=80,
+        output_format="json", session_name=f"{run_id}-review", max_turns=80, timeout=900,
     )
-    store.save_session(run_id, "review", session_id=result.session_id, model=cfg.review.model)
+    store.save_session(run_id, "review", session_id=result.session_id,
+                       model=cfg.review.model, runner=runner.name)
 
     text = result.raw.get("result", "") if isinstance(result.raw, dict) else result.stdout
     verdict = _parse_verdict(str(text) or result.stdout, cfg) if result.ok else "ESCALATE"

@@ -124,17 +124,32 @@ class Engine:
         # which runner/model is in flight is, and that's the useful part for
         # `gantry watch`'s detail column while a stage is still running.
         self.store.save_session(run_id, stage, model=sm.model, runner=runner.name)
-        result = runner.run(
-            cwd=work_dir,
-            prompt=prompt,
-            model=sm.model,
-            session_id=session_id,
-            plan_mode=sm.plan_mode,
-            skip_permissions=self.cfg.agent.skip_permissions,
-            output_format=self.cfg.agent.output_format,
-            session_name=f"{run_id}-{stage}",
-            max_turns=sm.max_turns,
-        )
+        import subprocess as _subprocess
+        try:
+            result = runner.run(
+                cwd=work_dir,
+                prompt=prompt,
+                model=sm.model,
+                session_id=session_id,
+                plan_mode=sm.plan_mode,
+                skip_permissions=self.cfg.agent.skip_permissions,
+                output_format=self.cfg.agent.output_format,
+                session_name=f"{run_id}-{stage}",
+                max_turns=sm.max_turns,
+                timeout=sm.timeout,
+            )
+        except _subprocess.TimeoutExpired:
+            # Without this, a killed/timed-out agent subprocess leaves state.json
+            # stuck at "{stage}_running" forever — `gantry watch`/status then lies
+            # about a dead run still being in flight (see recovery notes in the
+            # workflow skill). Mark it failed like any other unsuccessful stage so
+            # the normal retry/escalate machinery (advance.py's "blocked"/
+            # "checks_escalated" path) can act on it instead of a human having to
+            # notice a stale lockfile and reset state by hand.
+            self.store.write_log(run_id, f"{stage}.stderr",
+                                 f"Agent subprocess timed out after {sm.timeout}s")
+            self._set_status(run_id, f"{stage}_failed")
+            return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
         suffix = ".resume" if resume else ""
         self.store.write_log(run_id, f"{stage}{suffix}.stdout", result.stdout)
         self.store.write_log(run_id, f"{stage}{suffix}.stderr", result.stderr)

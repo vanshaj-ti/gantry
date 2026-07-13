@@ -132,8 +132,20 @@ def _install_deps_if_npm_project(wt: Path) -> None:
 
 def commit_all(worktree: Path, message: str) -> dict:
     """Stage and commit everything in the worktree. No-op (ok=True, committed=False)
-    if there's nothing to commit."""
+    if there's nothing to commit.
+
+    `ensure_worktree` symlinks `.agent-runs` into every worktree (see its comment)
+    so stage prompts can reference run artifacts relative to their cwd. A repo's
+    `.gitignore` entry for `.agent-runs/` (directory-only pattern) does NOT match
+    that path when it's a symlink rather than a real directory, so `git add -A`
+    happily stages the symlink itself as a new tracked file — pointing at an
+    absolute path outside the repo, and pure noise in the PR diff. Explicitly
+    unstage it every time regardless of whether the target repo's .gitignore
+    happens to also cover the symlink form — this is a gantry-created artifact,
+    gantry should be the one keeping it out of every commit.
+    """
     _run(["git", "add", "-A"], worktree)
+    _run(["git", "reset", "--", ".agent-runs"], worktree)
     status = _run(["git", "status", "--porcelain"], worktree)
     if not status.stdout.strip():
         return {"ok": True, "committed": False, "reason": "no changes"}

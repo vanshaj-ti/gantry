@@ -85,6 +85,7 @@ class StageModel:
     max_turns: int = 60
     plan_mode: bool = False
     runner: str = ""    # "" = inherit [agent].runner; else "claude-code"|"cursor-cli"|"codex-cli"
+    timeout: int = 900  # subprocess wall-clock cap in seconds; raise for slower stages (e.g. evidence)
 
 
 @dataclass
@@ -113,6 +114,24 @@ class ChecksConfig:
     timeout: int = 900
     retry_checks: int = 3  # auto-resume build with failure feedback this many times
                            # before escalating to a human (checks_escalated)
+
+
+@dataclass
+class E2eConfig:
+    """Deterministic, non-LLM e2e test step run between checks and evidence.
+
+    Runs each touched app's e2e command directly (no agent involved) and writes
+    a JSON report the evidence-stage prompt reads instead of re-running the
+    suite itself — decouples slow, restart-safe test execution from the
+    expensive, hard-to-resume LLM evidence turn. Empty `apps` = step is a no-op
+    (evidence stage falls back to running e2e itself, old behavior)."""
+    enabled: bool = False
+    # app dir name (under apps/<name>) -> shell command to run its e2e suite
+    apps: dict[str, str] = field(default_factory=dict)
+    # glob (relative to the app dir) used to detect whether this run touched
+    # that app's e2e-relevant surface at all — skip apps with no matching spec
+    spec_glob: str = "tests/e2e/*.spec.ts"
+    timeout: int = 1800
 
 
 @dataclass
@@ -206,6 +225,7 @@ class GantryConfig:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     scope: ScopeConfig = field(default_factory=ScopeConfig)
     checks: ChecksConfig = field(default_factory=ChecksConfig)
+    e2e: E2eConfig = field(default_factory=E2eConfig)
     git: GitConfig = field(default_factory=GitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
@@ -240,6 +260,7 @@ def _coerce_models(raw: dict[str, Any]) -> dict[str, StageModel]:
                 max_turns=int(spec.get("max_turns", 60)),
                 plan_mode=bool(spec.get("plan_mode", stage == "plan")),
                 runner=spec.get("runner", ""),
+                timeout=int(spec.get("timeout", 900)),
             )
     return out
 
@@ -286,6 +307,14 @@ def load_config(target_workspace: Path) -> GantryConfig:
         c = raw["checks"]
         cfg.checks = ChecksConfig(commands=c.get("commands", []), timeout=int(c.get("timeout", 900)),
                                   retry_checks=int(c.get("retry_checks", 3)))
+    if "e2e" in raw:
+        e = raw["e2e"]
+        cfg.e2e = E2eConfig(
+            enabled=bool(e.get("enabled", False)),
+            apps=dict(e.get("apps", {})),
+            spec_glob=e.get("spec_glob", E2eConfig().spec_glob),
+            timeout=int(e.get("timeout", 1800)),
+        )
     if "git" in raw:
         g = raw["git"]
         cfg.git = GitConfig(base_branch=g.get("base_branch", "main"),

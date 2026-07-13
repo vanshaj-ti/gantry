@@ -71,13 +71,21 @@ def _strip_fenced_code_blocks(text: str) -> str:
 
 def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
     """Extract backtick-quoted paths from the implementation plan as the
-    declared scope. Project-agnostic: no hardcoded file allowlist."""
+    declared scope. Project-agnostic: no hardcoded file allowlist.
+
+    Must accept root-level filenames with no "/" (e.g. `eslint.config.js`,
+    `package-lock.json`) and dotfile/dot-prefixed paths (e.g.
+    `.cursor/rules/foo.mdc`, `.env.local.example`) — a prior version of this
+    filter dropped both, which produced false-positive scope-guard failures
+    for plans that legitimately touch repo-root config files or dotdirs."""
     plan = store.read_artifact(run_id, "implementation-plan.md")
     if not plan:
         return []
     plan = _strip_fenced_code_blocks(plan)
     paths = re.findall(r"`([^`]+)`", plan)
-    return [p for p in paths if "/" in p and not p.startswith(".") and "\n" not in p]
+    return [p for p in paths
+            if "\n" not in p
+            and re.match(r"^[.\w/-][\w./-]*\.[A-Za-z0-9]+$", p)]
 
 
 def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, base: str) -> dict[str, Any]:

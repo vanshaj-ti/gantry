@@ -198,7 +198,20 @@ def cmd_advance(args) -> int:
                 _notify(store, notifier, r["run_id"], notify_message(store, r["run_id"], st, r), meta=r)
         return _out(results)
     eng = Engine(tgt, cfg)
-    return _out(advance_run(eng, args.run))
+    try:
+        return _out(advance_run(eng, args.run))
+    except Exception as exc:
+        # Any uncaught exception here (e.g. a deterministic step like e2e
+        # raising instead of being caught internally) would otherwise leave
+        # state.json at whatever "{stage}_running" it was already showing —
+        # main()'s top-level handler only prints the error, it never touches
+        # run state. Mark the in-flight stage failed so `gantry watch`/status
+        # doesn't lie about a run still being alive after this process exits.
+        st = eng.store.state(args.run)
+        current = st.get("current_stage") or st.get("status", "").removesuffix("_running")
+        if current and st.get("status", "").endswith("_running"):
+            eng._set_status(args.run, f"{current}_failed")
+        return _out({"ok": False, "error": str(exc)})
 
 
 # Statuses where a single-run loop should stop: the run is done, needs a human,
@@ -369,7 +382,7 @@ def cmd_watch(args) -> int:
         print("\033[2J\033[H" if args.live else "", end="")
         print(f"GANTRY — {len(runs)} run(s)\n")
 
-        status_w, agent_w, model_w, session_w, detail_w, updated_w = 26, 12, 16, 10, 20, 10
+        status_w, agent_w, model_w, session_w, detail_w, updated_w = 44, 12, 16, 10, 20, 10
         fixed = status_w + agent_w + model_w + session_w + detail_w + updated_w
         # Titles are short slugs in practice (run_id-derived) — absorbing
         # every leftover column in a wide status bar just leaves a huge
@@ -729,6 +742,10 @@ def cmd_doctor(args) -> int:
         "git_repo": git_ok,
         "base_branch": cfg.git.base_branch,
         "notify_backend": cfg.notify.backend,
+        "notify_ready": (
+            bool(os.environ.get("GANTRY_TELEGRAM_BOT_TOKEN") and os.environ.get("GANTRY_TELEGRAM_CHAT_ID"))
+            if cfg.notify.backend == "telegram" else True
+        ),
         "stages": cfg.stages,
         "mandated_skills": cfg.skills.enabled,
         "mcp_enabled": cfg.mcp.enabled,
@@ -895,7 +912,34 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _ensure_notify_env() -> None:
+    """Auto-load ~/.config/gantry/env.sh's telegram bridge if the caller's shell
+    never sourced it. Without this, every stage/advance/ship call silently no-ops
+    notifications (TelegramNotifier.send returns {"sent": False, ...} — no
+    exception, no visible error) whenever gantry runs from a shell that skipped
+    the documented `source ~/.config/gantry/env.sh` setup step. Since agents and
+    scripts routinely invoke `gantry` directly without that step, load it here
+    once, unconditionally, instead of depending on caller discipline."""
+    if os.environ.get("GANTRY_TELEGRAM_BOT_TOKEN") and os.environ.get("GANTRY_TELEGRAM_CHAT_ID"):
+        return
+    env_sh = Path.home() / ".config" / "gantry" / "env.sh"
+    if not env_sh.exists():
+        return
+    try:
+        out = subprocess.run(
+            ["bash", "-c", f"source {env_sh} && env"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except Exception:
+        return
+    for line in out.splitlines():
+        if line.startswith("GANTRY_TELEGRAM_BOT_TOKEN=") or line.startswith("GANTRY_TELEGRAM_CHAT_ID="):
+            key, _, val = line.partition("=")
+            os.environ[key] = val
+
+
 def main(argv=None) -> int:
+    _ensure_notify_env()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
