@@ -29,8 +29,8 @@ from pathlib import Path
 from .. import __version__
 from .docs import cmd_doctor, cmd_docs
 from .run_commands import (
-    cmd_advance, cmd_approve, cmd_checks, cmd_init, cmd_loop, cmd_review,
-    cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
+    cmd_advance, cmd_approve, cmd_cancel, cmd_checks, cmd_cleanup, cmd_init,
+    cmd_loop, cmd_review, cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
 )
 from .system import cmd_cockpit, cmd_daemon, cmd_mcp, cmd_update
 from .watch import cmd_listen, cmd_watch
@@ -82,6 +82,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run", required=True)
     s.add_argument("--force", action="store_true", help="ship even if status isn't review_approved")
     s.set_defaults(func=cmd_ship)
+
+    s = sub.add_parser("cancel", help="cancel a run (mark cancelled, optionally clean up its worktree)")
+    s.add_argument("--run", required=True)
+    s.add_argument("--force", action="store_true", help="cancel even if already shipped")
+    s.add_argument("--cleanup", action="store_true", help="also remove the run's worktree/branch now")
+    s.set_defaults(func=cmd_cancel)
+
+    s = sub.add_parser("cleanup", help="prune worktrees (and optionally state) for finished runs")
+    s.add_argument("--status", action="append",
+                   help="status to target (repeatable); default: shipped/shipped_manually/cancelled")
+    s.add_argument("--older-than-days", type=int, default=0)
+    s.add_argument("--yes", action="store_true", help="actually delete (default: dry-run listing only)")
+    s.add_argument("--purge-state", action="store_true",
+                   help="also delete .agent-runs/<run_id> (state+artifacts)")
+    s.set_defaults(func=cmd_cleanup)
 
     s = sub.add_parser("status", help="show run status")
     s.add_argument("--run")

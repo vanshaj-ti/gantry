@@ -63,6 +63,7 @@ STATUS_LABELS = {
     "shipped": "Shipped — PR open",
     "shipped_manually": "Shipped (manual) — PR open",
     "ship_failed": "Ship FAILED — push/PR error",
+    "cancelled": "Cancelled",
 }
 
 
@@ -81,6 +82,7 @@ _STATUS_ICON = {
     "shipped": "\U0001f680",           # 🚀
     "shipped_manually": "\U0001f680",  # 🚀
     "ship_failed": "⚠️",            # ⚠️
+    "cancelled": "\U0001f6ab",         # 🚫
 }
 
 

@@ -130,6 +130,24 @@ def _install_deps_if_npm_project(wt: Path) -> None:
         pass
 
 
+def remove_worktree(target: Path, run_id: str) -> dict:
+    """Prune a finished run's worktree + local branch. Never raises — mirrors
+    ensure_worktree's {ok, ...} contract. No-ops if the worktree is already
+    gone (idempotent, safe to call from a cleanup sweep more than once)."""
+    wt = worktree_path(target, run_id)
+    if not wt.exists():
+        return {"ok": True, "removed": False, "reason": "worktree not present"}
+
+    proc = _run(["git", "worktree", "remove", "--force", str(wt)], target, timeout=60)
+    if proc.returncode != 0:
+        return {"ok": False, "removed": False, "error": proc.stderr.strip() or proc.stdout.strip()}
+
+    # Best-effort: the branch may already be gone, merged-and-deleted by the
+    # PR flow, or checked out elsewhere — none of that should fail a cleanup.
+    _run(["git", "branch", "-D", branch_name(run_id)], target, timeout=30)
+    return {"ok": True, "removed": True}
+
+
 def commit_all(worktree: Path, message: str) -> dict:
     """Stage and commit everything in the worktree. No-op (ok=True, committed=False)
     if there's nothing to commit.

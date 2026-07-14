@@ -8,9 +8,10 @@ import time
 
 from ..config import CONFIG_FILENAME, load_config
 from ..engine import Engine
+from ..git import remove_worktree
 from ..notify import get_notifier
 from ..review import run_review
-from ..state import RunStore
+from ..state import RunStore, now_iso
 from ._shared import TEMPLATE_DIR, _engine, _notify, _out, _target
 
 
@@ -113,6 +114,57 @@ def cmd_ship(args) -> int:
     return _out(ship_run(eng, run_id))
 
 
+def cmd_cancel(args) -> int:
+    """Mark a run cancelled — stops it from ever being auto-advanced or
+    manually stage'd further. Doesn't touch the worktree unless --cleanup is
+    passed; a bare cancel is meant to be fast and safe (e.g. cancelling by
+    mistake shouldn't have already deleted anything)."""
+    store = RunStore(_target())
+    run_id = args.run
+    state = store.state(run_id)
+    if state.get("status") in ("shipped", "shipped_manually") and not args.force:
+        return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
+                    f"already shipped (use --force to cancel anyway)"})
+    store.update_state(run_id, status="cancelled", cancelled_at=now_iso())
+    result = {"ok": True, "run_id": run_id, "status": "cancelled"}
+    if args.cleanup:
+        result["worktree"] = remove_worktree(_target(), run_id)
+    return _out(result)
+
+
+_CLEANUP_DEFAULT_STATUSES = {"shipped", "shipped_manually", "cancelled"}
+
+
+def cmd_cleanup(args) -> int:
+    """Prune worktrees (and optionally state/artifacts) for finished runs.
+    Dry-run by default — this deletes worktrees and, with --purge-state, a
+    run's entire history, so a candidate listing comes back unless the
+    caller explicitly opts into --yes."""
+    tgt = _target()
+    store = RunStore(tgt)
+    statuses = set(args.status) if args.status else _CLEANUP_DEFAULT_STATUSES
+    cutoff = time.time() - args.older_than_days * 86400 if args.older_than_days else None
+
+    candidates = [
+        r for r in store.list_runs()
+        if r["status"] in statuses and (cutoff is None or r["mtime"] <= cutoff)
+    ]
+
+    if not args.yes:
+        return _out({"ok": True, "dry_run": True, "count": len(candidates), "runs": candidates})
+
+    results = []
+    for r in candidates:
+        run_id = r["id"]
+        entry = {"run_id": run_id, "status": r["status"],
+                  "worktree": remove_worktree(tgt, run_id)}
+        if args.purge_state:
+            shutil.rmtree(store.run_dir(run_id), ignore_errors=True)
+            entry["state_purged"] = True
+        results.append(entry)
+    return _out({"ok": True, "dry_run": False, "count": len(results), "runs": results})
+
+
 def cmd_status(args) -> int:
     store = RunStore(_target())
     if args.run:
@@ -161,7 +213,7 @@ def cmd_advance(args) -> int:
 # `advance --run` tick would refuse to touch, plus terminal ship states.
 _LOOP_STOP_SUFFIXES = ("_failed", "_approved", "_escalated", "_shipped")
 _LOOP_STOP_PREFIXES = ("awaiting_", "shipped")
-_LOOP_STOP_EXACT = {"blocked"}
+_LOOP_STOP_EXACT = {"blocked", "cancelled"}
 
 
 def _is_loop_terminal(status: str) -> bool:

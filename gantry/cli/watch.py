@@ -93,8 +93,7 @@ def cmd_watch(args) -> int:
     def render() -> None:
         cols = shutil.get_terminal_size().columns
         runs = store.list_runs()
-        print("\033[2J\033[H" if args.live else "", end="")
-        print(f"GANTRY — {len(runs)} run(s)\n")
+        lines = [f"GANTRY — {len(runs)} run(s)", ""]
 
         status_w, agent_w, model_w, session_w, detail_w, updated_w = 44, 12, 16, 10, 20, 10
         fixed = status_w + agent_w + model_w + session_w + detail_w + updated_w
@@ -106,8 +105,8 @@ def cmd_watch(args) -> int:
 
         headers = ("TITLE", "STATUS", "AGENT", "MODEL", "SESSION", "DETAIL", "UPDATED")
         widths = (title_w, status_w, agent_w, model_w, session_w, detail_w, updated_w)
-        print(" ".join(trunc(h, w) for h, w in zip(headers, widths)))
-        print("-" * min(cols, sum(widths) + 6))
+        lines.append(" ".join(trunc(h, w) for h, w in zip(headers, widths)))
+        lines.append("-" * min(cols, sum(widths) + 6))
         for r in runs:
             title = r["title"] or r["id"]
             status_text = label(r["status"])
@@ -115,7 +114,16 @@ def cmd_watch(args) -> int:
             detail_text = detail_for(r["id"], r["status"])
             row = " ".join(trunc(v, w) for v, w in zip(
                 (title, status_text, runner, model, sid, detail_text, age(r["mtime"])), widths))
-            print(paint(row, r["status"]))
+            lines.append(paint(row, r["status"]))
+
+        # Single write, not one print() per line: on a --live refresh the clear
+        # sequence and the new frame must land in the terminal as one unit —
+        # otherwise a slow pipe (SSH, tmux over a laggy link) can flush the
+        # clear before the content is fully written, showing a blank/partial
+        # pane for a frame.
+        clear = "\033[2J\033[H" if args.live else ""
+        sys.stdout.write(clear + "\n".join(lines) + "\n")
+        sys.stdout.flush()
 
     if not args.live:
         render()
