@@ -100,9 +100,9 @@ class TestRenderMarkdown(unittest.TestCase):
     def test_returns_segment_list_shape(self):
         lines = _render_markdown("plain text", 40)
         self.assertIsInstance(lines, list)
-        self.assertTrue(all(isinstance(l, list) for l in lines))
+        self.assertTrue(all(isinstance(line, list) for line in lines))
         self.assertTrue(all(isinstance(seg, tuple) and len(seg) == 2
-                            for l in lines for seg in l))
+                            for line in lines for seg in line))
 
     def test_heading_produces_a_bold_segment(self):
         lines = _render_markdown("# Heading", 40)
