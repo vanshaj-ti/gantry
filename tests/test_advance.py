@@ -169,5 +169,60 @@ class TestAutoShip(unittest.TestCase):
         self.assertEqual(result["action"], "auto_ship_failed")
 
 
+class TestRepairStaleRunning(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+        self.run_id = self.eng.create_run("t", "test")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_stale_heartbeat_marks_stage_failed(self):
+        from gantry.advance import _repair_stale_running
+        from gantry.state import now_iso
+        import time
+        self.eng.store.update_state(self.run_id, status="build_running",
+                                    heartbeat_at=now_iso())
+        # Backdate the heartbeat past the grace window (3x HEARTBEAT_INTERVAL)
+        # without sleeping in the test.
+        from gantry.engine import HEARTBEAT_INTERVAL
+        stale_ts = time.time() - (HEARTBEAT_INTERVAL * 3 + 5)
+        from datetime import datetime, timezone
+        stale_iso = datetime.fromtimestamp(stale_ts, tz=timezone.utc).isoformat()
+        self.eng.store.update_state(self.run_id, heartbeat_at=stale_iso)
+        run = {"id": self.run_id, "status": "build_running", "mtime": time.time()}
+
+        result = _repair_stale_running(self.eng, run)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["action"], "repaired_stale_running")
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "build_failed")
+
+    def test_fresh_heartbeat_is_not_repaired(self):
+        from gantry.advance import _repair_stale_running
+        from gantry.state import now_iso
+        import time
+        self.eng.store.update_state(self.run_id, status="build_running", heartbeat_at=now_iso())
+        run = {"id": self.run_id, "status": "build_running", "mtime": time.time()}
+
+        result = _repair_stale_running(self.eng, run)
+        self.assertIsNone(result)
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "build_running")
+
+    def test_no_heartbeat_falls_back_to_stage_timeout(self):
+        from gantry.advance import _repair_stale_running
+        import time
+        self.eng.store.update_state(self.run_id, status="build_running")
+        old_mtime = time.time() - self.cfg.model_for("build").timeout - 200
+        run = {"id": self.run_id, "status": "build_running", "mtime": old_mtime}
+
+        result = _repair_stale_running(self.eng, run)
+        self.assertIsNotNone(result)
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "build_failed")
+
+
 if __name__ == "__main__":
     unittest.main()

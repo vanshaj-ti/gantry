@@ -4,6 +4,7 @@ Verbs:
   gantry init                        scaffold gantry.toml + .gantry/prompts in the repo
   gantry run --title T --request R   create a run and start the pipeline
   gantry stage <stage> --run ID      run one agent stage (plan/build/evidence)
+  gantry retry <stage> --run ID       re-run a stage fresh (new session, no resume/feedback)
   gantry checks --run ID             run scope guard + repo checks
   gantry review --run ID             run the independent LLM review
   gantry approve --run ID --stage S  pass a human-review gate, advance
@@ -30,7 +31,7 @@ from .. import __version__
 from .docs import cmd_doctor, cmd_docs
 from .run_commands import (
     cmd_advance, cmd_approve, cmd_cancel, cmd_checks, cmd_cleanup, cmd_init,
-    cmd_loop, cmd_review, cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
+    cmd_loop, cmd_retry, cmd_review, cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
 )
 from .system import cmd_cockpit, cmd_daemon, cmd_mcp, cmd_update
 from .watch import cmd_listen, cmd_watch
@@ -58,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run", required=True)
     s.add_argument("--resume", action="store_true")
     s.set_defaults(func=cmd_stage)
+
+    s = sub.add_parser("retry", help="re-run a stage from scratch (new session, no resume/feedback) — "
+                                      "for a stage that just flaked, not one that needs a replan")
+    s.add_argument("stage", choices=["plan", "build", "evidence"])
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_retry)
 
     s = sub.add_parser("checks", help="scope guard + repo checks")
     s.add_argument("--run", required=True)

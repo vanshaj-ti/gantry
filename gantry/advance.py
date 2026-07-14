@@ -23,8 +23,9 @@ from typing import Any
 
 from .config import AGENT_STAGES, GantryConfig
 from .e2e import run_e2e_tests
-from .engine import Engine
+from .engine import HEARTBEAT_INTERVAL, Engine
 from .review import run_review
+from .state import _iso_to_ts
 
 # Transitions the poller drives automatically (no human gate).
 # awaiting_plan / awaiting_build / awaiting_evidence are NOT human-gated (only
@@ -342,24 +343,35 @@ def _repair_stale_running(engine: Engine, run: dict[str, Any]) -> dict[str, Any]
     else ever writes to it again, so `gantry watch`/status lies about a dead
     run still being in flight.
 
-    No PID is tracked anywhere (manual single-run invocations don't even
-    acquire .advance.lock), so liveness can't be checked directly. Wall-clock
-    staleness against the stage's own configured timeout is the only signal
-    available: if the process were still alive, it would have hit its own
-    subprocess timeout and transitioned to `_failed` by now. A run still
-    showing `_running` well past that point is provably dead.
+    Engine.run_agent_stage now writes a `heartbeat_at` timestamp every
+    HEARTBEAT_INTERVAL seconds for as long as its own process is alive — that
+    heartbeat thread dies immediately with the process, unlike the agent
+    subprocess it's timing, so staleness against a small multiple of the
+    heartbeat interval detects a dead run in ~1 minute instead of waiting out
+    the full stage timeout (which can be 15-30 minutes). Older runs with no
+    `heartbeat_at` (state predates this field, or the process crashed before
+    the first beat) fall back to the previous stage-timeout-based check.
     """
     status = run["status"]
     if not status.endswith("_running"):
         return None
     stage = status.removesuffix("_running")
-    timeout = _stage_timeout(engine.cfg, stage)
-    age = time.time() - run["mtime"]
-    if age <= timeout + 120:  # grace period beyond the subprocess's own cap
-        return None
+    state = engine.store.state(run["id"])
+    heartbeat_at = state.get("heartbeat_at")
+    if heartbeat_at:
+        age = time.time() - _iso_to_ts(heartbeat_at)
+        grace = HEARTBEAT_INTERVAL * 3
+        if age <= grace:
+            return None
+        detail = f"no heartbeat for {int(age)}s (interval {HEARTBEAT_INTERVAL}s)"
+    else:
+        timeout = _stage_timeout(engine.cfg, stage)
+        age = time.time() - run["mtime"]
+        if age <= timeout + 120:  # grace period beyond the subprocess's own cap
+            return None
+        detail = f"stale for {int(age)}s (stage timeout {timeout}s), no heartbeat recorded"
     engine.store.write_log(run["id"], f"{stage}.stderr",
-                           f"Repaired stale status: {status} for {int(age)}s "
-                           f"(stage timeout {timeout}s) — process presumed dead.")
+                           f"Repaired stale status: {status} — {detail} — process presumed dead.")
     engine._set_status(run["id"], f"{stage}_failed")
     return {"run_id": run["id"], "advanced": False, "action": "repaired_stale_running",
             "was": status, "age_seconds": int(age)}

@@ -15,6 +15,7 @@ GantryConfig and the runner/notifier adapters.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,34 @@ from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
 from .runners import get_runner
-from .state import RunStore
+from .state import RunStore, now_iso
+
+# How often a running agent stage's heartbeat_at gets refreshed in state.json.
+# Lets `gantry watch` and advance.py's stale-run repair tell "still working"
+# apart from "process died mid-stage" without waiting out the full stage
+# timeout — the heartbeat thread dies the instant the gantry process itself
+# does, whereas a wedged-but-alive agent subprocess keeps the heartbeat going.
+HEARTBEAT_INTERVAL = 20
+
+
+def _start_heartbeat(store: RunStore, run_id: str, interval: float | None = None) -> tuple[threading.Event, threading.Thread]:
+    stop = threading.Event()
+
+    def _beat() -> None:
+        # Read the module global at wait-time (not a bound default arg) so
+        # tests can patch gantry.engine.HEARTBEAT_INTERVAL and see it take
+        # effect without needing to thread a parameter through run_agent_stage.
+        while not stop.wait(interval if interval is not None else HEARTBEAT_INTERVAL):
+            store.update_state(run_id, heartbeat_at=now_iso())
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _stop_heartbeat(stop: threading.Event, thread: threading.Thread) -> None:
+    stop.set()
+    thread.join(timeout=1)
 
 
 class Engine:
@@ -117,7 +145,8 @@ class Engine:
         if mcp_results:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
-        self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume)
+        self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume,
+                         heartbeat_at=now_iso())
         # Record runner/model before invoking (not just after, in save_session
         # below) so a live *_running status shows what's actually driving it
         # right now — session_id isn't known until the agent returns, but
@@ -125,31 +154,35 @@ class Engine:
         # `gantry watch`'s detail column while a stage is still running.
         self.store.save_session(run_id, stage, model=sm.model, runner=runner.name)
         import subprocess as _subprocess
+        stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
-            result = runner.run(
-                cwd=work_dir,
-                prompt=prompt,
-                model=sm.model,
-                session_id=session_id,
-                plan_mode=sm.plan_mode,
-                skip_permissions=self.cfg.agent.skip_permissions,
-                output_format=self.cfg.agent.output_format,
-                session_name=f"{run_id}-{stage}",
-                max_turns=sm.max_turns,
-                timeout=sm.timeout,
-            )
-        except _subprocess.TimeoutExpired:
-            # Without this, a killed/timed-out agent subprocess leaves state.json
-            # stuck at "{stage}_running" forever — `gantry watch`/status then lies
-            # about a dead run still being in flight (see recovery notes in the
-            # workflow skill). Mark it failed like any other unsuccessful stage so
-            # the normal retry/escalate machinery (advance.py's "blocked"/
-            # "checks_escalated" path) can act on it instead of a human having to
-            # notice a stale lockfile and reset state by hand.
-            self.store.write_log(run_id, f"{stage}.stderr",
-                                 f"Agent subprocess timed out after {sm.timeout}s")
-            self._set_status(run_id, f"{stage}_failed")
-            return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
+            try:
+                result = runner.run(
+                    cwd=work_dir,
+                    prompt=prompt,
+                    model=sm.model,
+                    session_id=session_id,
+                    plan_mode=sm.plan_mode,
+                    skip_permissions=self.cfg.agent.skip_permissions,
+                    output_format=self.cfg.agent.output_format,
+                    session_name=f"{run_id}-{stage}",
+                    max_turns=sm.max_turns,
+                    timeout=sm.timeout,
+                )
+            except _subprocess.TimeoutExpired:
+                # Without this, a killed/timed-out agent subprocess leaves state.json
+                # stuck at "{stage}_running" forever — `gantry watch`/status then lies
+                # about a dead run still being in flight (see recovery notes in the
+                # workflow skill). Mark it failed like any other unsuccessful stage so
+                # the normal retry/escalate machinery (advance.py's "blocked"/
+                # "checks_escalated" path) can act on it instead of a human having to
+                # notice a stale lockfile and reset state by hand.
+                self.store.write_log(run_id, f"{stage}.stderr",
+                                     f"Agent subprocess timed out after {sm.timeout}s")
+                self._set_status(run_id, f"{stage}_failed")
+                return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
+        finally:
+            _stop_heartbeat(stop_hb, hb_thread)
         suffix = ".resume" if resume else ""
         self.store.write_log(run_id, f"{stage}{suffix}.stdout", result.stdout)
         self.store.write_log(run_id, f"{stage}{suffix}.stderr", result.stderr)

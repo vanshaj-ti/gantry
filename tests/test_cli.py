@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gantry.cli import build_parser
-from gantry.cli.run_commands import cmd_cancel, cmd_cleanup, cmd_init, cmd_run, cmd_status
+from gantry.cli.run_commands import cmd_cancel, cmd_cleanup, cmd_init, cmd_retry, cmd_run, cmd_status
 from gantry.git import ensure_worktree
 
 
@@ -39,6 +39,11 @@ class TestBuildParser(unittest.TestCase):
     def test_stage(self):
         args = self._parse(["stage", "plan", "--run", "r1"])
         self.assertEqual(args.stage, "plan")
+
+    def test_retry(self):
+        args = self._parse(["retry", "build", "--run", "r1"])
+        self.assertEqual(args.func, cmd_retry)
+        self.assertEqual(args.stage, "build")
 
     def test_checks(self):
         self._parse(["checks", "--run", "r1"])
@@ -235,6 +240,48 @@ class TestCmdCancelAndCleanup(unittest.TestCase):
         result = subprocess.run(["git", "worktree", "list"], cwd=str(self.target),
                                 capture_output=True, text=True, check=True)
         self.assertNotIn(run_id, result.stdout)
+
+
+class TestCmdRetry(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self._env_patch = patch.dict("os.environ", {"GANTRY_TARGET": str(self.target)})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def _run_and_capture(self, func, args):
+        with patch("builtins.print") as mock_print:
+            rc = func(args)
+        out = "".join(c.args[0] for c in mock_print.call_args_list if c.args)
+        return rc, out
+
+    def test_cmd_retry_runs_stage_without_resuming(self):
+        from gantry.runners import RunnerResult
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+
+        fake_result = RunnerResult(ok=True, session_id="sess-new", exit_code=0,
+                                    raw={"result": "done"}, stdout="ok", stderr="")
+        with patch("gantry.engine.get_runner") as mock_get_runner:
+            mock_get_runner.return_value.name = "claude-code"
+            mock_get_runner.return_value.run.return_value = fake_result
+            retry_args = build_parser().parse_args(["retry", "plan", "--run", run_id])
+            rc, out = self._run_and_capture(cmd_retry, retry_args)
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        # resume=False means no session_id kwarg is threaded through to the runner
+        call_kwargs = mock_get_runner.return_value.run.call_args.kwargs
+        self.assertIsNone(call_kwargs["session_id"])
+        from gantry.state import RunStore
+        self.assertEqual(RunStore(self.target).state(run_id)["status"], "plan_complete")
 
 
 if __name__ == "__main__":

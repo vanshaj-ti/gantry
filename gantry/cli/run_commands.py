@@ -69,6 +69,23 @@ def cmd_stage(args) -> int:
     return _out(res)
 
 
+def cmd_retry(args) -> int:
+    """Re-run a stage from scratch with a brand-new agent session — same
+    rendered prompt, no stored session resumed, no feedback/comments injected.
+    Distinct from `gantry revise` (sends feedback + expects a replan) and from
+    resuming a `_failed` stage via `gantry stage --resume` (carries the dead
+    session's context forward): this is for a stage that simply flaked
+    (network blip, rate limit, transient tool error) and just needs an
+    identical do-over."""
+    from ..advance import notify_message
+    eng = _engine()
+    res = eng.run_agent_stage(args.run, args.stage, resume=False)
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
+    return _out(res)
+
+
 def cmd_checks(args) -> int:
     from ..advance import notify_message
     eng = _engine()

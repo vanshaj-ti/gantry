@@ -89,6 +89,32 @@ class TestRunAgentStage(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.eng.run_agent_stage("does-not-exist", "plan")
 
+    def test_heartbeat_set_at_stage_start(self):
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            self.eng.run_agent_stage(self.run_id, "plan")
+        self.assertIn("heartbeat_at", self.eng.store.state(self.run_id))
+
+    def test_heartbeat_thread_ticks_and_stops_after_stage(self):
+        import time as _time
+
+        class _SlowRunner(_FakeRunner):
+            def run(self, **kwargs):
+                _time.sleep(0.3)
+                return self.result
+
+        fake = _SlowRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr=""))
+        with patch("gantry.engine.HEARTBEAT_INTERVAL", 0.05), \
+             patch("gantry.engine.get_runner", return_value=fake):
+            self.eng.run_agent_stage(self.run_id, "plan")
+
+        beat_after = self.eng.store.state(self.run_id)["heartbeat_at"]
+        _time.sleep(0.2)
+        beat_later = self.eng.store.state(self.run_id)["heartbeat_at"]
+        self.assertEqual(beat_after, beat_later)  # thread stopped, no further beats
+
 
 if __name__ == "__main__":
     unittest.main()
