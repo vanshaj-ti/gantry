@@ -13,6 +13,7 @@ this being fancy.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from typing import Any
 from .config import GantryConfig
 from .runners import get_runner
 from .state import RunStore, slugify
+
+logger = logging.getLogger(__name__)
 
 SHIP_ARTIFACTS = ["product-spec.md", "build-summary.md", "evidence-report.md"]
 
@@ -75,6 +78,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     try:
         return json.loads(match.group(0))
     except Exception:
+        logger.debug("ship draft JSON extraction failed to parse", exc_info=True)
         return None
 
 
@@ -126,4 +130,5 @@ def draft_ship_meta(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) 
             "branch_slug": _slugify_branch(str(draft["branch_slug"]).strip()) or fallback["branch_slug"],
         }
     except Exception:
+        logger.debug("ship draft generation failed, using fallback title", exc_info=True)
         return fallback

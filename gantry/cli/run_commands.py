@@ -1,0 +1,218 @@
+"""Run lifecycle commands: init, run, stage, checks, review, approve, revise,
+ship, status, advance, loop."""
+from __future__ import annotations
+
+import shutil
+import subprocess
+import time
+
+from ..config import CONFIG_FILENAME, load_config
+from ..engine import Engine
+from ..notify import get_notifier
+from ..review import run_review
+from ..state import RunStore
+from ._shared import TEMPLATE_DIR, _engine, _notify, _out, _target
+
+
+def cmd_init(args) -> int:
+    tgt = _target()
+    cfg_path = tgt / CONFIG_FILENAME
+    if cfg_path.exists() and not args.force:
+        return _out({"ok": False, "error": f"{CONFIG_FILENAME} already exists (use --force)"})
+    tmpl = TEMPLATE_DIR / "gantry.toml"
+    cfg_path.write_text(tmpl.read_text() if tmpl.exists() else "project_id = \"project\"\n")
+    prompts = tgt / ".gantry" / "prompts"
+    prompts.mkdir(parents=True, exist_ok=True)
+    for stage in ["plan", "build", "evidence", "review"]:
+        src = TEMPLATE_DIR / "prompts" / f"{stage}.md"
+        dst = prompts / f"{stage}.md"
+        if src.exists() and not dst.exists():
+            shutil.copy(src, dst)
+    result = {"ok": True, "config": str(cfg_path), "prompts_dir": str(prompts)}
+    if args.with_skills:
+        result["skills_install"] = _install_skills(load_config(tgt))
+    return _out(result)
+
+
+def _install_skills(cfg) -> list[dict]:
+    """Run the declared per-runner install command for each enabled skill.
+    Uses only the inspectable commands in config — never a piped remote script."""
+    runner = cfg.agent.runner
+    out = []
+    for skill in cfg.skills.enabled:
+        cmd = cfg.skills.install_command(skill, runner)
+        if not cmd:
+            out.append({"skill": skill, "runner": runner, "ok": False, "error": "no install command for this runner"})
+            continue
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=300)
+        out.append({"skill": skill, "runner": runner, "command": cmd,
+                    "ok": proc.returncode == 0, "output_tail": (proc.stdout + proc.stderr)[-500:]})
+    return out
+
+
+def cmd_run(args) -> int:
+    eng = _engine()
+    rid = eng.create_run(args.title, args.request or args.title, args.run)
+    return _out({"ok": True, "run_id": rid, "first_stage": eng.cfg.stages[0]})
+
+
+def cmd_stage(args) -> int:
+    from ..advance import notify_message
+    eng = _engine()
+    res = eng.run_agent_stage(args.run, args.stage, resume=args.resume)
+    # Notify regardless of trigger (manual `gantry stage` or the `advance` cron) —
+    # a human watching a terminal for a 10+ minute stage is not a safe assumption.
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
+    return _out(res)
+
+
+def cmd_checks(args) -> int:
+    from ..advance import notify_message
+    eng = _engine()
+    res = eng.run_checks(args.run)
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
+    return _out(res)
+
+
+def cmd_review(args) -> int:
+    from ..advance import notify_message
+    eng = _engine()
+    res = run_review(eng.store, args.run, eng.cfg, eng.work_dir(args.run))
+    notifier = get_notifier(eng.cfg.notify)
+    status = eng.store.state(args.run).get("status", "")
+    _notify(eng.store, notifier, args.run, notify_message(eng.store, args.run, status, res), meta=res)
+    return _out(res)
+
+
+def cmd_approve(args) -> int:
+    nxt = _engine().approve(args.run, args.stage)
+    return _out({"ok": True, "advanced_to": nxt})
+
+
+def cmd_revise(args) -> int:
+    _engine().revise(args.run, args.stage, args.comments)
+    return _out({"ok": True, "stage": args.stage, "status": "changes_requested"})
+
+
+def cmd_ship(args) -> int:
+    """Commit the worktree, push the branch, open a PR. Only valid once review
+    has approved — requires an explicit human call, UNLESS [git].auto_ship is
+    enabled, in which case advance_run (advance.py) calls ship_run directly
+    on review_approved without this command being invoked at all."""
+    from ..ship import ship_run
+    eng = _engine()
+    run_id = args.run
+    state = eng.store.state(run_id)
+    if state.get("status") != "review_approved" and not args.force:
+        return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
+                    f"not review_approved (use --force to override)"})
+    return _out(ship_run(eng, run_id))
+
+
+def cmd_status(args) -> int:
+    store = RunStore(_target())
+    if args.run:
+        return _out(store.state(args.run))
+    return _out(store.list_runs())
+
+
+def cmd_advance(args) -> int:
+    from ..advance import advance_all, advance_run, notify_message
+    tgt = _target()
+    cfg = load_config(tgt)
+    if args.all:
+        results = advance_all(tgt, cfg)
+        # Notify on every result, not just successful advances — a run that
+        # stalled at blocked/checks_failed/review_escalated needs a human to
+        # see it just as much as one that progressed, arguably more.
+        if results:
+            notifier = get_notifier(cfg.notify)
+            store = RunStore(tgt)
+            for r in results:
+                if r.get("action") == "skipped_locked":
+                    continue
+                st = store.state(r["run_id"]).get("status", "")
+                _notify(store, notifier, r["run_id"], notify_message(store, r["run_id"], st, r), meta=r)
+        return _out(results)
+    eng = Engine(tgt, cfg)
+    try:
+        return _out(advance_run(eng, args.run))
+    except Exception as exc:
+        # Any uncaught exception here (e.g. a deterministic step like e2e
+        # raising instead of being caught internally) would otherwise leave
+        # state.json at whatever "{stage}_running" it was already showing —
+        # main()'s top-level handler only prints the error, it never touches
+        # run state. Mark the in-flight stage failed so `gantry watch`/status
+        # doesn't lie about a run still being alive after this process exits.
+        st = eng.store.state(args.run)
+        current = st.get("current_stage") or st.get("status", "").removesuffix("_running")
+        if current and st.get("status", "").endswith("_running"):
+            eng._set_status(args.run, f"{current}_failed")
+        return _out({"ok": False, "error": str(exc)})
+
+
+# Statuses where a single-run loop should stop: the run is done, needs a human,
+# or has errored. Mirrors advance.py's AUTO_TRANSITIONS gate but from the other
+# side — these are exactly the statuses NOT in AUTO_TRANSITIONS that a bare
+# `advance --run` tick would refuse to touch, plus terminal ship states.
+_LOOP_STOP_SUFFIXES = ("_failed", "_approved", "_escalated", "_shipped")
+_LOOP_STOP_PREFIXES = ("awaiting_", "shipped")
+_LOOP_STOP_EXACT = {"blocked"}
+
+
+def _is_loop_terminal(status: str) -> bool:
+    if status in _LOOP_STOP_EXACT:
+        return True
+    if any(status.endswith(suf) for suf in _LOOP_STOP_SUFFIXES):
+        return True
+    if any(status.startswith(pre) for pre in _LOOP_STOP_PREFIXES):
+        return True
+    return False
+
+
+def cmd_loop(args) -> int:
+    """Repeatedly tick the pipeline (in-process, foreground) instead of relying
+    on an external cron calling `gantry advance --all` on a timer. With --run,
+    stops as soon as that run reaches a human-gated or terminal state; without
+    it, loops every run forever (Ctrl-C to stop), same transitions `--all` drives."""
+    from ..advance import advance_all, advance_run, notify_message
+    tgt = _target()
+    cfg = load_config(tgt)
+    store = RunStore(tgt)
+    ticks = 0
+    print(f"gantry loop: interval={args.interval}s"
+          + (f" run={args.run}" if args.run else " (all runs)"), flush=True)
+    try:
+        while True:
+            ticks += 1
+            if args.run:
+                status = store.state(args.run).get("status", "")
+                print(f"[tick {ticks}] {args.run}: {status}", flush=True)
+                if _is_loop_terminal(status):
+                    print(f"gantry loop: stopping, reached {status}", flush=True)
+                    return 0
+                eng = Engine(tgt, cfg)
+                result = advance_run(eng, args.run)
+                print(f"[tick {ticks}] advance -> {result}", flush=True)
+            else:
+                results = advance_all(tgt, cfg)
+                if results:
+                    notifier = get_notifier(cfg.notify)
+                    for r in results:
+                        if r.get("action") == "skipped_locked":
+                            continue
+                        st = store.state(r["run_id"]).get("status", "")
+                        _notify(store, notifier, r["run_id"],
+                               notify_message(store, r["run_id"], st, r), meta=r)
+                print(f"[tick {ticks}] advance --all -> {len(results)} run(s) touched", flush=True)
+            if args.max_ticks and ticks >= args.max_ticks:
+                print(f"gantry loop: stopping, reached max-ticks={args.max_ticks}", flush=True)
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\ngantry loop: interrupted", flush=True)
+        return 130

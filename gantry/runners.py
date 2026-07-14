@@ -12,10 +12,13 @@ parser. Add a runner by subclassing AgentRunner and registering it in _RUNNERS.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -192,6 +195,7 @@ class CodexRunner(AgentRunner):
             try:
                 event = json.loads(line)
             except Exception:
+                logger.debug("skipping non-JSON codex-cli output line: %r", line)
                 continue
             etype = event.get("type")
             if etype == "thread.started":

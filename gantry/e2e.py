@@ -9,7 +9,6 @@ kill) an expensive LLM turn — this step is cheap to re-run on its own.
 """
 from __future__ import annotations
 
-import fnmatch
 import subprocess
 from pathlib import Path
 from typing import Any

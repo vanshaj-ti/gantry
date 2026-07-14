@@ -33,7 +33,18 @@ classifiers = [
 gantry = "gantry.cli:main"
 
 [tool.setuptools]
-packages = ["gantry"]
+packages = ["gantry", "gantry.cli"]
 
 [tool.setuptools.package-data]
 gantry = ["templates/*.toml", "templates/prompts/*.md"]
+
+[tool.ruff]
+line-length = 132
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.coverage.run]
+source = ["gantry"]
+branch = true

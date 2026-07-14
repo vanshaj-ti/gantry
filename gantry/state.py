@@ -7,10 +7,13 @@ survive across invocations and machines.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 RUNS_DIRNAME = ".agent-runs"
 
@@ -151,5 +154,5 @@ class RunStore:
                 out.append({"id": sf.parent.name, "status": st.get("status", "unknown"),
                             "title": st.get("title", ""), "mtime": sf.stat().st_mtime})
             except Exception:
-                pass
+                logger.warning("skipping unreadable state file %s", sf, exc_info=True)
         return sorted(out, key=lambda x: x["mtime"], reverse=True)
