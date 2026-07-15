@@ -248,6 +248,88 @@ class Engine:
         self._set_status(run_id, status)
         return {"stage": stage, "ok": result.ok, "session_id": result.session_id}
 
+    def run_resolver_stage(self, run_id: str) -> dict[str, Any]:
+        """Spawn a dedicated fix-it agent when the normal build/checks retry
+        loop has been exhausted (checks_escalated) — instead of dead-ending
+        at a human, gated behind cfg.checks.auto_resolve.
+
+        Deliberately does NOT trust the resolver agent's own claim of
+        success — that's exactly the failure mode that motivated this: a
+        resumed build agent reported build_complete while a real, unresolved
+        git merge-conflict marker was still committed in the file, and the
+        auto-retry loop kept re-running the identical broken state three
+        times because nothing re-verified the actual result. This method
+        re-runs real checks itself (self.run_checks) after the resolver
+        agent finishes, and the caller (advance.py) decides success based on
+        THAT, never on the agent's stdout/self-report.
+
+        Builds its own prompt (not render_prompt/a stage template) because
+        the resolver's context is fundamentally different from build/plan/
+        evidence: it needs the concrete, current failure detail (not a spec
+        to implement), explicit instructions to actually run the repo's own
+        checks commands itself before finishing, and a hard requirement to
+        never claim success without that verification.
+        """
+        checks = self.store.read_result(run_id, "checks.json") or {}
+        from .advance import _checks_failure_detail
+        detail = _checks_failure_detail(self.store, run_id)
+        wt = self.work_dir(run_id)
+        import subprocess as _subprocess
+        diff_stat = _subprocess.run(["git", "diff", "--stat", "HEAD"], cwd=str(wt),
+                                    capture_output=True, text=True, timeout=30).stdout
+        status = _subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
+                                 capture_output=True, text=True, timeout=30).stdout
+        commands_list = "\n".join(f"  {c}" for c in self.cfg.checks.commands)
+        prompt = (
+            f"# Resolver stage — checks were escalated after exhausting normal auto-retry\n\n"
+            f"Run: {run_id}\n\n"
+            f"This run's build/checks/rebuild loop failed repeatedly on the SAME issue and "
+            f"auto-retry gave up. You are being invoked specifically to diagnose and fix the "
+            f"actual root cause — not to repeat whatever the previous build attempts already "
+            f"tried and failed at.\n\n"
+            f"## Current failure detail\n{detail}\n\n"
+            f"## Current git status (uncommitted changes, if any)\n```\n{status or '(clean)'}\n```\n\n"
+            f"## Current diff stat vs HEAD\n```\n{diff_stat or '(no diff)'}\n```\n\n"
+            f"## Repo check commands (these are what must pass — run them yourself before "
+            f"declaring anything fixed)\n{commands_list}\n\n"
+            f"## Requirements\n"
+            f"1. Actually investigate — read the failing file(s), understand what's really "
+            f"wrong (e.g. check for leftover merge-conflict markers, actual logic bugs, "
+            f"missing declarations — don't guess from the error text alone).\n"
+            f"2. Fix the root cause. Commit the fix.\n"
+            f"3. Run the repo's own check commands YOURSELF (the exact commands listed above) "
+            f"and confirm they pass with your own eyes before finishing. Do not report success "
+            f"without having actually run them and seen them pass in this session.\n"
+            f"4. If you cannot find or fix the actual problem, say so explicitly and describe "
+            f"what you found — do not claim a fix that isn't real. A false claim of success "
+            f"here wastes the retry budget and is worse than an honest 'I could not fix this.'\n"
+        )
+        self.store.write_log(run_id, "resolve-prompt.md", prompt)
+        runner = get_runner(self.cfg.runner_for("build"))
+        self._set_status(run_id, "resolve_running", current_stage="build", heartbeat_at=now_iso())
+        stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
+        try:
+            result = runner.run(
+                cwd=wt, prompt=prompt, model=self.cfg.model_for("build").model,
+                session_id=None, plan_mode=False, skip_permissions=self.cfg.agent.skip_permissions,
+                output_format=self.cfg.agent.output_format, session_name=f"{run_id}-resolve",
+                max_turns=self.cfg.model_for("build").max_turns * 2, timeout=self.cfg.model_for("build").timeout,
+            )
+        finally:
+            _stop_heartbeat(stop_hb, hb_thread)
+        self.store.write_log(run_id, "resolve.stdout", result.stdout)
+        self.store.write_log(run_id, "resolve.stderr", result.stderr)
+        self.store.write_result(run_id, "resolve-result.json", result.raw)
+
+        # Never trust the agent's own report — re-run real checks ourselves.
+        verify = self.run_checks(run_id)
+        if verify["pass"]:
+            self._set_status(run_id, "build_complete", blocked_on=None, checks="pass")
+        else:
+            self._set_status(run_id, "checks_escalated", blocked_on=verify.get("scope") and
+                             ("scope" if not verify["scope"]["pass"] else "checks"))
+        return {"agent_ok": result.ok, "verified_pass": verify["pass"], "checks": verify}
+
     def run_checks(self, run_id: str) -> dict[str, Any]:
         # Catch up this run's branch with base_branch BEFORE the scope guard
         # computes its merge-base diff — otherwise a base_branch that moved

@@ -357,5 +357,134 @@ class TestRunDependencies(unittest.TestCase):
         self.assertNotEqual(self.eng.store.state(rid)["status"], "queued")
 
 
+class TestResolverStage(unittest.TestCase):
+    """auto_resolve: when normal build/checks auto-retry exhausts and a run
+    hits checks_escalated, spawn a dedicated resolver agent instead of
+    dead-ending at a human forever. Critically, gantry must re-verify the
+    resolver's work itself (real run_checks) rather than trust the agent's
+    own claim — that's the exact failure mode from the incident that
+    motivated this feature (a resumed build agent reported build_complete
+    while a real unresolved merge-conflict marker was still committed)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make_engine(self, auto_resolve=True, resolve_attempts=2):
+        cfg = GantryConfig()
+        cfg.checks.auto_resolve = auto_resolve
+        cfg.checks.resolve_attempts = resolve_attempts
+        return Engine(self.target, cfg)
+
+    def test_checks_escalated_not_auto_advanced_when_auto_resolve_off(self):
+        from gantry.advance import advance_run
+        eng = self._make_engine(auto_resolve=False)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="checks_escalated")
+
+        with patch.object(Engine, "run_resolver_stage") as mock_resolve:
+            result = advance_run(eng, run_id)
+
+        self.assertFalse(mock_resolve.called)
+        self.assertEqual(result["action"], "no_auto_transition")
+
+    def test_checks_escalated_spawns_resolver_when_auto_resolve_on(self):
+        from gantry.advance import advance_run
+        eng = self._make_engine(auto_resolve=True)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="checks_escalated")
+
+        def _fake_resolver(self, rid):
+            # Simulate the resolver stage's own real behavior: it transitions
+            # status itself (to build_complete on verified success) before
+            # returning — advance_run must read that post-call, not assume it.
+            self.store.update_state(rid, status="build_complete")
+            return {"agent_ok": True, "verified_pass": True}
+
+        with patch.object(Engine, "run_resolver_stage", _fake_resolver):
+            result = advance_run(eng, run_id)
+
+        self.assertEqual(result["action"], "resolver_attempted")
+        self.assertTrue(result["verified_pass"])
+        self.assertEqual(eng.store.state(run_id)["status"], "build_complete")
+
+    def test_resolver_attempts_capped_then_resolve_escalated(self):
+        from gantry.advance import advance_run
+        eng = self._make_engine(auto_resolve=True, resolve_attempts=2)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="checks_escalated", resolve_attempt_count=2)
+
+        with patch.object(Engine, "run_resolver_stage") as mock_resolve:
+            result = advance_run(eng, run_id)
+
+        self.assertFalse(mock_resolve.called)
+        self.assertEqual(result["action"], "resolve_escalated")
+        self.assertEqual(eng.store.state(run_id)["status"], "resolve_escalated")
+
+    def test_checks_escalated_in_auto_transitions_only_when_auto_resolve_on(self):
+        from gantry.advance import advance_all
+        eng_off = self._make_engine(auto_resolve=False)
+        run_id = eng_off.create_run("t", "test")
+        eng_off.store.update_state(run_id, status="checks_escalated")
+
+        with patch.object(Engine, "run_resolver_stage") as mock_resolve:
+            advance_all(self.target, eng_off.cfg)
+        self.assertFalse(mock_resolve.called)
+
+        # Flip auto_resolve on for the SAME run — advance_all's gate must
+        # reflect the config passed to it, not a stale property of the run.
+        cfg_on = self._make_engine(auto_resolve=True).cfg
+        with patch.object(Engine, "run_resolver_stage") as mock_resolve:
+            mock_resolve.return_value = {"agent_ok": True, "verified_pass": True}
+            advance_all(self.target, cfg_on)
+        mock_resolve.assert_called_once_with(run_id)
+
+    def test_resolver_stage_verifies_via_real_checks_not_agent_self_report(self):
+        """The core guarantee: even if the resolver agent's own subprocess
+        result claims success, run_resolver_stage's returned verified_pass
+        must reflect an ACTUAL re-run of checks, not the agent's stdout."""
+        eng = self._make_engine(auto_resolve=True)
+        run_id = eng.create_run("t", "test")
+        eng.store.write_result(run_id, "checks.json", {"pass": False, "scope": {"pass": False}})
+
+        fake_runner_result = type("R", (), {
+            "ok": True, "stdout": "I fixed it and everything passes!",
+            "stderr": "", "raw": {"result": "done"}, "session_id": "s1",
+        })()
+
+        with patch("gantry.engine.get_runner") as mock_get_runner, \
+             patch.object(Engine, "run_checks") as mock_run_checks:
+            mock_get_runner.return_value.run.return_value = fake_runner_result
+            # Real checks say it's STILL failing, despite the agent's claim.
+            mock_run_checks.return_value = {"pass": False, "scope": {"pass": True}}
+            result = eng.run_resolver_stage(run_id)
+
+        self.assertFalse(result["verified_pass"])
+        self.assertEqual(eng.store.state(run_id)["status"], "checks_escalated")
+
+    def test_resolver_stage_accepts_success_only_on_real_verified_pass(self):
+        eng = self._make_engine(auto_resolve=True)
+        run_id = eng.create_run("t", "test")
+        eng.store.write_result(run_id, "checks.json", {"pass": False, "scope": {"pass": False}})
+
+        fake_runner_result = type("R", (), {
+            "ok": True, "stdout": "fixed", "stderr": "", "raw": {"result": "done"},
+            "session_id": "s1",
+        })()
+
+        with patch("gantry.engine.get_runner") as mock_get_runner, \
+             patch.object(Engine, "run_checks") as mock_run_checks:
+            mock_get_runner.return_value.run.return_value = fake_runner_result
+            mock_run_checks.return_value = {"pass": True}
+            result = eng.run_resolver_stage(run_id)
+
+        self.assertTrue(result["verified_pass"])
+        self.assertEqual(eng.store.state(run_id)["status"], "build_complete")
+
+
 if __name__ == "__main__":
     unittest.main()

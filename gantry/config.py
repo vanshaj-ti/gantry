@@ -114,6 +114,17 @@ class ChecksConfig:
     timeout: int = 900
     retry_checks: int = 3  # auto-resume build with failure feedback this many times
                            # before escalating to a human (checks_escalated)
+    auto_resolve: bool = False   # if True, checks_escalated spawns a dedicated
+                                  # resolver agent instead of dead-ending at a
+                                  # human. Opt-in, same reasoning as auto_ship/
+                                  # auto_merge: appropriate for a solo/local
+                                  # project willing to trade a human review gate
+                                  # for full unattended operation, not a sane
+                                  # default for team repos.
+    resolve_attempts: int = 2   # cap on resolver-agent attempts before giving
+                                 # up for real (resolve_escalated) — a genuine
+                                 # backstop so a broken resolver can't loop
+                                 # forever either, same shape as retry_checks.
 
 
 @dataclass
@@ -312,7 +323,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
     if "checks" in raw:
         c = raw["checks"]
         cfg.checks = ChecksConfig(commands=c.get("commands", []), timeout=int(c.get("timeout", 900)),
-                                  retry_checks=int(c.get("retry_checks", 3)))
+                                  retry_checks=int(c.get("retry_checks", 3)),
+                                  auto_resolve=bool(c.get("auto_resolve", False)),
+                                  resolve_attempts=int(c.get("resolve_attempts", 2)))
     if "e2e" in raw:
         e = raw["e2e"]
         cfg.e2e = E2eConfig(

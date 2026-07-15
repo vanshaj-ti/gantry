@@ -318,6 +318,32 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         return {"advanced": True, "from": status, "action": "retry_build_after_checks_failure",
                 "retry_count": retry_count + 1}
 
+    if status == "checks_escalated" and engine.cfg.checks.auto_resolve:
+        # Real incident that motivated this: escalated states used to
+        # dead-end at a human forever under passive polling — a run could
+        # sit here indefinitely with nobody noticing unless someone happened
+        # to check `gantry watch`. auto_resolve spawns a dedicated resolver
+        # agent (Engine.run_resolver_stage) with the actual failure detail,
+        # git diff/status, and an explicit instruction to verify its own fix
+        # by re-running the repo's real check commands — gantry itself then
+        # re-verifies via run_checks before accepting success, never trusting
+        # the resolver's self-report (that's exactly the failure mode from
+        # the build-agent incident: a resumed build claimed "build_complete"
+        # while a real unresolved merge-conflict marker was still committed,
+        # and auto-retry kept re-running the identical broken state because
+        # nothing re-verified the actual result).
+        resolve_attempts = engine.store.state(run_id).get("resolve_attempt_count", 0)
+        if resolve_attempts >= engine.cfg.checks.resolve_attempts:
+            engine.store.update_state(run_id, status="resolve_escalated")
+            return {"advanced": False, "from": status, "action": "resolve_escalated",
+                    "resolve_attempts": resolve_attempts}
+        engine.store.update_state(run_id, resolve_attempt_count=resolve_attempts + 1)
+        result = engine.run_resolver_stage(run_id)
+        new_status = engine.store.state(run_id).get("status")
+        return {"advanced": True, "from": status, "action": "resolver_attempted",
+                "resolve_attempts": resolve_attempts + 1, "verified_pass": result["verified_pass"],
+                "new_status": new_status}
+
     return {"advanced": False, "from": status, "action": "no_auto_transition"}
 
 
@@ -325,18 +351,54 @@ def _lock_path(engine: Engine, run_id: str) -> Path:
     return engine.store.run_dir(run_id) / ".advance.lock"
 
 
+def _pid_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists. Uses signal 0 (no-op
+    signal, just existence/permission check) rather than anything that could
+    actually affect the process."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but owned by another user — still "alive" for our
+        # purposes (can't be this reclaiming process's PID either way).
+        return True
+    except OSError:
+        return False
+
+
 def _acquire_lock(engine: Engine, run_id: str, stale_after: int = 1800) -> bool:
     """Best-effort lock so a slow-running stage (build/evidence routinely take
-    minutes) doesn't get double-fired by the next 60s cron tick. Stale locks
-    (crashed process, stale_after seconds old) are reclaimed automatically."""
+    minutes) doesn't get double-fired by the next 60s cron tick.
+
+    Reclaims immediately (regardless of age) if the PID recorded in the lock
+    file is no longer a running process — a crashed/killed holder leaves no
+    live process, so there's no reason to wait out stale_after in that case.
+    Falls back to the time-based stale_after threshold only when the PID
+    check itself is inconclusive (e.g. unreadable/corrupt lock content) —
+    a real incident hit this: a lock from an interrupted manual invocation
+    sat for 13 minutes (under the 30-minute stale_after) blocking `gantry
+    loop`'s passive advance --all from ever touching that run again, even
+    though the process that wrote the lock was long gone."""
     lock = _lock_path(engine, run_id)
     if lock.exists():
         try:
-            age = time.time() - lock.stat().st_mtime
-            if age < stale_after:
-                return False
-        except OSError:
-            pass
+            held_pid_text = lock.read_text().strip()
+            held_pid = int(held_pid_text) if held_pid_text else None
+        except (OSError, ValueError):
+            held_pid = None
+        if held_pid is not None and held_pid != os.getpid() and _pid_alive(held_pid):
+            return False
+        if held_pid is None:
+            # Couldn't determine liveness — fall back to time-based staleness
+            # rather than reclaiming an indeterminate lock immediately.
+            try:
+                age = time.time() - lock.stat().st_mtime
+                if age < stale_after:
+                    return False
+            except OSError:
+                pass
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text(str(os.getpid()))
     return True
@@ -417,7 +479,12 @@ def advance_all(target: Path, cfg: GantryConfig) -> list[dict[str, Any]]:
         # never fires from `gantry loop`/cron — only from a direct manual call
         # that bypasses this gate — which defeats the entire point of the
         # config flag existing.
-        auto_transitions = AUTO_TRANSITIONS | ({"review_approved"} if cfg.git.auto_ship else set())
+        # Same conditional-gate pattern as review_approved/auto_ship above:
+        # checks_escalated is a human-gated terminal state UNLESS auto_resolve
+        # is on, in which case advance_run knows how to spawn the resolver.
+        auto_transitions = (AUTO_TRANSITIONS
+                           | ({"review_approved"} if cfg.git.auto_ship else set())
+                           | ({"checks_escalated"} if cfg.checks.auto_resolve else set()))
         if run["status"] not in auto_transitions:
             continue
         if not _acquire_lock(engine, rid):
