@@ -40,6 +40,52 @@ def _branch_exists(target: Path, branch: str) -> bool:
     return proc.returncode == 0
 
 
+def sync_local_base_branch(target: Path, base_branch: str) -> dict:
+    """Fast-forward the LOCAL base_branch ref (e.g. "main") to match
+    origin/<base_branch>, if it's behind. `git fetch origin` alone updates
+    origin/main but never touches local main — a run's worktree branches off
+    local main (git worktree add -b <run-branch> <wt> <base_branch> resolves
+    against the local ref), so if local main has drifted behind origin (e.g.
+    because auto_merge just squash-merged a prior run's PR on GitHub, which
+    updates origin/main but nothing pulls that back locally), every
+    subsequently-created worktree branches off a STALE main. Its later scope-
+    guard diff then falsely flags the prior run's already-shipped files as
+    "unexpected" (they look brand-new relative to that stale merge-base) —
+    checks fail, auto-retry exhausts, and the run escalates to build_failed
+    for a run that has no real problem, just a stale base ref. Runs this
+    after every fetch in ensure_worktree so newly-created worktrees always
+    branch from a base that's actually current. No-op (and never raises) if
+    base_branch is a remote ref already (e.g. "origin/main") or has no
+    upstream, or if the local branch has diverged (ambiguous — leave it for a
+    human rather than silently force-updating local history).
+
+    Fetches origin itself rather than trusting the caller already did — the
+    origin/<base_branch> ref this compares against must itself be current, or
+    "already_current"/"fast_forwarded" would be judged against stale data."""
+    if base_branch.startswith("origin/") or "/" in base_branch:
+        return {"ok": True, "action": "skipped_remote_ref"}
+    _run(["git", "fetch", "--quiet", "origin", base_branch], target, timeout=120)
+    local = _run(["git", "rev-parse", "--verify", "--quiet", base_branch], target)
+    remote = _run(["git", "rev-parse", "--verify", "--quiet", f"origin/{base_branch}"], target)
+    if local.returncode != 0 or remote.returncode != 0:
+        return {"ok": True, "action": "skipped_no_upstream"}
+    if local.stdout.strip() == remote.stdout.strip():
+        return {"ok": True, "action": "already_current"}
+    is_ancestor = _run(["git", "merge-base", "--is-ancestor", base_branch, f"origin/{base_branch}"], target)
+    if is_ancestor.returncode != 0:
+        # Local base_branch has commits origin doesn't (diverged, not just
+        # behind) — fast-forwarding here could silently discard local work.
+        # Leave it alone; this is a human decision, not one to automate.
+        return {"ok": True, "action": "skipped_diverged"}
+    current = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], target)
+    if current.stdout.strip() == base_branch:
+        proc = _run(["git", "merge", "--ff-only", f"origin/{base_branch}"], target, timeout=60)
+    else:
+        proc = _run(["git", "fetch", ".", f"origin/{base_branch}:{base_branch}"], target, timeout=60)
+    return {"ok": proc.returncode == 0, "action": "fast_forwarded" if proc.returncode == 0 else "ff_failed",
+            "output": (proc.stdout + proc.stderr)[-500:]}
+
+
 def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
     """Idempotent: create the run's worktree+branch if missing, else reuse it.
     Returns the worktree path. Raises RuntimeError with git's stderr on failure.
@@ -51,8 +97,11 @@ def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
     wt.parent.mkdir(parents=True, exist_ok=True)
     branch = branch_name(run_id)
 
-    # Make sure base_branch is resolvable (fetch if it's a remote ref not yet local).
+    # Make sure base_branch is resolvable (fetch if it's a remote ref not yet local),
+    # then fast-forward the LOCAL base_branch ref itself — see
+    # sync_local_base_branch's docstring for why this second step is required.
     _run(["git", "fetch", "--quiet", "origin"], target, timeout=120)
+    sync_local_base_branch(target, base_branch)
 
     if _branch_exists(target, branch):
         # Branch already exists (e.g. resumed run after a crash) — attach worktree to it.
