@@ -305,15 +305,24 @@ class Engine:
             f"here wastes the retry budget and is worse than an honest 'I could not fix this.'\n"
         )
         self.store.write_log(run_id, "resolve-prompt.md", prompt)
-        runner = get_runner(self.cfg.runner_for("build"))
+        # Uses [models.resolve] if the project configures it, else falls back
+        # to [models.build]'s model/runner (model_for's own default behavior
+        # for an unconfigured stage name). Worth configuring resolve to a
+        # stronger model than build where build uses a fast/cheap one — this
+        # stage exists specifically because build already failed 3 times on
+        # the same issue, so re-running the same model that produced (or
+        # missed) the bug is a weaker bet than escalating to a more capable
+        # one for the fix-it attempt.
+        sm = self.cfg.model_for("resolve") if "resolve" in self.cfg.models else self.cfg.model_for("build")
+        runner = get_runner(sm.runner or self.cfg.agent.runner)
         self._set_status(run_id, "resolve_running", current_stage="build", heartbeat_at=now_iso())
         stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
             result = runner.run(
-                cwd=wt, prompt=prompt, model=self.cfg.model_for("build").model,
+                cwd=wt, prompt=prompt, model=sm.model,
                 session_id=None, plan_mode=False, skip_permissions=self.cfg.agent.skip_permissions,
                 output_format=self.cfg.agent.output_format, session_name=f"{run_id}-resolve",
-                max_turns=self.cfg.model_for("build").max_turns * 2, timeout=self.cfg.model_for("build").timeout,
+                max_turns=sm.max_turns * 2, timeout=sm.timeout,
             )
         finally:
             _stop_heartbeat(stop_hb, hb_thread)
