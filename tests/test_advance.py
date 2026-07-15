@@ -168,6 +168,49 @@ class TestAutoShip(unittest.TestCase):
 
         self.assertEqual(result["action"], "auto_ship_failed")
 
+    def test_advance_all_does_not_pick_up_review_approved_when_auto_ship_off(self):
+        """review_approved is a human-gated terminal state by default —
+        gantry loop/advance --all must never touch it unless auto_ship is on."""
+        from gantry.advance import advance_all
+        cfg = GantryConfig()
+        self.assertFalse(cfg.git.auto_ship)
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="review_approved")
+
+        with patch("gantry.ship.ship_run") as mock_ship:
+            results = advance_all(self.target, cfg)
+
+        self.assertFalse(mock_ship.called)
+        touched = [r for r in results if r.get("run_id") == run_id]
+        self.assertEqual(touched, [])
+
+    def test_advance_all_picks_up_review_approved_and_ships_when_auto_ship_on(self):
+        """Regression test for a real bug: AUTO_TRANSITIONS (the static gate
+        advance_all checks BEFORE calling advance_run) never included
+        review_approved, even conditionally — so a project with auto_ship=true
+        in gantry.toml never actually got its approved runs shipped by the
+        passive poller (`gantry loop` / cron calling advance --all). Only a
+        direct `gantry advance --run <id>` call (which invokes advance_run
+        directly, bypassing advance_all's gate) would trigger the ship. This
+        silently defeated the entire point of auto_ship existing — a run
+        would sit at review_approved indefinitely under passive polling."""
+        from gantry.advance import advance_all
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="review_approved")
+
+        with patch("gantry.ship.ship_run") as mock_ship:
+            mock_ship.return_value = {"ok": True, "pr": {"url": "https://example.com/pr/1"}}
+            results = advance_all(self.target, cfg)
+
+        self.assertTrue(mock_ship.called)
+        touched = [r for r in results if r.get("run_id") == run_id]
+        self.assertEqual(len(touched), 1)
+        self.assertEqual(touched[0]["action"], "auto_shipped")
+
 
 class TestRepairStaleRunning(unittest.TestCase):
     def setUp(self):

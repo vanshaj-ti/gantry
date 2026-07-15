@@ -398,7 +398,19 @@ def advance_all(target: Path, cfg: GantryConfig) -> list[dict[str, Any]]:
         if repaired:
             results.append(repaired)
             continue
-        if run["status"] not in AUTO_TRANSITIONS:
+        # review_approved is deliberately absent from the static AUTO_TRANSITIONS
+        # set — it's a human-gated terminal state UNLESS this project has opted
+        # into cfg.git.auto_ship, in which case advance_run already knows how to
+        # ship it. Checking auto_ship here (not by adding review_approved to the
+        # static set) means it stays correctly human-gated for every project
+        # that hasn't opted in, while auto_ship projects actually get ticked by
+        # the passive poller/loop instead of only advancing via a manual
+        # `gantry advance --run <id>` call. Without this, auto_ship silently
+        # never fires from `gantry loop`/cron — only from a direct manual call
+        # that bypasses this gate — which defeats the entire point of the
+        # config flag existing.
+        auto_transitions = AUTO_TRANSITIONS | ({"review_approved"} if cfg.git.auto_ship else set())
+        if run["status"] not in auto_transitions:
             continue
         if not _acquire_lock(engine, rid):
             results.append({"run_id": rid, "advanced": False, "action": "skipped_locked"})
