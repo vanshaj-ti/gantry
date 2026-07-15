@@ -107,6 +107,17 @@ class TestChecksFailureDetail(unittest.TestCase):
         detail = _checks_failure_detail(self.eng.store, self.run_id)
         self.assertIn("npm run lint", detail)
 
+    def test_base_branch_merge_conflict_detail(self):
+        self.eng.store.write_result(self.run_id, "checks.json", {
+            "pass": False,
+            "base_branch_merge": {"ok": False, "action": "merge_conflict",
+                                  "output": "CONFLICT (content): Merge conflict in src/foo.ts"},
+        })
+        detail = _checks_failure_detail(self.eng.store, self.run_id)
+        self.assertIn("src/foo.ts", detail)
+        self.assertIn("conflict", detail.lower())
+        self.assertIn("Resolve the conflict markers", detail)
+
     def test_checks_escalated_notify_message_includes_detail(self):
         self.eng.store.write_result(self.run_id, "checks.json", {
             "pass": False,

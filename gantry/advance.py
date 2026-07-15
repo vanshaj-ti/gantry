@@ -117,6 +117,14 @@ def _checks_failure_detail(store: Any, run_id: str) -> str:
     checks = store.read_result(run_id, "checks.json")
     if not checks or checks.get("pass"):
         return "Checks failed."
+    merge = checks.get("base_branch_merge") or {}
+    if merge.get("action") == "merge_conflict":
+        return (f"Merging the base branch into this run's own branch hit a real conflict "
+                f"(another queued run shipped changes that overlap with this run's files):\n\n"
+                f"```\n{merge.get('output', '(no output captured)')}\n```\n\n"
+                f"Resolve the conflict markers in the affected files, then continue. "
+                f"This is a genuine content conflict — resolve it deliberately, don't "
+                f"discard either side's changes without checking what they do.")
     scope = checks.get("scope", {})
     if scope.get("forbidden_files") or scope.get("unexpected_files"):
         bad = scope.get("forbidden_files", []) + scope.get("unexpected_files", [])

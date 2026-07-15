@@ -86,6 +86,44 @@ def sync_local_base_branch(target: Path, base_branch: str) -> dict:
             "output": (proc.stdout + proc.stderr)[-500:]}
 
 
+def merge_base_into_worktree(target: Path, run_id: str, base_branch: str) -> dict:
+    """Merge the current base_branch into this run's own branch, inside its
+    worktree, before the scope guard computes a merge-base diff.
+
+    sync_local_base_branch (above) only fixes drift at worktree-CREATION time
+    — it keeps a newly-created worktree from branching off a stale base. It
+    does nothing for a worktree that already exists: once a run's branch is
+    cut, base_branch can keep moving (e.g. run N ships mid-way through run
+    N+1's build), and the scope guard's `git diff <merge-base> --` then
+    diffs against an increasingly stale merge-base, making run N's
+    already-shipped files look like "unexpected new files" on run N+1's
+    branch. Real incident: run 3 shipped while run 4's build was already in
+    flight — run 4's branch still forked from before run 3's merge, and
+    checks kept failing on scope even though sync_local_base_branch had
+    already done its job at creation time.
+
+    Runs `git merge base_branch` inside the worktree itself (not the target
+    repo) so the run's OWN branch — not just the shared base_branch ref —
+    catches up. Safe by construction: a real content conflict here means the
+    run's own changes and base_branch's changes touch the same lines, which
+    is a genuine merge conflict a human or the build agent needs to resolve,
+    not something to auto-resolve or discard — so a conflict is reported,
+    never force-resolved, and the worktree is left in its conflicted state
+    for the next build/resume to handle (or a human to intervene on)."""
+    proc = _run(["git", "fetch", "--quiet", "origin"], target, timeout=120)
+    sync_local_base_branch(target, base_branch)
+    wt = worktree_path(target, run_id)
+    if not wt.exists():
+        return {"ok": True, "action": "no_worktree"}
+    is_ancestor = _run(["git", "merge-base", "--is-ancestor", base_branch, "HEAD"], wt)
+    if is_ancestor.returncode == 0:
+        return {"ok": True, "action": "already_current"}
+    proc = _run(["git", "merge", "--no-edit", base_branch], wt, timeout=60)
+    return {"ok": proc.returncode == 0,
+            "action": "merged" if proc.returncode == 0 else "merge_conflict",
+            "output": (proc.stdout + proc.stderr)[-1000:]}
+
+
 def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
     """Idempotent: create the run's worktree+branch if missing, else reuse it.
     Returns the worktree path. Raises RuntimeError with git's stderr on failure.

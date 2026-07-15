@@ -249,8 +249,20 @@ class Engine:
         return {"stage": stage, "ok": result.ok, "session_id": result.session_id}
 
     def run_checks(self, run_id: str) -> dict[str, Any]:
-        return run_all_checks(self.store, run_id, self.cfg.scope, self.cfg.checks,
-                              self.work_dir(run_id), self.cfg.git.base_branch)
+        # Catch up this run's branch with base_branch BEFORE the scope guard
+        # computes its merge-base diff — otherwise a base_branch that moved
+        # since this run's worktree was created (e.g. an earlier queued run
+        # shipped mid-way through this one's build) makes already-shipped
+        # files look like "unexpected new files" on this run's diff. See
+        # merge_base_into_worktree's docstring for the full incident this
+        # fixes. A genuine merge conflict here is surfaced via merge_result
+        # (not silently discarded) — build/resume or a human needs to see it.
+        from .git import merge_base_into_worktree
+        merge_result = merge_base_into_worktree(self.target, run_id, self.cfg.git.base_branch)
+        out = run_all_checks(self.store, run_id, self.cfg.scope, self.cfg.checks,
+                             self.work_dir(run_id), self.cfg.git.base_branch)
+        out["base_branch_merge"] = merge_result
+        return out
 
     # --- gates ---
     def approve(self, run_id: str, stage: str) -> str:
