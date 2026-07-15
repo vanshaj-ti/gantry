@@ -207,3 +207,19 @@ def create_pr(worktree: Path, remote_branch: str, base_branch: str, title: str, 
     out = (proc.stdout + proc.stderr).strip()
     return {"ok": proc.returncode == 0, "url": proc.stdout.strip() if proc.returncode == 0 else None,
             "output": out[-1000:]}
+
+
+def merge_pr(worktree: Path, remote_branch: str) -> dict:
+    """Uses `gh pr merge --squash --delete-branch` on the branch just opened by
+    create_pr. Opt-in via [git].auto_merge — meant for solo/local projects with
+    no external review gate, where the independent LLM review stage already
+    served as the approval step and a human PR click-through would be pure
+    friction. NOT appropriate for team repos where a real human should look at
+    the diff before it lands on the base branch; that's why this is a separate
+    opt-in from auto_ship rather than bundled into it unconditionally."""
+    proc = _run(
+        ["gh", "pr", "merge", remote_branch, "--squash", "--delete-branch"],
+        worktree, timeout=60,
+    )
+    out = (proc.stdout + proc.stderr).strip()
+    return {"ok": proc.returncode == 0, "output": out[-1000:]}

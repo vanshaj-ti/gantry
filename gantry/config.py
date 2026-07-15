@@ -141,6 +141,12 @@ class GitConfig:
                                             # on review_approved — no human `gantry ship`
                                             # call required. Opt-in: a failed/misjudged
                                             # ship opens a real PR with zero human review.
+    auto_merge: bool = False               # if True (and auto_ship is True), also squash-merge
+                                            # + delete-branch the PR ship_run just opened —
+                                            # for solo/local projects with no external review
+                                            # gate, where the independent LLM review stage is
+                                            # the approval step. Has no effect if auto_ship is
+                                            # False (there's no PR yet to merge).
 
 
 @dataclass
@@ -318,7 +324,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
     if "git" in raw:
         g = raw["git"]
         cfg.git = GitConfig(base_branch=g.get("base_branch", "main"),
-                            auto_ship=bool(g.get("auto_ship", False)))
+                            auto_ship=bool(g.get("auto_ship", False)),
+                            auto_merge=bool(g.get("auto_merge", False)))
     if "notify" in raw:
         n = raw["notify"]
         cfg.notify = NotifyConfig(backend=n.get("backend", "none"), webhook_url=n.get("webhook_url", ""))
