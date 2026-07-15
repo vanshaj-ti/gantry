@@ -164,8 +164,17 @@ def commit_all(worktree: Path, message: str) -> dict:
     """
     _run(["git", "add", "-A"], worktree)
     _run(["git", "reset", "--", ".agent-runs"], worktree)
-    status = _run(["git", "status", "--porcelain"], worktree)
-    if not status.stdout.strip():
+    # Check STAGED changes, not raw `git status --porcelain` — porcelain also
+    # reports untracked-but-intentionally-excluded paths (e.g. .agent-runs
+    # itself, just unstaged above) as "?? .agent-runs/", which is non-empty
+    # even when nothing is actually staged to commit. Gating on porcelain
+    # made `git commit` run with nothing staged whenever a run's only "diff"
+    # was .agent-runs noise — commit fails with "nothing added to commit but
+    # untracked files present", which ship.py then reports as ship_failed for
+    # a run that has no real work left to commit. `git diff --cached
+    # --name-only` reflects only what will actually land in the commit.
+    staged = _run(["git", "diff", "--cached", "--name-only"], worktree)
+    if not staged.stdout.strip():
         return {"ok": True, "committed": False, "reason": "no changes"}
     proc = _run(["git", "commit", "--quiet", "-m", message], worktree, timeout=60)
     return {"ok": proc.returncode == 0, "committed": proc.returncode == 0,
