@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--title", required=True)
     s.add_argument("--request", default="")
     s.add_argument("--run", help="explicit run id")
+    s.add_argument("--depends-on", default="",
+                   help="comma-separated run_ids this run is queued behind; "
+                        "it stays in status=queued (not started) until every "
+                        "listed run reaches review_approved. Poller/advance "
+                        "picks it up automatically once prereqs clear.")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("stage", help="run one stage (spec/design/plan/build/evidence)")

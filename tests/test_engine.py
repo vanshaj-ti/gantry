@@ -116,5 +116,91 @@ class TestRunAgentStage(unittest.TestCase):
         self.assertEqual(beat_after, beat_later)  # thread stopped, no further beats
 
 
+class _CapturingRunner(_FakeRunner):
+    """Records every prompt it's invoked with, so a test can assert on what
+    the agent actually received rather than just on the final status."""
+
+    def __init__(self, result: RunnerResult):
+        super().__init__(result=result)
+        self.prompts: list[str] = []
+
+    def run(self, **kwargs):
+        self.prompts.append(kwargs["prompt"])
+        return self.result
+
+
+class TestAnswerContextOnResume(unittest.TestCase):
+    """Regression coverage for a real bug: `revise()` wrote reviewer comments
+    to review-comments.md, but the resumed agent's prompt only ever pulled
+    from answers/{stage}.md — a file `revise()` never wrote. A resumed build
+    stage therefore saw NO new guidance and just re-confirmed its previously
+    rejected output, silently looping forever. Separately, advance.py's
+    checks/e2e auto-retry path writes failure detail to answers/build.md
+    directly (a second, independent producer) — that path must keep working
+    too. Both must reach the resumed prompt; neither may be dropped in favor
+    of the other."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+        self.run_id = self.eng.create_run("t", "do the thing")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_stage(self, runner, stage="build", resume=False):
+        with patch("gantry.engine.get_runner", return_value=runner):
+            return self.eng.run_agent_stage(self.run_id, stage, resume=resume)
+
+    def test_revise_comments_reach_resumed_prompt(self):
+        result = RunnerResult(ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr="")
+        runner = _CapturingRunner(result)
+        self._run_stage(runner)  # initial build, establishes a session to resume
+
+        self.eng.revise(self.run_id, "build", "Fix the git-staging bug, please.")
+        self._run_stage(runner, resume=True)
+
+        self.assertEqual(len(runner.prompts), 2)
+        self.assertIn("Fix the git-staging bug, please.", runner.prompts[1])
+
+    def test_checks_retry_answer_reaches_resumed_prompt(self):
+        result = RunnerResult(ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr="")
+        runner = _CapturingRunner(result)
+        self._run_stage(runner)
+
+        answers_path = self.eng.store.artifact_path(self.run_id, "answers/build.md")
+        answers_path.parent.mkdir(parents=True, exist_ok=True)
+        answers_path.write_text("# Checks failed\n\nlint exited 1.\n")
+        self._run_stage(runner, resume=True)
+
+        self.assertIn("lint exited 1.", runner.prompts[1])
+
+    def test_both_answer_sources_reach_resumed_prompt_when_both_present(self):
+        result = RunnerResult(ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr="")
+        runner = _CapturingRunner(result)
+        self._run_stage(runner)
+
+        answers_path = self.eng.store.artifact_path(self.run_id, "answers/build.md")
+        answers_path.parent.mkdir(parents=True, exist_ok=True)
+        answers_path.write_text("# Checks failed\n\nbuild exited 1.\n")
+        self.eng.revise(self.run_id, "build", "Also fix the scope issue.")
+        self._run_stage(runner, resume=True)
+
+        self.assertIn("build exited 1.", runner.prompts[1])
+        self.assertIn("Also fix the scope issue.", runner.prompts[1])
+
+    def test_no_answer_context_when_neither_file_exists(self):
+        result = RunnerResult(ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr="")
+        runner = _CapturingRunner(result)
+        self._run_stage(runner)
+        self._run_stage(runner, resume=True)
+
+        self.assertNotIn("Revision comments", runner.prompts[1])
+        self.assertNotIn("Checks/e2e failure detail", runner.prompts[1])
+
+
 if __name__ == "__main__":
     unittest.main()

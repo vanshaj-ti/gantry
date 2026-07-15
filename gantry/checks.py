@@ -74,10 +74,12 @@ def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
     declared scope. Project-agnostic: no hardcoded file allowlist.
 
     Must accept root-level filenames with no "/" (e.g. `eslint.config.js`,
-    `package-lock.json`) and dotfile/dot-prefixed paths (e.g.
-    `.cursor/rules/foo.mdc`, `.env.local.example`) — a prior version of this
-    filter dropped both, which produced false-positive scope-guard failures
-    for plans that legitimately touch repo-root config files or dotdirs."""
+    `package-lock.json`), dotfile/dot-prefixed paths (e.g.
+    `.cursor/rules/foo.mdc`, `.env.local.example`), and bare top-level
+    dotfiles with no extension after the leading dot (e.g. `.gitignore`,
+    `.env`) — a prior version of this filter dropped all three cases, which
+    produced false-positive scope-guard failures for plans that legitimately
+    touch repo-root config files, dotdirs, or bare dotfiles."""
     plan = store.read_artifact(run_id, "implementation-plan.md")
     if not plan:
         return []
@@ -85,7 +87,8 @@ def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
     paths = re.findall(r"`([^`]+)`", plan)
     return [p for p in paths
             if "\n" not in p
-            and re.match(r"^[.\w/-][\w./-]*\.[A-Za-z0-9]+$", p)]
+            and (re.match(r"^[.\w/-][\w./-]*\.[A-Za-z0-9]+$", p)
+                 or re.match(r"^\.[A-Za-z0-9_-]+$", p))]
 
 
 def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, base: str) -> dict[str, Any]:

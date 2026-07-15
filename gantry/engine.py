@@ -111,17 +111,72 @@ class Engine:
         )
 
     def _answer_context(self, run_id: str, stage: str) -> str:
-        ans = self.store.read_artifact(run_id, f"answers/{stage}.md")
-        return f"\n\n# Human answer for this resumed stage\n{ans}" if ans else ""
+        # Two independent producers feed a resumed agent stage, and a resume
+        # must see whichever one actually fired or it silently repeats its
+        # prior (rejected/failing) output with no new guidance:
+        #   - review.py / Engine.revise(): writes review-comments.md when a
+        #     reviewer requests changes.
+        #   - advance.py's checks/e2e auto-retry loop: writes answers/build.md
+        #     when repo checks (lint/build/test) or e2e fail, independent of
+        #     any review verdict.
+        # These fire at different points in the pipeline (checks failures
+        # happen before evidence/review even run), so neither can be dropped
+        # in favor of the other. Concatenate whichever exist, most-recent
+        # last so it reads as the final word if both are somehow present.
+        parts = []
+        checks_answer = self.store.read_artifact(run_id, f"answers/{stage}.md")
+        if checks_answer:
+            parts.append(f"# Checks/e2e failure detail for this resumed stage\n{checks_answer}")
+        review_comments = self.store.read_artifact(run_id, "review-comments.md")
+        if review_comments:
+            parts.append(f"# Revision comments for this resumed stage\n{review_comments}")
+        return "\n\n" + "\n\n".join(parts) if parts else ""
 
     # --- run lifecycle ---
-    def create_run(self, title: str, request: str, run_id: str | None = None) -> str:
+    def create_run(self, title: str, request: str, run_id: str | None = None,
+                    depends_on: list[str] | None = None) -> str:
+        """Create a run. If `depends_on` names other run_ids, this run is
+        queued (status "queued", not "awaiting_{first_stage}") until every
+        listed run reaches review_approved (or, if review is disabled in
+        config, {last_stage}_complete) — see `_prereqs_met` and its use in
+        advance.py's advance_run. This lets independent runs be queued up
+        front and left for the poller/advance loop to sequence correctly,
+        instead of requiring a human (or a script) to watch run N and
+        manually create run N+1 only once N finishes."""
         first = self.cfg.stages[0] if self.cfg.stages else "plan"
         rid = self.store.new_run_id(title, run_id)
         self.store.create(rid, title)
         self.store.artifact_path(rid, "intake.md").write_text(f"# Intake\n\n{request.strip() or title}\n")
-        self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first, title=title)
+        deps = list(depends_on) if depends_on else []
+        for dep in deps:
+            if not self.store.exists(dep):
+                raise ValueError(f"depends_on references unknown run: {dep}")
+        if deps:
+            self.store.update_state(rid, status="queued", current_stage=first,
+                                    title=title, depends_on=deps)
+        else:
+            self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first, title=title)
         return rid
+
+    def _prereqs_met(self, run_id: str) -> bool:
+        """True if every run this run depends on has reached a terminal
+        success state. Terminal success = review_approved when review is
+        enabled (the normal case), or {last_stage}_complete when review is
+        disabled entirely for this project — a prereq stuck anywhere else
+        (still building, blocked, escalated, changes requested) is NOT met."""
+        deps = self.store.state(run_id).get("depends_on") or []
+        if not deps:
+            return True
+        last_stage = self.cfg.stages[-1] if self.cfg.stages else None
+        terminal_incomplete_ok = f"{last_stage}_complete" if last_stage else None
+        for dep in deps:
+            dep_status = self.store.state(dep).get("status", "")
+            if dep_status == "review_approved":
+                continue
+            if not self.cfg.review.enabled and dep_status == terminal_incomplete_ok:
+                continue
+            return False
+        return True
 
     def run_agent_stage(self, run_id: str, stage: str, resume: bool = False) -> dict[str, Any]:
         if not self.store.exists(run_id):

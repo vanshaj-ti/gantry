@@ -34,12 +34,13 @@ from .state import _iso_to_ts
 # the stage itself rather than waiting for a manual `gantry stage <name>`.
 AUTO_TRANSITIONS = {
     "plan_complete", "build_complete", "evidence_complete", "review_changes_requested",
-    "blocked",
+    "blocked", "queued",
     *(f"awaiting_{stage}" for stage in AGENT_STAGES),
 }
 
 # Human-friendly status labels for notifications.
 STATUS_LABELS = {
+    "queued": "Queued — waiting on prerequisite run(s)",
     "awaiting_spec": "Awaiting product spec (human)",
     "spec_running": "Writing product spec",
     "spec_complete": "Spec ready for review",
@@ -223,6 +224,17 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
     """Fire the appropriate next stage for a single run based on its status.
     Returns {advanced: bool, from, action, ...}. No-op for gated/terminal states."""
     status = engine.store.state(run_id).get("status", "")
+
+    if status == "queued":
+        if not engine._prereqs_met(run_id):
+            deps = engine.store.state(run_id).get("depends_on") or []
+            unmet = [d for d in deps if engine.store.state(d).get("status") != "review_approved"]
+            return {"advanced": False, "from": status, "action": "waiting_on_prereqs",
+                    "unmet_depends_on": unmet}
+        first = engine.store.state(run_id).get("current_stage") or (
+            engine.cfg.stages[0] if engine.cfg.stages else "plan")
+        engine.store.update_state(run_id, status=f"awaiting_{first}")
+        return {"advanced": True, "from": status, "action": "prereqs_met->awaiting_" + first}
 
     if status.startswith("awaiting_"):
         stage = status.removeprefix("awaiting_")

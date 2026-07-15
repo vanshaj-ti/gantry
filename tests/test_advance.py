@@ -224,5 +224,84 @@ class TestRepairStaleRunning(unittest.TestCase):
         self.assertEqual(self.eng.store.state(self.run_id)["status"], "build_failed")
 
 
+class TestRunDependencies(unittest.TestCase):
+    """Queueing/prerequisite runs: create_run(depends_on=[...]) parks a run at
+    status="queued" until every listed run reaches review_approved; the
+    poller (advance_run/advance_all) auto-transitions it to awaiting_{stage}
+    once prereqs clear, same as any other AUTO_TRANSITIONS status."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_create_run_without_depends_on_starts_immediately(self):
+        rid = self.eng.create_run("t", "test")
+        self.assertEqual(self.eng.store.state(rid)["status"], f"awaiting_{self.cfg.stages[0]}")
+
+    def test_create_run_with_depends_on_is_queued(self):
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+        st = self.eng.store.state(rid)
+        self.assertEqual(st["status"], "queued")
+        self.assertEqual(st["depends_on"], [prereq])
+
+    def test_create_run_depends_on_unknown_run_raises(self):
+        with self.assertRaises(ValueError):
+            self.eng.create_run("dependent", "test", depends_on=["does-not-exist"])
+
+    def test_advance_run_leaves_queued_run_parked_while_prereq_incomplete(self):
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+
+        result = advance_run(self.eng, rid)
+        self.assertFalse(result["advanced"])
+        self.assertEqual(result["action"], "waiting_on_prereqs")
+        self.assertEqual(self.eng.store.state(rid)["status"], "queued")
+
+    def test_advance_run_starts_queued_run_once_prereq_approved(self):
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+        self.eng.store.update_state(prereq, status="review_approved")
+
+        result = advance_run(self.eng, rid)
+        self.assertTrue(result["advanced"])
+        self.assertEqual(self.eng.store.state(rid)["status"], f"awaiting_{self.cfg.stages[0]}")
+
+    def test_prereqs_met_false_if_any_dependency_unapproved(self):
+        p1 = self.eng.create_run("p1", "test")
+        p2 = self.eng.create_run("p2", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[p1, p2])
+        self.eng.store.update_state(p1, status="review_approved")
+        # p2 still awaiting_plan — not approved
+        self.assertFalse(self.eng._prereqs_met(rid))
+
+        self.eng.store.update_state(p2, status="review_approved")
+        self.assertTrue(self.eng._prereqs_met(rid))
+
+    def test_queued_is_in_auto_transitions(self):
+        from gantry.advance import AUTO_TRANSITIONS
+        self.assertIn("queued", AUTO_TRANSITIONS)
+
+    def test_advance_all_picks_up_queued_run_once_unblocked(self):
+        from gantry.advance import advance_all
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+        self.eng.store.update_state(prereq, status="review_approved")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            results = advance_all(self.target, self.cfg)
+
+        matching = [r for r in results if r.get("run_id") == rid or rid in str(r)]
+        # advance_all's return shape may vary; assert on the actual state
+        # change instead of over-fitting to the return payload's exact keys.
+        self.assertNotEqual(self.eng.store.state(rid)["status"], "queued")
+
+
 if __name__ == "__main__":
     unittest.main()

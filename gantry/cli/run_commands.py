@@ -53,8 +53,15 @@ def _install_skills(cfg) -> list[dict]:
 
 def cmd_run(args) -> int:
     eng = _engine()
-    rid = eng.create_run(args.title, args.request or args.title, args.run)
-    return _out({"ok": True, "run_id": rid, "first_stage": eng.cfg.stages[0]})
+    depends_on = [d.strip() for d in (args.depends_on or "").split(",") if d.strip()] or None
+    try:
+        rid = eng.create_run(args.title, args.request or args.title, args.run, depends_on=depends_on)
+    except ValueError as e:
+        return _out({"ok": False, "error": str(e)})
+    out = {"ok": True, "run_id": rid, "first_stage": eng.cfg.stages[0]}
+    if depends_on:
+        out["queued_behind"] = depends_on
+    return _out(out)
 
 
 def cmd_stage(args) -> int:
