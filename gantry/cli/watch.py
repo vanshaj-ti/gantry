@@ -154,7 +154,14 @@ def cmd_watch(args) -> int:
         # un-cleared stdout write every tick, which tmux/the terminal treats
         # as new scrollback content rather than part of the repainted frame,
         # making the pane scroll upward by one line on every refresh forever.
-        clear = "\033[2J\033[H" if args.live else ""
+        #
+        # \033[2J alone only clears the VISIBLE screen — tmux (and most
+        # terminal emulators) keep every prior write in their own scrollback
+        # buffer regardless, so each 2s tick still pushed a full new frame
+        # into scrollback even though the visible pane looked static. \033[3J
+        # (xterm's "erase scrollback buffer" extension, which tmux honors)
+        # actually discards it, so repeated frames don't accumulate at all.
+        clear = "\033[2J\033[3J\033[H" if args.live else ""
         sys.stdout.write(clear + "\n".join(lines) + "\n")
         sys.stdout.flush()
 
