@@ -570,5 +570,152 @@ class TestShortLabel(unittest.TestCase):
         self.assertEqual(short_label("shipped_manually"), "Shipped (manual)")
 
 
+class TestRunTags(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_create_run_with_tag_stores_it(self):
+        rid = self.eng.create_run("t", "test", tag="auth-feature")
+        self.assertEqual(self.eng.store.state(rid)["tag"], "auth-feature")
+
+    def test_create_run_without_tag_has_no_tag_key_forced(self):
+        rid = self.eng.create_run("t", "test")
+        self.assertNotIn("tag", self.eng.store.state(rid))
+
+    def test_list_runs_surfaces_tag(self):
+        rid = self.eng.create_run("t", "test", tag="release-42")
+        runs = self.eng.store.list_runs()
+        matching = [r for r in runs if r["id"] == rid]
+        self.assertEqual(matching[0]["tag"], "release-42")
+
+    def test_advance_all_tag_filter_only_touches_matching_runs(self):
+        from gantry.advance import advance_all
+        r1 = self.eng.create_run("t1", "test", tag="alpha")
+        r2 = self.eng.create_run("t2", "test", tag="beta")
+        self.eng.store.update_state(r1, status="plan_complete")
+        self.eng.store.update_state(r2, status="plan_complete")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            results = advance_all(self.target, self.cfg, tag="alpha")
+
+        touched_ids = [r["run_id"] for r in results]
+        self.assertIn(r1, touched_ids)
+        self.assertNotIn(r2, touched_ids)
+
+    def test_advance_all_no_tag_touches_all_runs(self):
+        from gantry.advance import advance_all
+        r1 = self.eng.create_run("t1", "test", tag="alpha")
+        r2 = self.eng.create_run("t2", "test", tag="beta")
+        self.eng.store.update_state(r1, status="plan_complete")
+        self.eng.store.update_state(r2, status="plan_complete")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            results = advance_all(self.target, self.cfg)
+
+        touched_ids = [r["run_id"] for r in results]
+        self.assertIn(r1, touched_ids)
+        self.assertIn(r2, touched_ids)
+
+
+class TestConcurrencyCap(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_serial_path_by_default_processes_all_runs(self):
+        from gantry.advance import advance_all
+        ids = [self.eng.create_run(f"t{i}", "test") for i in range(4)]
+        for rid in ids:
+            self.eng.store.update_state(rid, status="plan_complete")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            results = advance_all(self.target, self.cfg)
+
+        self.assertEqual(len(results), 4)
+
+    def test_max_concurrent_above_one_still_processes_all_runs(self):
+        from gantry.advance import advance_all
+        self.cfg.agent.max_concurrent = 3
+        ids = [self.eng.create_run(f"t{i}", "test") for i in range(6)]
+        for rid in ids:
+            self.eng.store.update_state(rid, status="plan_complete")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            results = advance_all(self.target, self.cfg)
+
+        self.assertEqual(len(results), 6)
+        for rid in ids:
+            self.assertEqual(self.eng.store.state(rid)["status"], "build_complete")
+
+
+class TestStageSkip(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_build_complete_skips_directly_to_review_when_evidence_not_in_stages(self):
+        cfg = GantryConfig()
+        cfg.stages = ["plan", "build", "review"]
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        with patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+             patch.object(Engine, "run_checks", return_value={"pass": True}), \
+             patch("gantry.advance.run_review", return_value={"verdict": "APPROVE"}) as mock_review:
+            result = advance_run(eng, run_id)
+
+        self.assertTrue(mock_review.called)
+        self.assertEqual(result["action"], "evidence_skipped->review")
+        # evidence stage's own agent invocation must never have been reached
+        self.assertIsNone(eng.store.get_session_id(run_id, "evidence"))
+
+    def test_build_complete_reports_no_further_stages_when_evidence_and_review_both_skipped(self):
+        cfg = GantryConfig()
+        cfg.stages = ["plan", "build"]
+        cfg.review.enabled = False
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        with patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+             patch.object(Engine, "run_checks", return_value={"pass": True}):
+            result = advance_run(eng, run_id)
+
+        self.assertFalse(result["advanced"])
+        self.assertEqual(result["action"], "review_disabled")
+
+    def test_evidence_in_stages_still_runs_evidence_normally(self):
+        cfg = GantryConfig()  # default stages include evidence
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        with patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+             patch.object(Engine, "run_checks", return_value={"pass": True}), \
+             patch.object(Engine, "run_agent_stage") as mock_run_agent_stage:
+            result = advance_run(eng, run_id)
+
+        mock_run_agent_stage.assert_called_once_with(run_id, "evidence", resume=False)
+        self.assertEqual(result["action"], "checks_passed->evidence")
+
+
 if __name__ == "__main__":
     unittest.main()

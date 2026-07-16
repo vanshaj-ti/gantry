@@ -62,8 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--depends-on", default="",
                    help="comma-separated run_ids this run is queued behind; "
                         "it stays in status=queued (not started) until every "
-                        "listed run reaches review_approved. Poller/advance "
-                        "picks it up automatically once prereqs clear.")
+                        "listed run is actually shipped AND merged (see "
+                        "`gantry mark-merged`). Poller/advance picks it up "
+                        "automatically once prereqs clear.")
+    s.add_argument("--tag", default="", help="filter label for gantry watch/advance --all/loop "
+                                              "--tag; has no effect on the run's own execution")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("stage", help="run one stage (spec/design/plan/build/evidence)")
@@ -145,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("advance", help="drive the pipeline forward one tick")
     s.add_argument("--run", help="advance a single run")
     s.add_argument("--all", action="store_true", help="tick every run (poller mode); notifies on change")
+    s.add_argument("--tag", help="with --all, only tick runs created with this --tag")
     s.set_defaults(func=cmd_advance)
 
     s = sub.add_parser("loop", help="repeatedly tick the pipeline until terminal/human-gated "
@@ -154,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interval", type=int, default=15, help="seconds between ticks (default 15)")
     s.add_argument("--max-ticks", type=int, default=0,
                    help="stop after this many ticks regardless of state (0 = unbounded)")
+    s.add_argument("--tag", help="without --run, only tick runs created with this --tag")
     s.set_defaults(func=cmd_loop)
 
     s = sub.add_parser("doctor", help="check environment")
@@ -178,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("watch", help="dashboard of all runs")
     s.add_argument("--live", action="store_true", help="refresh every 2s (default: one-shot)")
+    s.add_argument("--tag", help="only show runs created with this --tag")
     s.set_defaults(func=cmd_watch)
 
     s = sub.add_parser("mcp", help="register/list MCP servers for the active runner")

@@ -226,15 +226,20 @@ class Engine:
 
     # --- run lifecycle ---
     def create_run(self, title: str, request: str, run_id: str | None = None,
-                    depends_on: list[str] | None = None) -> str:
+                    depends_on: list[str] | None = None, tag: str | None = None) -> str:
         """Create a run. If `depends_on` names other run_ids, this run is
         queued (status "queued", not "awaiting_{first_stage}") until every
-        listed run reaches review_approved (or, if review is disabled in
-        config, {last_stage}_complete) — see `_prereqs_met` and its use in
-        advance.py's advance_run. This lets independent runs be queued up
-        front and left for the poller/advance loop to sequence correctly,
-        instead of requiring a human (or a script) to watch run N and
-        manually create run N+1 only once N finishes."""
+        listed run is actually merged, not merely review_approved (see
+        `_prereqs_met`'s docstring for why review_approved alone isn't
+        enough) — see advance.py's advance_run. This lets independent runs be
+        queued up front and left for the poller/advance loop to sequence
+        correctly, instead of requiring a human (or a script) to watch run N
+        and manually create run N+1 only once N finishes.
+
+        `tag` is purely a filtering label (e.g. a feature/ticket/component
+        name) for `gantry watch --tag`/`gantry advance --all --tag` — it has
+        no effect on the run's own execution, only on which runs a filtered
+        command touches."""
         first = self.cfg.stages[0] if self.cfg.stages else "plan"
         rid = self.store.new_run_id(title, run_id)
         self.store.create(rid, title)
@@ -243,11 +248,13 @@ class Engine:
         for dep in deps:
             if not self.store.exists(dep):
                 raise ValueError(f"depends_on references unknown run: {dep}")
+        extra = {"tag": tag} if tag else {}
         if deps:
             self.store.update_state(rid, status="queued", current_stage=first,
-                                    title=title, depends_on=deps)
+                                    title=title, depends_on=deps, **extra)
         else:
-            self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first, title=title)
+            self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first,
+                                    title=title, **extra)
         return rid
 
     def _prereqs_met(self, run_id: str) -> bool:

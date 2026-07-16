@@ -152,7 +152,8 @@ class RunStore:
             try:
                 st = json.loads(sf.read_text())
                 out.append({"id": sf.parent.name, "status": st.get("status", "unknown"),
-                            "title": st.get("title", ""), "mtime": sf.stat().st_mtime})
+                            "title": st.get("title", ""), "tag": st.get("tag", ""),
+                            "mtime": sf.stat().st_mtime})
             except Exception:
                 logger.warning("skipping unreadable state file %s", sf, exc_info=True)
         return sorted(out, key=lambda x: x["mtime"], reverse=True)

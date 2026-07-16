@@ -373,6 +373,21 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         if not e2e["pass"]:
             engine.store.update_state(run_id, status="blocked", blocked_on="e2e", checks="pass")
             return {"advanced": False, "from": status, "action": "e2e_failed"}
+        if "evidence" not in engine.cfg.stages:
+            # Project's cfg.stages skips the evidence stage entirely — jump
+            # straight to whatever comes after it (review, if enabled) rather
+            # than unconditionally invoking an agent stage the project never
+            # asked to run. Mirrors the evidence_complete branch immediately
+            # below, since this run is skipping directly to that point.
+            if engine.cfg.review.enabled:
+                out = run_review(engine.store, run_id, engine.cfg, engine.work_dir(run_id))
+                return {"advanced": True, "from": status, "action": "evidence_skipped->review",
+                        "verdict": out["verdict"]}
+            # Neither evidence nor review is configured — build_complete is
+            # already the pipeline's actual terminus for this project; there's
+            # nothing further to auto-advance (same as evidence_complete's own
+            # "review_disabled" branch just below, reached the normal way).
+            return {"advanced": False, "from": status, "action": "review_disabled"}
         # Resume the prior evidence session if one exists for this run (e.g. a
         # second pass after review sent build back for fixes) instead of always
         # starting fresh — a fresh session re-does all evidence-gathering work
@@ -566,41 +581,52 @@ def _repair_stale_running(engine: Engine, run: dict[str, Any]) -> dict[str, Any]
             "was": status, "age_seconds": int(age)}
 
 
-def advance_all(target: Path, cfg: GantryConfig) -> list[dict[str, Any]]:
+def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, Any] | None:
+    """Process a single run inside advance_all. Returns a result dict or None
+    (when the run was filtered by status, no result to report). The per-run
+    lock guarantees two concurrent advance_all ticks can never double-process
+    the same run — same correctness mechanism as before, now the lock is also
+    the bound that keeps concurrent advance_one_run calls from racing on a
+    single run's state.json."""
+    auto_transitions = (AUTO_TRANSITIONS
+                       | ({"review_approved"} if cfg.git.auto_ship else set())
+                       | ({"checks_escalated"} if cfg.checks.auto_resolve else set()))
+    rid = run["id"]
+    repaired = _repair_stale_running(engine, run)
+    if repaired:
+        return repaired
+    if run["status"] not in auto_transitions:
+        return None
+    if not _acquire_lock(engine, rid):
+        return {"run_id": rid, "advanced": False, "action": "skipped_locked"}
+    try:
+        return {"run_id": rid, **advance_run(engine, rid)}
+    except Exception as exc:
+        return {"run_id": rid, "advanced": False, "error": str(exc)}
+    finally:
+        _release_lock(engine, rid)
+
+
+def advance_all(target: Path, cfg: GantryConfig, tag: str | None = None) -> list[dict[str, Any]]:
     engine = Engine(target, cfg)
-    results = []
-    for run in engine.store.list_runs():
-        rid = run["id"]
-        repaired = _repair_stale_running(engine, run)
-        if repaired:
-            results.append(repaired)
-            continue
-        # review_approved is deliberately absent from the static AUTO_TRANSITIONS
-        # set — it's a human-gated terminal state UNLESS this project has opted
-        # into cfg.git.auto_ship, in which case advance_run already knows how to
-        # ship it. Checking auto_ship here (not by adding review_approved to the
-        # static set) means it stays correctly human-gated for every project
-        # that hasn't opted in, while auto_ship projects actually get ticked by
-        # the passive poller/loop instead of only advancing via a manual
-        # `gantry advance --run <id>` call. Without this, auto_ship silently
-        # never fires from `gantry loop`/cron — only from a direct manual call
-        # that bypasses this gate — which defeats the entire point of the
-        # config flag existing.
-        # Same conditional-gate pattern as review_approved/auto_ship above:
-        # checks_escalated is a human-gated terminal state UNLESS auto_resolve
-        # is on, in which case advance_run knows how to spawn the resolver.
-        auto_transitions = (AUTO_TRANSITIONS
-                           | ({"review_approved"} if cfg.git.auto_ship else set())
-                           | ({"checks_escalated"} if cfg.checks.auto_resolve else set()))
-        if run["status"] not in auto_transitions:
-            continue
-        if not _acquire_lock(engine, rid):
-            results.append({"run_id": rid, "advanced": False, "action": "skipped_locked"})
-            continue
-        try:
-            results.append({"run_id": rid, **advance_run(engine, rid)})
-        except Exception as exc:
-            results.append({"run_id": rid, "advanced": False, "error": str(exc)})
-        finally:
-            _release_lock(engine, rid)
+    candidates = [r for r in engine.store.list_runs() if not tag or r.get("tag") == tag]
+
+    # [agent].max_concurrent = 0 (default) means "unbounded" in the config's
+    # own terms, but is deliberately treated here as "stay serial" — today's
+    # actual behavior, unchanged unless a project explicitly opts in by
+    # setting a concurrency number. A silent switch to unbounded threaded
+    # subprocesses the moment this code shipped (with no config change on the
+    # project's part) would be a surprising behavior change for every
+    # existing gantry.toml, not a bug fix.
+    if cfg.agent.max_concurrent and cfg.agent.max_concurrent > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=cfg.agent.max_concurrent) as pool:
+            futures = [pool.submit(_advance_one_run, engine, run, cfg) for run in candidates]
+            results = [r for f in futures if (r := f.result()) is not None]
+    else:
+        results = []
+        for run in candidates:
+            r = _advance_one_run(engine, run, cfg)
+            if r is not None:
+                results.append(r)
     return results

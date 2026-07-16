@@ -54,13 +54,17 @@ def _install_skills(cfg) -> list[dict]:
 def cmd_run(args) -> int:
     eng = _engine()
     depends_on = [d.strip() for d in (args.depends_on or "").split(",") if d.strip()] or None
+    tag = getattr(args, "tag", None) or None
     try:
-        rid = eng.create_run(args.title, args.request or args.title, args.run, depends_on=depends_on)
+        rid = eng.create_run(args.title, args.request or args.title, args.run,
+                             depends_on=depends_on, tag=tag)
     except ValueError as e:
         return _out({"ok": False, "error": str(e)})
     out = {"ok": True, "run_id": rid, "first_stage": eng.cfg.stages[0]}
     if depends_on:
         out["queued_behind"] = depends_on
+    if tag:
+        out["tag"] = tag
     return _out(out)
 
 
@@ -279,7 +283,7 @@ def cmd_advance(args) -> int:
     tgt = _target()
     cfg = load_config(tgt)
     if args.all:
-        results = advance_all(tgt, cfg)
+        results = advance_all(tgt, cfg, tag=getattr(args, "tag", None))
         # Notify on every result, not just successful advances — a run that
         # stalled at blocked/checks_failed/review_escalated needs a human to
         # see it just as much as one that progressed, arguably more.
@@ -353,7 +357,7 @@ def cmd_loop(args) -> int:
                 result = advance_run(eng, args.run)
                 print(f"[tick {ticks}] advance -> {result}", flush=True)
             else:
-                results = advance_all(tgt, cfg)
+                results = advance_all(tgt, cfg, tag=getattr(args, "tag", None))
                 if results:
                     notifier = get_notifier(cfg.notify)
                     for r in results:

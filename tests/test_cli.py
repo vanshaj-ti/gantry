@@ -154,6 +154,20 @@ class TestCmdInitAndRun(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn("run_id", payload)
 
+    def test_cmd_run_with_tag_stores_and_reports_it(self):
+        from gantry.state import RunStore
+        args = build_parser().parse_args(["run", "--title", "my feature", "--tag", "release-1"])
+        rc, out = self._run_and_capture(cmd_run, args)
+        payload = json.loads(out)
+        self.assertEqual(payload["tag"], "release-1")
+        self.assertEqual(RunStore(self.target).state(payload["run_id"])["tag"], "release-1")
+
+    def test_cmd_run_without_tag_has_no_tag_in_output(self):
+        args = build_parser().parse_args(["run", "--title", "my feature"])
+        rc, out = self._run_and_capture(cmd_run, args)
+        payload = json.loads(out)
+        self.assertNotIn("tag", payload)
+
     def test_cmd_status_lists_runs(self):
         run_args = build_parser().parse_args(["run", "--title", "my feature"])
         cmd_run(run_args)

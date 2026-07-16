@@ -107,7 +107,10 @@ def cmd_watch(args) -> int:
     def render() -> None:
         cols = shutil.get_terminal_size().columns
         runs = store.list_runs()
-        lines = [f"GANTRY — {len(runs)} run(s)", ""]
+        tag_filter = getattr(args, "tag", None)
+        if tag_filter:
+            runs = [r for r in runs if r.get("tag") == tag_filter]
+        lines = [f"GANTRY — {len(runs)} run(s)" + (f" (tag={tag_filter})" if tag_filter else ""), ""]
 
         status_w, agent_w, model_w, session_w, cost_w, detail_w, updated_w = 20, 12, 16, 10, 8, 20, 10
         fixed = status_w + agent_w + model_w + session_w + cost_w + detail_w + updated_w
