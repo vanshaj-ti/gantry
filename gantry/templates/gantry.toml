@@ -20,6 +20,10 @@ prompts_dir = ".gantry/prompts"
 runner = "claude-code"
 skip_permissions = true      # pass the runner's headless auto-approve flag
 output_format = "json"
+# Cap on concurrently-running agent subprocesses across `advance --all`'s
+# per-tick sweep. 0 (default) = stay serial, today's behavior — set >= 2 to
+# let independent runs' build/plan/evidence stages execute in parallel.
+max_concurrent = 0
 
 # Per-stage model selection. Leave model = "" to use the runner's default.
 [models.plan]
@@ -35,6 +39,41 @@ max_turns = 80
 model = ""
 max_turns = 120
 
+# Uncomment to use a stronger/different model specifically for the resolver
+# stage (auto_resolve below) — falls back to [models.build] if unset. Worth
+# configuring separately since build already failed 3x on the same issue by
+# the time the resolver fires; re-running the same model is a weaker bet.
+# [models.resolve]
+# model = ""
+# max_turns = 160
+
+[plan]
+# Context injection for the plan stage's prompt — both off by default (no
+# behavior change from a bare plan.md template).
+include_git_log = false       # prepend the last N `git log --oneline` lines
+git_log_lines = 20
+context_files = []            # e.g. ["docs/architecture.md"] — contents prepended
+# "brief" selects prompts/plan-brief.md instead of plan.md, but only if that
+# file actually exists in prompts_dir — harmless to set without adding it.
+depth = "detailed"            # "detailed" | "brief"
+
+[build]
+# Shell command run once in the worktree before the build stage's first
+# (non-resumed) agent call for a run — e.g. install deps, seed a DB. Empty =
+# no-op (default).
+pre_hook = ""
+# False (default): a failing pre_hook is logged but doesn't block build —
+# the failure surfaces later in whichever check actually needed it. True:
+# fail the build stage immediately instead.
+pre_hook_required = false
+
+[evidence]
+# "structured" asks the evidence prompt for a trailing fenced JSON block
+# (pass_count, fail_count, coverage_pct, scope_summary) that the review stage
+# parses deterministically instead of re-deriving it from prose. Default
+# "prose" is today's behavior, unchanged.
+output_format = "prose"       # "prose" | "structured"
+
 [review]
 enabled = true
 runner = "claude-code"        # ideally a different model family than build
@@ -42,6 +81,18 @@ model = ""
 approve_keywords = ["APPROVE"]
 request_changes_keywords = ["REQUEST_CHANGES"]
 escalate_keywords = ["ESCALATE"]
+# Review is an investigation, not open-ended implementation — needs far
+# fewer turns than build/evidence.
+max_turns = 10
+# Project-specific items appended to the review prompt that the reviewer
+# must explicitly address, e.g. ["confirm no secrets committed"]. Empty =
+# none (default).
+checklist = []
+# "line_start" requires the verdict keyword to be the first token of a line
+# (allows markdown emphasis/heading/list prefixes), eliminating false
+# ESCALATE/REQUEST_CHANGES matches from prose that merely mentions the word.
+# Default "anywhere" is today's behavior, unchanged.
+keyword_mode = "anywhere"      # "anywhere" | "line_start"
 
 [git]
 base_branch = "main"          # diff base for scope guard + review
@@ -49,13 +100,39 @@ base_branch = "main"          # diff base for scope guard + review
 [scope]
 # Gantry's built-in deterministic guard. Globs and path prefixes both work.
 forbid_paths = [".env", "**/*.pem", "**/secrets/**"]
-enforce_plan_scope = true     # flag files changed outside the plan's stated scope
+# "block" (default): a file outside the plan's declared scope fails checks,
+# unless the build stage declared it under a "## Scope additions" section in
+# build-summary.md (see the build prompt template) — the common case of a
+# build legitimately discovering it needs an undeclared file then passes
+# automatically. "warn": an undeclared file is recorded as a warning in
+# scope.json but doesn't fail checks. "off": disables plan-scope enforcement
+# entirely (forbid_paths still always applies).
+mode = "block"                 # "block" | "warn" | "off"
+# In "block"/"warn" mode, an undeclared new file only gets a free pass when
+# require_declared_additions is False — with the default (True), an
+# undeclared file is still flagged even in "warn" mode.
+require_declared_additions = true
 
 [checks]
 # Delegate house rules to THIS repo's own toolchain. Gantry runs each command
 # and gates on exit code. Works for any language: swap in ruff/go vet/etc.
+# Each entry is a bare string (runs serially, in order) OR a table with its
+# own timeout/parallel override:
+#   commands = ["npm run lint", { command = "npm run build", timeout = 300 },
+#               { command = "npm test", parallel = true }]
+# parallel=true commands run concurrently with each other (bounded by
+# max_parallel below); everything else stays serial, same as today.
 commands = ["npm run lint", "npm run build"]
 timeout = 900
+max_parallel = 4               # cap on concurrently-running parallel=true commands
+retry_checks = 3                # auto-resume build with failure feedback this many
+                                 # times before escalating to a human (checks_escalated)
+# If True, checks_escalated spawns a dedicated resolver agent instead of
+# dead-ending at a human — opt-in, appropriate for a solo/local project
+# willing to trade a human review gate for full unattended operation.
+auto_resolve = false
+resolve_attempts = 2             # cap on resolver-agent attempts before giving up
+                                  # for real (resolve_escalated)
 
 [notify]
 backend = "none"              # "none" | "telegram" | "webhook"
@@ -67,12 +144,35 @@ backend = "none"              # "none" | "telegram" | "webhook"
 # discipline — TDD, systematic debugging, review rigor). Scoped so they augment
 # rather than fight Gantry's own spec/design/plan stages. Empty = none mandated.
 enabled = []                  # e.g. ["superpowers"]
+# build and evidence get different framing even with the same skills list —
+# build is EXECUTION, evidence is VERIFICATION. Leave unset for evidence's
+# built-in verification-focused default; override here if you want different
+# wording for your project.
+evidence_directive = ""
 # Per-runner install commands (clean, inspectable — no piped remote scripts).
 # `gantry init --with-skills` runs the active runner's command; `gantry doctor` lists them.
 # Defaults for "superpowers" are built in; override or add more here:
 # [skills.installers.superpowers]
 # claude-code = "claude plugin install superpowers@claude-plugins-official"
 # cursor-cli  = "npx skills add obra/superpowers -a cursor"
+
+[e2e]
+# Deterministic, non-LLM e2e test step run between checks and the evidence
+# stage — decouples slow/hanging test suites from the expensive evidence
+# agent turn. Disabled by default (evidence stage falls back to running e2e
+# itself via its own prompt template).
+enabled = false
+spec_glob = "tests/e2e/*.spec.ts"  # global default; per-app override below
+timeout = 1800
+# Per-app config: bare command string (no retry) or a table with retry/
+# spec_glob overrides. Only apps whose files this run's diff actually
+# touched (anywhere under apps/<name>/) get their e2e suite run.
+# [e2e.apps]
+# web = "npm run e2e"
+# [e2e.apps.api]
+# command = "npm run e2e:api"
+# retry = 2                        # retry a failing run this many times
+# spec_glob = "tests/e2e/api/*.spec.ts"  # overrides the global spec_glob above
 
 [mcp]
 # MCP servers Gantry registers with the active runner so the agent can call their
