@@ -65,8 +65,73 @@ def _strip_fenced_code_blocks(text: str) -> str:
     apostrophe-adjacent backtick in embedded TS/SQL) pairs across the fence
     boundary with an unrelated backtick elsewhere in the doc, silently
     swallowing real single-line `path/to/file.ts` mentions into one bogus
-    multi-line "path" and dropping them from the allowlist."""
-    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    multi-line "path" and dropping them from the allowlist.
+
+    Split on the fence delimiter itself rather than a non-greedy `.*?` regex:
+    a naive `re.sub(r"```.*?```", "", text, flags=re.DOTALL)` pairs the FIRST
+    ``` in the document with the NEXT ``` regardless of which fenced block
+    each one actually opens/closes — two independent fenced blocks elsewhere
+    in a long plan (e.g. one at char 4934 closing, an unrelated one opening
+    at char 7328) get treated as one bogus pair spanning everything between
+    them, silently deleting real prose (and the backtick-quoted file paths in
+    it) that was never inside a code fence at all. Splitting on the literal
+    ``` marker and dropping every odd-indexed segment (the content strictly
+    between an opening and its matching closing fence) has no such
+    cross-pairing failure mode, since split() naturally alternates
+    outside/inside/outside/inside per fence in document order."""
+    parts = text.split("```")
+    # parts[0], parts[2], parts[4], ... are outside fences (keep).
+    # parts[1], parts[3], parts[5], ... are inside fences (drop).
+    return "".join(part for i, part in enumerate(parts) if i % 2 == 0)
+
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _extract_code_spans(text: str) -> list[str]:
+    """Extract inline code-span contents using CommonMark backtick-run
+    matching, not naive first-backtick/next-backtick pairing.
+
+    Per spec, a code span opens with a run of N backticks and closes ONLY
+    with the next run of exactly N backticks — a run of a different length
+    is not a closer and is skipped over. `re.findall(r"`([^`]+)`", ...)`
+    ignores run length entirely: it pairs every backtick with the very next
+    one, in order, for the whole document. That desyncs the moment a run of
+    length != 1 appears earlier than expected — e.g. a JS template literal
+    nested inside a single-backtick markdown span (`` `url = `${a}${b}` ` ``)
+    produces backtick runs of length 1, 1, 2 in sequence. The naive regex
+    pairs run 1 with run 2 (fine) but then run 3 (length 2, meant to close
+    nothing on its own) with whatever single backtick comes next in the
+    document, merging everything between them — including real
+    `path/to/file.ts` mentions — into one bogus multi-paragraph "path" and
+    dropping it from the scope-guard allowlist.
+
+    Matching by run length keeps every span independent: an opening run
+    with no same-length closer anywhere later is literal text (per spec),
+    and scanning resumes right after it — so it can never desync pairing
+    for spans elsewhere in the document.
+    """
+    runs = [(m.start(), m.end()) for m in _BACKTICK_RUN_RE.finditer(text)]
+    spans: list[str] = []
+    i = 0
+    n_runs = len(runs)
+    while i < n_runs:
+        start, end = runs[i]
+        length = end - start
+        j = i + 1
+        closer = None
+        while j < n_runs:
+            c_start, c_end = runs[j]
+            if c_end - c_start == length:
+                closer = (c_start, c_end)
+                break
+            j += 1
+        if closer is None:
+            i += 1
+            continue
+        spans.append(text[end:closer[0]])
+        i = j + 1
+    return spans
 
 
 def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
@@ -84,7 +149,7 @@ def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
     if not plan:
         return []
     plan = _strip_fenced_code_blocks(plan)
-    paths = re.findall(r"`([^`]+)`", plan)
+    paths = _extract_code_spans(plan)
     return [p for p in paths
             if "\n" not in p
             and (re.match(r"^[.\w/-][\w./-]*\.[A-Za-z0-9]+$", p)
