@@ -72,10 +72,16 @@ def cmd_watch(args) -> int:
         """Retry/blocked context only — agent/model/session now have their
         own columns (see running_session), so this stays scoped to what a
         stuck run is actually blocked on."""
-        if status not in ("blocked", "checks_escalated"):
+        if status not in ("blocked", "checks_escalated", "resolve_escalated"):
             return ""
         st = store.state(run_id)
         blocked_on = st.get("blocked_on", "")
+        if status == "resolve_escalated":
+            attempts = st.get("resolve_attempt_count")
+            cap = load_config(_target()).checks.resolve_attempts
+            if attempts is not None and blocked_on:
+                return f"{blocked_on} (resolve {attempts}/{cap})"
+            return blocked_on
         retry = st.get("checks_retry_count")
         cfg_cap = load_config(_target()).checks.retry_checks
         if retry is not None and blocked_on:

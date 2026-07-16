@@ -16,6 +16,7 @@ blocked) are intentionally NOT auto-advanced — they wait for `gantry approve`.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -26,6 +27,8 @@ from .e2e import run_e2e_tests
 from .engine import HEARTBEAT_INTERVAL, Engine
 from .review import run_review
 from .state import _iso_to_ts
+
+logger = logging.getLogger(__name__)
 
 # Transitions the poller drives automatically (no human gate).
 # awaiting_plan / awaiting_build / awaiting_evidence are NOT human-gated (only
@@ -62,6 +65,8 @@ STATUS_LABELS = {
     "review_escalated": "Review ESCALATED — human decision needed",
     "blocked": "Blocked — needs input",
     "checks_escalated": "Checks ESCALATED — auto-retry exhausted",
+    "resolve_running": "Resolver agent fixing escalated checks",
+    "resolve_escalated": "Resolver ESCALATED — auto-fix exhausted",
     "shipped": "Shipped — PR open",
     "shipped_manually": "Shipped (manual) — PR open",
     "ship_failed": "Ship FAILED — push/PR error",
@@ -79,6 +84,7 @@ _STATUS_ICON = {
     "blocked": "\U0001f6d1",           # 🛑
     "review_escalated": "❗",       # ❗
     "checks_escalated": "❗",       # ❗
+    "resolve_escalated": "❗",       # ❗
     "review_approved": "✅",        # ✅
     "review_changes_requested": "\U0001f501",  # 🔁
     "shipped": "\U0001f680",           # 🚀
@@ -188,6 +194,16 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
         retry_count = store.state(run_id).get("checks_retry_count", 0)
         return (f"{header}\n\n"
                 f"Auto-retry exhausted after {retry_count} attempt(s).\n"
+                f"{detail}\n\n"
+                f"*Reply 1* with guidance to send it back for a rebuild.\n"
+                f"*Reply 2* to leave it — you'll investigate yourself.")
+
+    if status == "resolve_escalated":
+        blocked_on = store.state(run_id).get("blocked_on", "checks")
+        detail = _e2e_failure_detail(store, run_id) if blocked_on == "e2e" else _checks_failure_detail(store, run_id)
+        resolve_attempts = store.state(run_id).get("resolve_attempt_count", 0)
+        return (f"{header}\n\n"
+                f"Resolver agent exhausted {resolve_attempts} attempt(s) without a passing fix.\n"
                 f"{detail}\n\n"
                 f"*Reply 1* with guidance to send it back for a rebuild.\n"
                 f"*Reply 2* to leave it — you'll investigate yourself.")
@@ -398,7 +414,7 @@ def _acquire_lock(engine: Engine, run_id: str, stale_after: int = 1800) -> bool:
                 if age < stale_after:
                     return False
             except OSError:
-                pass
+                logger.debug("could not stat lock file %s for staleness check", lock, exc_info=True)
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text(str(os.getpid()))
     return True

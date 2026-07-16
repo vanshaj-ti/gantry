@@ -16,13 +16,16 @@ builder. Verdicts:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
+from . import herdr as _herdr
 from .config import GantryConfig
 from .runners import get_runner
 from .state import RunStore
-from . import herdr as _herdr
+
+logger = logging.getLogger(__name__)
 
 REVIEW_ARTIFACTS = [
     "intake.md", "product-spec.md", "architecture-design.md",
@@ -73,7 +76,7 @@ def _report_herdr(cfg: GantryConfig, run_id: str, status: str) -> None:
     try:
         _herdr.report_state(run_id, status, enabled=cfg.herdr.enabled and cfg.herdr.report_state)
     except Exception:
-        pass
+        logger.debug("herdr report_state failed for run %s (%s)", run_id, status, exc_info=True)
 
 
 def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> dict[str, Any]:

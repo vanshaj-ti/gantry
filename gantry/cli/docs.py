@@ -1,6 +1,7 @@
 """Doc rendering commands: docs, doctor."""
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -10,6 +11,8 @@ from ..config import CONFIG_FILENAME, load_config
 from ..runners import _RUNNERS
 from ..state import RunStore
 from ._shared import _target, _out
+
+logger = logging.getLogger(__name__)
 
 # Doc-worthy artifacts in pipeline order — the exact list a stage's own review
 # prompt is told to read (see review.py). review-result.json is JSON, not
@@ -203,7 +206,7 @@ def _render_doc(heading: str, content: str, glow_path: str | None) -> None:
             subprocess.run([glow_path, "-"], input=content, text=True, timeout=30)
             return
         except Exception:
-            pass  # fall through to plain print if glow itself misbehaves
+            logger.debug("glow rendering failed, falling back to plain print", exc_info=True)
     print(content)
 
 

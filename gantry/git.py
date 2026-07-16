@@ -17,8 +17,11 @@ worktree it lives in.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 WORKTREES_SUBDIR = Path(".worktrees") / "gantry"
 
@@ -194,7 +197,7 @@ def _copy_env_files_if_present(target: Path, wt: Path) -> None:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(src.read_text())
             except OSError:
-                pass
+                logger.warning("failed to copy untracked file %s into worktree", src, exc_info=True)
 
 
 def _install_deps_if_npm_project(wt: Path) -> None:
@@ -214,7 +217,7 @@ def _install_deps_if_npm_project(wt: Path) -> None:
     try:
         subprocess.run(cmd, cwd=str(wt), capture_output=True, text=True, timeout=600)
     except Exception:
-        pass
+        logger.warning("best-effort npm install failed for worktree %s", wt, exc_info=True)
 
 
 def remove_worktree(target: Path, run_id: str) -> dict:

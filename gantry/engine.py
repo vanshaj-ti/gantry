@@ -15,6 +15,7 @@ GantryConfig and the runner/notifier adapters.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
 from .runners import get_runner
 from .state import RunStore, now_iso
+
+logger = logging.getLogger(__name__)
 
 # How often a running agent stage's heartbeat_at gets refreshed in state.json.
 # Lets `gantry watch` and advance.py's stale-run repair tell "still working"
@@ -75,7 +78,7 @@ class Engine:
             _herdr.report_state(run_id, status, title=st.get("title", ""),
                                 enabled=self.cfg.herdr.enabled and self.cfg.herdr.report_state)
         except Exception:
-            pass  # herdr reporting is best-effort; never break the pipeline
+            logger.debug("herdr report_state failed for run %s (%s)", run_id, status, exc_info=True)
 
     # --- prompt rendering ---
     def _prompts_dir(self) -> Path:
