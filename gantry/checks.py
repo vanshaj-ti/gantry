@@ -134,9 +134,13 @@ def _extract_code_spans(text: str) -> list[str]:
     return spans
 
 
-def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
-    """Extract backtick-quoted paths from the implementation plan as the
-    declared scope. Project-agnostic: no hardcoded file allowlist.
+_SCOPE_ADDITIONS_HEADER_RE = re.compile(r"^#{1,6}\s*scope additions\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _paths_from_text(text: str) -> list[str]:
+    """Extract backtick-quoted, plausible file paths out of arbitrary markdown
+    prose. Shared by both the plan and the build-summary "Scope additions"
+    section, so both sources of declared scope use identical path validation.
 
     Must accept root-level filenames with no "/" (e.g. `eslint.config.js`,
     `package-lock.json`), dotfile/dot-prefixed paths (e.g.
@@ -145,15 +149,47 @@ def _allowed_from_plan(store: RunStore, run_id: str) -> list[str]:
     `.env`) — a prior version of this filter dropped all three cases, which
     produced false-positive scope-guard failures for plans that legitimately
     touch repo-root config files, dotdirs, or bare dotfiles."""
-    plan = store.read_artifact(run_id, "implementation-plan.md")
-    if not plan:
-        return []
-    plan = _strip_fenced_code_blocks(plan)
-    paths = _extract_code_spans(plan)
+    text = _strip_fenced_code_blocks(text)
+    paths = _extract_code_spans(text)
     return [p for p in paths
             if "\n" not in p
             and (re.match(r"^[.\w/-][\w./-]*\.[A-Za-z0-9]+$", p)
                  or re.match(r"^\.[A-Za-z0-9_-]+$", p))]
+
+
+def _scope_additions_section(build_summary: str) -> str:
+    """Extract just the "## Scope additions" section's body (up to the next
+    heading of the same or higher level, or end of document). Returns "" if no
+    such section exists — old-style build summaries with no additions section
+    are unaffected, same as before this feature existed."""
+    match = _SCOPE_ADDITIONS_HEADER_RE.search(build_summary)
+    if not match:
+        return ""
+    rest = build_summary[match.end():]
+    next_heading = re.search(r"^#{1,6}\s+\S", rest, re.MULTILINE)
+    return rest[:next_heading.start()] if next_heading else rest
+
+
+def _allowed_paths(store: RunStore, run_id: str) -> list[str]:
+    """Declared scope: backtick-quoted paths from the implementation plan,
+    UNION any paths the build stage declared under a "## Scope additions"
+    section in build-summary.md. Project-agnostic: no hardcoded allowlist.
+
+    The plan is written once before build starts, so it can never anticipate
+    a file the build agent only discovers it needs mid-implementation (e.g. a
+    new test fixture, a config file an unexpected dependency requires). The
+    build prompt template asks the agent to declare any such file under this
+    section with a one-line reason; unioning it into the allowlist here means
+    a build that's honest about scope drift doesn't get penalized for it —
+    only genuinely undeclared/unexplained new files still trip the guard."""
+    plan = store.read_artifact(run_id, "implementation-plan.md")
+    allowed = _paths_from_text(plan) if plan else []
+    build_summary = store.read_artifact(run_id, "build-summary.md")
+    if build_summary:
+        additions = _scope_additions_section(build_summary)
+        if additions:
+            allowed.extend(_paths_from_text(additions))
+    return allowed
 
 
 def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, base: str) -> dict[str, Any]:
@@ -161,18 +197,29 @@ def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, b
     forbidden = [f for f in files if _matches_any(f, cfg.forbid_paths)]
 
     unexpected: list[str] = []
-    if cfg.enforce_plan_scope:
-        allowed = _allowed_from_plan(store, run_id)
+    warnings: list[str] = []
+    if cfg.mode != "off":
+        allowed = _allowed_paths(store, run_id)
         if allowed:
-            unexpected = [f for f in files
-                          if not _matches_any(f, allowed)
-                          and not any(f.startswith(a.rstrip("/") + "/") for a in allowed)]
+            drifted = [f for f in files
+                       if not _matches_any(f, allowed)
+                       and not any(f.startswith(a.rstrip("/") + "/") for a in allowed)]
+            # require_declared_additions=True (default) is already satisfied by
+            # _allowed_paths unioning in build-declared files above — anything
+            # still in `drifted` here is genuinely undeclared. When False, an
+            # undeclared new file is treated as a warning instead of a scope
+            # violation regardless of "block" vs "warn" mode.
+            if cfg.mode == "block" and cfg.require_declared_additions:
+                unexpected = drifted
+            else:
+                warnings = [f"undeclared file outside plan scope: {f}" for f in drifted]
 
     out = {
         "base": base,
         "changed_files": files,
         "forbidden_files": forbidden,
         "unexpected_files": unexpected,
+        "warnings": warnings,
         "pass": not forbidden and not unexpected,
     }
     store.write_result(run_id, "scope.json", out)

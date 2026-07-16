@@ -104,6 +104,25 @@ class ScopeConfig:
     """Gantry's built-in deterministic guard. Not the repo's linters."""
     forbid_paths: list[str] = field(default_factory=lambda: [".env", "**/*.pem", "**/secrets/**"])
     enforce_plan_scope: bool = True       # flag files changed outside the plan's stated scope
+    mode: str = "block"    # "block" | "warn" | "off" — how enforce_plan_scope's
+                            # violations are treated. "block" (default) preserves
+                            # today's behavior: an unexpected file fails checks.
+                            # "warn" surfaces unexpected files in scope.json's
+                            # `warnings` but still passes — for a build that
+                            # legitimately discovers it needs a file the plan
+                            # never mentioned and didn't declare via the
+                            # build-summary.md "## Scope additions" section (see
+                            # checks._allowed_paths). "off" disables the plan-scope
+                            # check entirely (forbid_paths still always applies).
+    require_declared_additions: bool = True  # in "block"/"warn" mode, a new file
+                                              # is only added to the allowlist
+                                              # (no warning/failure at all) if the
+                                              # build stage declared it under a
+                                              # "## Scope additions" section in
+                                              # build-summary.md. False allows any
+                                              # new file through with a warning
+                                              # (in "warn" mode) with no
+                                              # declaration required.
 
 
 @dataclass
@@ -316,9 +335,17 @@ def load_config(target_workspace: Path) -> GantryConfig:
         )
     if "scope" in raw:
         s = raw["scope"]
+        enforce_plan_scope = bool(s.get("enforce_plan_scope", True))
+        # "mode" is the current knob; enforce_plan_scope=False is a deprecated
+        # alias for mode="off", kept so existing gantry.toml files that only
+        # set the old bool still behave identically. An explicit "mode" always
+        # wins over the deprecated bool.
+        default_mode = "off" if not enforce_plan_scope else "block"
         cfg.scope = ScopeConfig(
             forbid_paths=s.get("forbid_paths", ScopeConfig().forbid_paths),
-            enforce_plan_scope=bool(s.get("enforce_plan_scope", True)),
+            enforce_plan_scope=enforce_plan_scope,
+            mode=s.get("mode", default_mode),
+            require_declared_additions=bool(s.get("require_declared_additions", True)),
         )
     if "checks" in raw:
         c = raw["checks"]

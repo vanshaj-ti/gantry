@@ -15,7 +15,15 @@ Your job: execute the implementation plan exactly. Do NOT redesign. Do NOT expan
 
 Rules:
 - Touch only files listed in the plan's "Allowed files" section.
-- If another file is required, ask one concise inline question and stop.
+- If implementation reveals you genuinely need to create or touch a file the
+  plan never mentioned (e.g. a new test fixture, a config file an unexpected
+  dependency requires), you may do so WITHOUT stopping — but you MUST declare
+  it: add a `## Scope additions` section to build-summary.md listing each
+  such path in backticks with a one-line reason, e.g.
+  `` `src/fixtures/mock-data.json` — needed by the new parser test``.
+  Undeclared files outside the plan's scope will fail the automated scope
+  guard. Reserve stopping to ask a question for cases where you're genuinely
+  unsure whether the new file is in scope at all, not for routine discoveries.
 - Do not read or write `.env` or credential files.
 - Do not run `git push`, `git commit`, or destructive git commands.
 - Run only the verification commands necessary for the change.

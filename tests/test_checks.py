@@ -1,6 +1,17 @@
+import tempfile
 import unittest
+from pathlib import Path
 
-from gantry.checks import _extract_code_spans, _matches_any, _strip_fenced_code_blocks
+from gantry.checks import (
+    _allowed_paths,
+    _extract_code_spans,
+    _matches_any,
+    _scope_additions_section,
+    _strip_fenced_code_blocks,
+    run_scope_guard,
+)
+from gantry.config import ScopeConfig
+from gantry.state import RunStore
 
 
 class TestStripFencedCodeBlocks(unittest.TestCase):
@@ -95,6 +106,150 @@ class TestExtractCodeSpans(unittest.TestCase):
         text = "stray `` unmatched marker. Real: `src/real.ts` done."
         spans = _extract_code_spans(text)
         self.assertIn("src/real.ts", spans)
+
+
+class TestScopeAdditionsSection(unittest.TestCase):
+    def test_extracts_section_body_up_to_next_heading(self):
+        text = (
+            "# Build summary\n\nDid stuff.\n\n"
+            "## Scope additions\n\n"
+            "- `src/fixtures/mock.json` — needed by new parser test\n\n"
+            "## Tests run\n\nAll green.\n"
+        )
+        section = _scope_additions_section(text)
+        self.assertIn("src/fixtures/mock.json", section)
+        self.assertNotIn("Tests run", section)
+        self.assertNotIn("All green", section)
+
+    def test_no_section_returns_empty(self):
+        text = "# Build summary\n\nNo additions here.\n"
+        self.assertEqual(_scope_additions_section(text), "")
+
+    def test_section_at_end_of_document(self):
+        text = "# Build summary\n\n## Scope additions\n\n- `src/new.ts` — reason\n"
+        section = _scope_additions_section(text)
+        self.assertIn("src/new.ts", section)
+
+
+class TestAllowedPaths(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = RunStore(Path(self._tmp.name))
+        self.run_id = self.store.create("test-run", "Test run")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_unions_plan_and_build_summary_additions(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self.store.artifact_path(self.run_id, "build-summary.md").write_text(
+            "# Build summary\n\n## Scope additions\n\n"
+            "- `src/discovered.ts` — needed by new fixture\n")
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertIn("src/planned.ts", allowed)
+        self.assertIn("src/discovered.ts", allowed)
+
+    def test_no_build_summary_falls_back_to_plan_only(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/planned.ts"])
+
+    def test_build_summary_without_additions_section_adds_nothing(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self.store.artifact_path(self.run_id, "build-summary.md").write_text(
+            "# Build summary\n\nDid the plan, nothing extra.\n")
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/planned.ts"])
+
+
+class TestRunScopeGuardModes(unittest.TestCase):
+    """End-to-end: git repo + a real diff, exercising mode/require_declared_additions."""
+
+    def setUp(self):
+        import subprocess
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        subprocess.run(["git", "init", "-q"], cwd=str(self.repo), check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=str(self.repo), check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(self.repo), check=True)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "planned.ts").write_text("planned\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(self.repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(self.repo), check=True)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=str(self.repo), check=True)
+        self.store = RunStore(self.repo)
+        self.run_id = self.store.create("test-run", "Test run")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _touch(self, rel_path: str, content: str = "x\n") -> None:
+        import subprocess
+        p = self.repo / rel_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        # `git diff <base> --` (what _changed_files uses) doesn't show
+        # untracked files unless staged.
+        subprocess.run(["git", "add", rel_path], cwd=str(self.repo), check=True)
+
+    def test_declared_addition_passes_in_block_mode(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self.store.artifact_path(self.run_id, "build-summary.md").write_text(
+            "## Scope additions\n\n- `src/discovered.ts` — needed it\n")
+        self._touch("src/discovered.ts")
+        result = run_scope_guard(self.store, self.run_id, ScopeConfig(), self.repo, "main")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["unexpected_files"], [])
+
+    def test_undeclared_new_file_fails_in_block_mode_default(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self._touch("src/surprise.ts")
+        result = run_scope_guard(self.store, self.run_id, ScopeConfig(), self.repo, "main")
+        self.assertFalse(result["pass"])
+        self.assertIn("src/surprise.ts", result["unexpected_files"])
+
+    def test_undeclared_new_file_warns_but_passes_in_warn_mode(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self._touch("src/surprise.ts")
+        cfg = ScopeConfig(mode="warn")
+        result = run_scope_guard(self.store, self.run_id, cfg, self.repo, "main")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["unexpected_files"], [])
+        self.assertTrue(any("src/surprise.ts" in w for w in result["warnings"]))
+
+    def test_mode_off_disables_plan_scope_entirely(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self._touch("src/surprise.ts")
+        cfg = ScopeConfig(mode="off")
+        result = run_scope_guard(self.store, self.run_id, cfg, self.repo, "main")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["unexpected_files"], [])
+        self.assertEqual(result["warnings"], [])
+
+    def test_require_declared_additions_false_warns_without_declaration(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self._touch("src/surprise.ts")
+        cfg = ScopeConfig(mode="warn", require_declared_additions=False)
+        result = run_scope_guard(self.store, self.run_id, cfg, self.repo, "main")
+        self.assertTrue(result["pass"])
+        self.assertTrue(any("src/surprise.ts" in w for w in result["warnings"]))
+
+    def test_forbid_paths_still_blocks_regardless_of_mode(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self._touch(".env", "SECRET=1\n")
+        cfg = ScopeConfig(mode="off")
+        result = run_scope_guard(self.store, self.run_id, cfg, self.repo, "main")
+        self.assertFalse(result["pass"])
+        self.assertIn(".env", result["forbidden_files"])
 
 
 class TestMatchesAny(unittest.TestCase):
