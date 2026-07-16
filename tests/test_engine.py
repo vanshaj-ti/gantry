@@ -265,5 +265,77 @@ class TestBuildPreHook(unittest.TestCase):
         self.assertFalse(log_path.exists())
 
 
+class TestSkillsDirective(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.cfg.skills.enabled = ["superpowers"]
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_when_no_skills_enabled(self):
+        self.cfg.skills.enabled = []
+        self.assertEqual(self.eng._skills_directive("build"), "")
+        self.assertEqual(self.eng._skills_directive("evidence"), "")
+
+    def test_empty_for_non_execution_stages(self):
+        self.assertEqual(self.eng._skills_directive("plan"), "")
+        self.assertEqual(self.eng._skills_directive("spec"), "")
+
+    def test_build_gets_execution_framing(self):
+        directive = self.eng._skills_directive("build")
+        self.assertIn("EXECUTION discipline", directive)
+        self.assertNotIn("VERIFY", directive)
+
+    def test_evidence_gets_verification_framing_by_default(self):
+        directive = self.eng._skills_directive("evidence")
+        self.assertIn("VERIFY", directive)
+        self.assertNotIn("EXECUTION discipline", directive)
+
+    def test_evidence_directive_override_used_when_set(self):
+        self.cfg.skills.evidence_directive = "Custom evidence framing text."
+        directive = self.eng._skills_directive("evidence")
+        self.assertIn("Custom evidence framing text.", directive)
+        self.assertNotIn("VERIFY", directive)
+
+    def test_build_and_evidence_directives_differ(self):
+        self.assertNotEqual(self.eng._skills_directive("build"), self.eng._skills_directive("evidence"))
+
+
+class TestEvidenceOutputDirective(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_by_default_prose_format(self):
+        self.assertEqual(self.eng._evidence_output_directive("evidence"), "")
+
+    def test_empty_for_non_evidence_stages_even_when_structured(self):
+        self.cfg.evidence.output_format = "structured"
+        self.assertEqual(self.eng._evidence_output_directive("build"), "")
+
+    def test_present_for_evidence_when_structured(self):
+        self.cfg.evidence.output_format = "structured"
+        directive = self.eng._evidence_output_directive("evidence")
+        self.assertIn("pass_count", directive)
+        self.assertIn("```json", directive)
+
+    def test_render_prompt_appends_structured_directive_for_evidence(self):
+        self.cfg.evidence.output_format = "structured"
+        run_id = self.eng.create_run("t", "test")
+        prompt = self.eng.render_prompt("evidence", run_id)
+        self.assertIn("pass_count", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

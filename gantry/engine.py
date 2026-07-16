@@ -95,22 +95,62 @@ class Engine:
                     f"and write your output to .agent-runs/{run_id}/{artifact}.\n")
         else:
             base = template_path.read_text().replace("{RUN_ID}", run_id)
-        return base + self._skills_directive(stage)
+        return base + self._skills_directive(stage) + self._evidence_output_directive(stage)
+
+    def _evidence_output_directive(self, stage: str) -> str:
+        """Appended to the evidence stage's prompt only when
+        [evidence].output_format = "structured" — asks for a trailing fenced
+        JSON block review.py can parse deterministically instead of
+        re-deriving pass/fail/coverage from free prose. No-op for every
+        other stage and for the default "prose" format (today's behavior,
+        unchanged)."""
+        if stage != "evidence" or self.cfg.evidence.output_format != "structured":
+            return ""
+        return (
+            "\n\n---\n## Structured summary (required)\n"
+            "After writing evidence-report.md's normal prose sections, append a final "
+            "fenced ```json block (own section, after everything else) with exactly these "
+            "keys: `pass_count` (int, acceptance criteria proven), `fail_count` (int, "
+            "acceptance criteria that failed or couldn't be proven), `coverage_pct` "
+            "(number 0-100, or null if not meaningfully measurable for this change), "
+            "`scope_summary` (one-sentence string). This is read by the review stage "
+            "as a pre-digested summary — keep it accurate to the prose above it, don't "
+            "pad or guess a number you didn't actually verify.\n"
+        )
 
     def _skills_directive(self, stage: str) -> str:
         """Scoped skill mandate. Only for build/evidence (execution stages) — NOT
         spec/design/plan, where a methodology library would fight Gantry's own
-        stages. Tells the agent a plan already exists: execute, don't re-plan."""
+        stages. Tells the agent a plan already exists: execute, don't re-plan.
+
+        build and evidence need different framing even when they share the
+        same `enabled` skills list: build is doing EXECUTION (TDD, systematic
+        debugging), evidence is doing VERIFICATION (confirm the plan actually
+        landed, don't re-implement anything). Using build's directive
+        verbatim for evidence risks the agent treating verification as
+        another round of implementation work. [skills].evidence_directive
+        lets a project override evidence's text entirely; unset falls back to
+        a verification-focused default distinct from build's."""
         if stage not in ("build", "evidence") or not self.cfg.skills.enabled:
             return ""
         skills = ", ".join(f"`{s}`" for s in self.cfg.skills.enabled)
+        if stage == "evidence":
+            framing = self.cfg.skills.evidence_directive or (
+                "IMPORTANT: the implementation is already complete — your job is to VERIFY "
+                "it, not redo it. Use these skills for verification rigor (confirm tests "
+                "actually pass, confirm the plan's acceptance criteria are met) — do NOT "
+                "re-implement, refactor, or restart any part of the build.\n"
+            )
+        else:
+            framing = (
+                "IMPORTANT: an approved implementation plan already exists for this run. Use "
+                "these skills for EXECUTION discipline (TDD, systematic debugging, review rigor) "
+                "— do NOT restart spec/design/planning. Execute the existing plan.\n"
+            )
         return (
             f"\n\n---\n## Mandated skills for this stage\n"
             f"Load and actively use: {skills}. Invoke the Skill tool — do not leave them "
-            f"passively in context.\n\n"
-            f"IMPORTANT: an approved implementation plan already exists for this run. Use "
-            f"these skills for EXECUTION discipline (TDD, systematic debugging, review rigor) "
-            f"— do NOT restart spec/design/planning. Execute the existing plan.\n"
+            f"passively in context.\n\n{framing}"
         )
 
     def _answer_context(self, run_id: str, stage: str) -> str:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,33 @@ REVIEW_ARTIFACTS = [
     "implementation-plan.md", "build-summary.md", "evidence-report.md",
     "scope.json", "checks.json",
 ]
+
+
+_EVIDENCE_JSON_BLOCK_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+
+
+def _structured_evidence_summary(store: RunStore, run_id: str) -> dict[str, Any] | None:
+    """Parse the trailing ```json block evidence.md writes when
+    [evidence].output_format = "structured" (see
+    Engine._evidence_output_directive). Returns None if evidence-report.md
+    has no such block (prose-only evidence, the default — no behavior change)
+    or if what's there doesn't parse as valid JSON with the expected keys."""
+    evidence = store.read_artifact(run_id, "evidence-report.md")
+    if not evidence:
+        return None
+    # Last match, not first: an "append ## Pass N" resumed evidence report can
+    # have older JSON blocks from earlier passes still in the file — only the
+    # most recent pass's summary reflects the current state.
+    matches = _EVIDENCE_JSON_BLOCK_RE.findall(evidence)
+    if not matches:
+        return None
+    try:
+        data = json.loads(matches[-1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or "pass_count" not in data:
+        return None
+    return data
 
 
 def _build_prompt(store: RunStore, run_id: str, cwd: Path, base: str, template: str) -> str:
@@ -57,6 +85,13 @@ def _build_prompt(store: RunStore, run_id: str, cwd: Path, base: str, template: 
         f"re-run tests/checks if useful)? Investigate as deeply as needed before "
         f"deciding.\n",
     ]
+    structured = _structured_evidence_summary(store, run_id)
+    if structured:
+        parts.append(
+            f"\n# Evidence stage's own structured summary (pre-digested, still verify "
+            f"independently — do not treat this as ground truth on its own)\n"
+            f"```json\n{json.dumps(structured, indent=2)}\n```\n"
+        )
     return "".join(parts)
 
 

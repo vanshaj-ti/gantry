@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from gantry.config import GantryConfig
 from gantry.runners import RunnerResult
-from gantry.review import _parse_verdict, run_review
+from gantry.review import _build_prompt, _parse_verdict, _structured_evidence_summary, run_review
 from gantry.state import RunStore
 
 
@@ -102,6 +102,79 @@ class TestRunReview(unittest.TestCase):
             out = run_review(self.store, self.run_id, self.cfg, self.target)
         self.assertEqual(out["verdict"], "ESCALATE")
         self.assertEqual(self.store.state(self.run_id)["status"], "review_escalated")
+
+
+class TestStructuredEvidenceSummary(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        self.store = RunStore(self.target)
+        self.run_id = self.store.new_run_id("t")
+        self.store.create(self.run_id, "t")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_none_when_no_evidence_report(self):
+        self.assertIsNone(_structured_evidence_summary(self.store, self.run_id))
+
+    def test_none_when_prose_only_no_json_block(self):
+        self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
+            "# Evidence\n\nAll good, no structured block here.\n")
+        self.assertIsNone(_structured_evidence_summary(self.store, self.run_id))
+
+    def test_parses_valid_json_block(self):
+        self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
+            "# Evidence\n\nProse here.\n\n```json\n"
+            '{"pass_count": 5, "fail_count": 0, "coverage_pct": 92.5, "scope_summary": "ok"}\n'
+            "```\n")
+        summary = _structured_evidence_summary(self.store, self.run_id)
+        self.assertEqual(summary["pass_count"], 5)
+        self.assertEqual(summary["coverage_pct"], 92.5)
+
+    def test_uses_last_block_when_multiple_passes(self):
+        self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
+            "## Pass 1\n\n```json\n"
+            '{"pass_count": 1, "fail_count": 3, "coverage_pct": 10, "scope_summary": "old"}\n'
+            "```\n\n## Pass 2\n\n```json\n"
+            '{"pass_count": 5, "fail_count": 0, "coverage_pct": 92.5, "scope_summary": "new"}\n'
+            "```\n")
+        summary = _structured_evidence_summary(self.store, self.run_id)
+        self.assertEqual(summary["scope_summary"], "new")
+
+    def test_malformed_json_returns_none_not_raises(self):
+        self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
+            "# Evidence\n\n```json\n{not valid json\n```\n")
+        self.assertIsNone(_structured_evidence_summary(self.store, self.run_id))
+
+    def test_missing_pass_count_key_returns_none(self):
+        self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
+            "# Evidence\n\n```json\n{\"unrelated\": true}\n```\n")
+        self.assertIsNone(_structured_evidence_summary(self.store, self.run_id))
+
+
+class TestBuildPromptIncludesStructuredSummary(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        self.store = RunStore(self.target)
+        self.run_id = self.store.new_run_id("t")
+        self.store.create(self.run_id, "t")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_prompt_includes_structured_summary_when_present(self):
+        self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
+            "```json\n"
+            '{"pass_count": 3, "fail_count": 0, "coverage_pct": 80, "scope_summary": "x"}\n'
+            "```\n")
+        prompt = _build_prompt(self.store, self.run_id, self.target, "main", "template text")
+        self.assertIn("pass_count", prompt)
+
+    def test_prompt_omits_summary_section_when_no_json_block(self):
+        prompt = _build_prompt(self.store, self.run_id, self.target, "main", "template text")
+        self.assertNotIn("structured summary", prompt)
 
 
 if __name__ == "__main__":
