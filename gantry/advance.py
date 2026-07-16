@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,31 @@ def _escape_md(text: str) -> str:
     for ch in ("_", "*", "[", "`"):
         text = text.replace(ch, "\\" + ch)
     return text
+
+
+_MAX_RETRY_ATTEMPTS_KEPT = 3
+
+
+def _accumulate_retry_feedback(store: Any, run_id: str, label_word: str, this_attempt: str) -> str:
+    """Build answers/build.md as a running log of the last _MAX_RETRY_ATTEMPTS_KEPT
+    retry attempts, not a single overwritten attempt.
+
+    Previously each retry replaced the file wholesale, so a build agent
+    resuming after 3 failed attempts saw only the most recent failure detail
+    — no way to know it (or a prior attempt) had already tried and failed at
+    a particular fix. A resumed agent with the same session history but no
+    visible record of its own past attempts tends to re-discover the same
+    dead end blind. Keeping a short rolling history ("you already tried X and
+    Y, both failed on Z") gives the agent enough context to try something
+    genuinely different instead. Oldest attempts are dropped once the cap is
+    hit — an unbounded history would eventually dominate the resumed prompt's
+    context with stale detail from early, likely-superseded attempts."""
+    existing = store.read_artifact(run_id, "answers/build.md") or ""
+    prior_attempts = re.findall(r"(## Attempt \d+/\d+\n\n.*?)(?=\n## Attempt \d+/\d+\n\n|\Z)",
+                                existing, re.DOTALL)
+    attempts = (prior_attempts + [this_attempt])[-_MAX_RETRY_ATTEMPTS_KEPT:]
+    header = f"# {label_word} failed — auto-retry history (most recent last)\n\n"
+    return header + "\n".join(attempts)
 
 
 def _checks_failure_detail(store: Any, run_id: str) -> str:
@@ -313,7 +339,9 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
     if status == "queued":
         if not engine._prereqs_met(run_id):
             deps = engine.store.state(run_id).get("depends_on") or []
-            unmet = [d for d in deps if engine.store.state(d).get("status") != "review_approved"]
+            unmet = [d for d in deps
+                    if engine.store.state(d).get("status") not in ("shipped", "shipped_manually")
+                    or engine.store.state(d).get("merged") is not True]
             return {"advanced": False, "from": status, "action": "waiting_on_prereqs",
                     "unmet_depends_on": unmet}
         first = engine.store.state(run_id).get("current_stage") or (
@@ -387,9 +415,11 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         label_word = "E2e tests" if blocked_on == "e2e" else "Checks"
         engine.store.artifact_path(run_id, "answers/build.md").parent.mkdir(
             parents=True, exist_ok=True)
-        engine.store.artifact_path(run_id, "answers/build.md").write_text(
-            f"# {label_word} failed (auto-retry {retry_count + 1}/{engine.cfg.checks.retry_checks})\n\n"
+        this_attempt = (
+            f"## Attempt {retry_count + 1}/{engine.cfg.checks.retry_checks}\n\n"
             f"{detail}\n\nFix the above and ensure {label_word.lower()} pass this time.\n")
+        answers_text = _accumulate_retry_feedback(engine.store, run_id, label_word, this_attempt)
+        engine.store.artifact_path(run_id, "answers/build.md").write_text(answers_text)
         engine.store.update_state(run_id, checks_retry_count=retry_count + 1)
         engine.run_agent_stage(run_id, "build", resume=True)
         return {"advanced": True, "from": status, "action": "retry_build_after_checks_failure",

@@ -77,6 +77,42 @@ class TestChecksRetry(unittest.TestCase):
             result = advance_run(eng, run_id)
         self.assertEqual(result["action"], "no_auto_transition")
 
+    def test_retry_feedback_accumulates_across_attempts_not_overwrites(self):
+        # Each advance_run tick from build_complete re-runs checks (still
+        # failing, per _fake_run_agent_stage always landing back at
+        # build_complete) then writes exactly one new retry attempt to
+        # answers/build.md — two ticks from blocked should leave two
+        # attempts recorded, not one overwritten.
+        eng = self._make_engine(retry_checks=3)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            advance_run(eng, run_id)  # build_complete -> blocked (checks fail)
+            advance_run(eng, run_id)  # blocked -> retry (attempt 1) -> build_complete
+            advance_run(eng, run_id)  # build_complete -> blocked (checks fail again)
+            advance_run(eng, run_id)  # blocked -> retry (attempt 2) -> build_complete
+
+        answer = eng.store.read_artifact(run_id, "answers/build.md")
+        self.assertIn("Attempt 1/3", answer)
+        self.assertIn("Attempt 2/3", answer)
+
+    def test_retry_feedback_caps_at_max_attempts_kept(self):
+        from gantry.advance import _MAX_RETRY_ATTEMPTS_KEPT
+        eng = self._make_engine(retry_checks=10)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
+            for _ in range(12):
+                advance_run(eng, run_id)
+
+        answer = eng.store.read_artifact(run_id, "answers/build.md")
+        attempt_headers = [line for line in answer.splitlines() if line.startswith("## Attempt")]
+        self.assertEqual(len(attempt_headers), _MAX_RETRY_ATTEMPTS_KEPT)
+        # oldest attempts dropped, most recent kept
+        self.assertNotIn("Attempt 1/10", answer)
+
 
 class TestChecksFailureDetail(unittest.TestCase):
     def setUp(self):

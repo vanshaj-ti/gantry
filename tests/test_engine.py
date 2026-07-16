@@ -202,5 +202,68 @@ class TestAnswerContextOnResume(unittest.TestCase):
         self.assertNotIn("Checks/e2e failure detail", runner.prompts[1])
 
 
+class TestBuildPreHook(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+        self.run_id = self.eng.create_run("t", "do the thing")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_build(self, resume=False):
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": "done"}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            if resume:
+                self.eng.store.save_session(self.run_id, "build", session_id="prior-session")
+            self.eng.run_agent_stage(self.run_id, "build", resume=resume)
+
+    def test_empty_pre_hook_is_a_noop(self):
+        self.cfg.build.pre_hook = ""
+        self._run_build()
+        log_path = self.eng.store.run_dir(self.run_id) / "logs" / "build-pre-hook.log"
+        self.assertFalse(log_path.exists())
+
+    def test_pre_hook_runs_and_logs_output(self):
+        self.cfg.build.pre_hook = "echo hello-from-hook"
+        self._run_build()
+        log_path = self.eng.store.run_dir(self.run_id) / "logs" / "build-pre-hook.log"
+        self.assertTrue(log_path.exists())
+        self.assertIn("hello-from-hook", log_path.read_text())
+
+    def test_pre_hook_does_not_run_on_resume(self):
+        self.cfg.build.pre_hook = "echo should-not-run"
+        self._run_build(resume=True)
+        log_path = self.eng.store.run_dir(self.run_id) / "logs" / "build-pre-hook.log"
+        self.assertFalse(log_path.exists())
+
+    def test_failing_pre_hook_is_logged_not_fatal_by_default(self):
+        self.cfg.build.pre_hook = "exit 1"
+        self.cfg.build.pre_hook_required = False
+        self._run_build()  # must not raise
+        log_path = self.eng.store.run_dir(self.run_id) / "logs" / "build-pre-hook.log"
+        self.assertIn("exit 1", log_path.read_text())
+        self.assertIn("(exit 1)", log_path.read_text())
+
+    def test_failing_pre_hook_raises_when_required(self):
+        self.cfg.build.pre_hook = "exit 1"
+        self.cfg.build.pre_hook_required = True
+        with self.assertRaises(RuntimeError):
+            self._run_build()
+
+    def test_pre_hook_only_applies_to_build_stage(self):
+        self.cfg.build.pre_hook = "echo should-not-run-for-plan"
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": "done"}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            self.eng.run_agent_stage(self.run_id, "plan")
+        log_path = self.eng.store.run_dir(self.run_id) / "logs" / "build-pre-hook.log"
+        self.assertFalse(log_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

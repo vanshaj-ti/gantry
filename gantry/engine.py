@@ -192,6 +192,37 @@ class Engine:
             return False
         return True
 
+    def _run_build_pre_hook(self, run_id: str, work_dir: Path) -> None:
+        """Run [build].pre_hook once in the worktree before the build stage's
+        first (non-resumed) agent invocation for a run — e.g. `npm ci &&
+        make seed-db`, setup the build agent shouldn't have to do or wait on
+        itself. No-op if pre_hook is empty (the default).
+
+        Non-fatal by default (pre_hook_required=False), same best-effort
+        philosophy as git._install_deps_if_npm_project: a failing setup step
+        is logged, not silently swallowed, but doesn't block build from
+        starting — the failure surfaces clearly later in whichever check
+        actually needed what the hook was supposed to set up. Set
+        pre_hook_required=True to fail the build stage immediately instead."""
+        pre_hook = self.cfg.build.pre_hook
+        if not pre_hook:
+            return
+        import subprocess as _subprocess
+        try:
+            proc = _subprocess.run(pre_hook, shell=True, cwd=str(work_dir),
+                                   capture_output=True, text=True, timeout=900)
+            self.store.write_log(run_id, "build-pre-hook.log",
+                                f"$ {pre_hook}\n(exit {proc.returncode})\n\n{proc.stdout}{proc.stderr}")
+            if proc.returncode != 0:
+                logger.warning("build pre_hook failed for run %s (exit %s): %s",
+                               run_id, proc.returncode, pre_hook)
+                if self.cfg.build.pre_hook_required:
+                    raise RuntimeError(f"build pre_hook failed (exit {proc.returncode}): {pre_hook}")
+        except _subprocess.TimeoutExpired:
+            logger.warning("build pre_hook timed out for run %s: %s", run_id, pre_hook)
+            if self.cfg.build.pre_hook_required:
+                raise
+
     def run_agent_stage(self, run_id: str, stage: str, resume: bool = False) -> dict[str, Any]:
         if not self.store.exists(run_id):
             raise ValueError(f"Run not found: {run_id}")
@@ -213,6 +244,9 @@ class Engine:
         mcp_results = ensure_mcp_for_stage(self.cfg, stage, runner.name, work_dir)
         if mcp_results:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
+
+        if stage == "build" and not resume:
+            self._run_build_pre_hook(run_id, work_dir)
 
         self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume,
                          heartbeat_at=now_iso())
