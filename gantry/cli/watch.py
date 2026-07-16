@@ -142,11 +142,18 @@ def cmd_watch(args) -> int:
                 (title, status_text, runner, model, sid, cost_text, detail_text, age(r["mtime"])), widths))
             lines.append(paint(row, r["status"]))
 
+        if args.live:
+            lines.append("\n(Ctrl+C to exit — refreshing every 2s)")
+
         # Single write, not one print() per line: on a --live refresh the clear
         # sequence and the new frame must land in the terminal as one unit —
         # otherwise a slow pipe (SSH, tmux over a laggy link) can flush the
         # clear before the content is fully written, showing a blank/partial
-        # pane for a frame.
+        # pane for a frame. The footer line above must be part of THIS same
+        # write too — a separate print() after render() returns is a second,
+        # un-cleared stdout write every tick, which tmux/the terminal treats
+        # as new scrollback content rather than part of the repainted frame,
+        # making the pane scroll upward by one line on every refresh forever.
         clear = "\033[2J\033[H" if args.live else ""
         sys.stdout.write(clear + "\n".join(lines) + "\n")
         sys.stdout.flush()
@@ -157,7 +164,6 @@ def cmd_watch(args) -> int:
     try:
         while True:
             render()
-            print("\n(Ctrl+C to exit — refreshing every 2s)")
             time.sleep(2)
     except KeyboardInterrupt:
         return 0
