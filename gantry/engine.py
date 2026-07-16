@@ -416,7 +416,6 @@ class Engine:
         checks commands itself before finishing, and a hard requirement to
         never claim success without that verification.
         """
-        checks = self.store.read_result(run_id, "checks.json") or {}
         from .advance import _checks_failure_detail
         detail = _checks_failure_detail(self.store, run_id)
         wt = self.work_dir(run_id)

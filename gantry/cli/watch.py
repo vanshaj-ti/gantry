@@ -74,11 +74,19 @@ def cmd_watch(args) -> int:
         """Retry/blocked context only — agent/model/session now have their
         own columns (see running_session), so this stays scoped to what a
         stuck run is actually blocked on."""
-        if status not in ("blocked", "checks_escalated", "resolve_escalated", "held"):
+        if status not in ("blocked", "checks_escalated", "resolve_escalated", "held",
+                          "shipped", "shipped_manually"):
             return ""
         st = store.state(run_id)
         if status == "held":
             return f"was: {st.get('held_from_status', '')}"
+        if status in ("shipped", "shipped_manually"):
+            # `merged` is otherwise an invisible flag — shipped (PR opened)
+            # and actually-merged look identical without this, and
+            # dependents (depends_on) only start once a run is BOTH shipped
+            # AND merged (see Engine._prereqs_met), so this is exactly the
+            # state a human watching the dashboard needs to see at a glance.
+            return "merged" if st.get("merged") is True else "not yet merged"
         blocked_on = st.get("blocked_on", "")
         if status == "resolve_escalated":
             attempts = st.get("resolve_attempt_count")

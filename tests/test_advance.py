@@ -6,6 +6,7 @@ from unittest.mock import patch
 from gantry.config import GantryConfig
 from gantry.engine import Engine
 from gantry.advance import advance_run, notify_message, _checks_failure_detail
+from gantry.state import RunStore
 
 
 def _init_scratch_repo(path: Path) -> None:
@@ -568,6 +569,40 @@ class TestShortLabel(unittest.TestCase):
         from gantry.advance import short_label
         self.assertEqual(short_label("held"), "Held")
         self.assertEqual(short_label("shipped_manually"), "Shipped (manual)")
+
+
+class TestNotifyMessageShippedMergeState(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.store = RunStore(self.target)
+        self.run_id = self.store.new_run_id("t")
+        self.store.create(self.run_id, "t")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_shipped_not_merged_prompts_mark_merged(self):
+        from gantry.advance import notify_message
+        self.store.update_state(self.run_id, status="shipped", pr_url="https://example.com/pr/1")
+        msg = notify_message(self.store, self.run_id, "shipped")
+        self.assertIn("not yet merged", msg)
+        self.assertIn("mark-merged", msg)
+        self.assertIn("https://example.com/pr/1", msg)
+
+    def test_shipped_and_merged_says_merged(self):
+        from gantry.advance import notify_message
+        self.store.update_state(self.run_id, status="shipped", merged=True)
+        msg = notify_message(self.store, self.run_id, "shipped")
+        self.assertIn("Merged.", msg)
+        self.assertNotIn("mark-merged", msg)
+
+    def test_shipped_manually_same_merge_messaging(self):
+        from gantry.advance import notify_message
+        self.store.update_state(self.run_id, status="shipped_manually", merged=True)
+        msg = notify_message(self.store, self.run_id, "shipped_manually")
+        self.assertIn("Merged.", msg)
 
 
 class TestRunTags(unittest.TestCase):

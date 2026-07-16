@@ -503,5 +503,49 @@ class TestCmdRetry(unittest.TestCase):
         self.assertEqual(RunStore(self.target).state(run_id)["status"], "plan_complete")
 
 
+class TestCmdWatchMergeDetail(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self._env_patch = patch.dict("os.environ", {"GANTRY_TARGET": str(self.target)})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def test_shipped_not_merged_shows_in_detail_column(self):
+        from gantry.cli.watch import cmd_watch
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        with patch("builtins.print") as mock_print:
+            cmd_run(run_args)
+        run_id = json.loads("".join(c.args[0] for c in mock_print.call_args_list if c.args))["run_id"]
+        RunStore(self.target).update_state(run_id, status="shipped")
+
+        watch_args = build_parser().parse_args(["watch"])
+        with patch("sys.stdout.write") as mock_write:
+            cmd_watch(watch_args)
+        output = "".join(c.args[0] for c in mock_write.call_args_list if c.args)
+        self.assertIn("not yet merged", output)
+
+    def test_shipped_and_merged_shows_merged_in_detail_column(self):
+        from gantry.cli.watch import cmd_watch
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        with patch("builtins.print") as mock_print:
+            cmd_run(run_args)
+        run_id = json.loads("".join(c.args[0] for c in mock_print.call_args_list if c.args))["run_id"]
+        RunStore(self.target).update_state(run_id, status="shipped", merged=True)
+
+        watch_args = build_parser().parse_args(["watch"])
+        with patch("sys.stdout.write") as mock_write:
+            cmd_watch(watch_args)
+        output = "".join(c.args[0] for c in mock_write.call_args_list if c.args)
+        self.assertIn("merged", output)
+        self.assertNotIn("not yet merged", output)
+
+
 if __name__ == "__main__":
     unittest.main()

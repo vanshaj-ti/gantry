@@ -247,6 +247,19 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
         if cost:
             header += f"\nCost so far: ${cost:.2f}"
 
+    if status in ("shipped", "shipped_manually"):
+        # `merged` is otherwise invisible in a notification — a run's
+        # dependents (depends_on) only start once it's ACTUALLY merged, not
+        # merely shipped (see Engine._prereqs_met), so whoever reads this
+        # needs to know whether anything is still blocked on a manual merge.
+        merged = store.state(run_id).get("merged") is True
+        pr_url = store.state(run_id).get("pr_url", "")
+        if merged:
+            return f"{header}\nMerged.{f' {pr_url}' if pr_url else ''}"
+        return (f"{header}\nPR open, not yet merged.{f' {pr_url}' if pr_url else ''}\n\n"
+                f"Once merged, run `gantry mark-merged --run {_escape_md(run_id)}` so any "
+                f"dependent runs can start.")
+
     if status in ("spec_complete", "design_complete"):
         stage = status.removesuffix("_complete")
         agent_text = ""

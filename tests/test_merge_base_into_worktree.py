@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gantry.git import branch_name, ensure_worktree, merge_base_into_worktree, worktree_path
+from gantry.git import ensure_worktree, merge_base_into_worktree
 
 
 def _run(cmd, cwd):
@@ -42,7 +42,7 @@ class TestMergeBaseIntoWorktree(unittest.TestCase):
         return ensure_worktree(self.target, run_id, "main")
 
     def test_noop_when_worktree_branch_already_has_current_main(self):
-        wt = self._make_worktree()
+        self._make_worktree()
         result = merge_base_into_worktree(self.target, "run-1", "main")
         self.assertTrue(result["ok"])
         self.assertEqual(result["action"], "already_current")
