@@ -46,6 +46,18 @@ class TestSyncLocalBaseBranch(unittest.TestCase):
         _run(["git", "clone", "-q", str(self.bare), str(second)], self.tmp)
         _run(["git", "config", "user.email", "t@e.com"], second)
         _run(["git", "config", "user.name", "T"], second)
+        # The bare repo's own HEAD symref still points at whatever branch
+        # name existed at `git init --bare` time (typically "master"/
+        # "main" depending on the machine's init.defaultBranch) — it's never
+        # updated by a later `git branch -M main` + push in `local`, so a
+        # fresh clone of `bare` can check out a *different* default branch
+        # name than "main" even though `origin/main` exists as a remote-
+        # tracking ref. Explicitly check out main (creating the local
+        # tracking branch from origin/main) rather than trusting whatever
+        # branch the clone defaulted to — otherwise `git push origin main`
+        # below has no local "main" branch to push on some git/OS
+        # combinations (reproduced on GitHub Actions' ubuntu-latest runners).
+        _run(["git", "checkout", "-q", "-B", "main", "origin/main"], second)
         (second / "new-feature.txt").write_text("shipped\n")
         _run(["git", "add", "new-feature.txt"], second)
         _run(["git", "commit", "-q", "-m", "feat: ship something"], second)
