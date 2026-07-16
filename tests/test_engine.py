@@ -337,5 +337,86 @@ class TestEvidenceOutputDirective(unittest.TestCase):
         self.assertIn("pass_count", prompt)
 
 
+class TestPlanContextDirective(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_by_default(self):
+        self.assertEqual(self.eng._plan_context_directive("plan"), "")
+
+    def test_empty_for_non_plan_stages_even_when_configured(self):
+        self.cfg.plan.include_git_log = True
+        self.assertEqual(self.eng._plan_context_directive("build"), "")
+
+    def test_includes_git_log_when_enabled(self):
+        self.cfg.plan.include_git_log = True
+        directive = self.eng._plan_context_directive("plan")
+        self.assertIn("Recent history", directive)
+        self.assertIn("init", directive)  # the scratch repo's init commit message
+
+    def test_includes_context_file_contents(self):
+        (self.target / "NOTES.md").write_text("Important context for planning.")
+        self.cfg.plan.context_files = ["NOTES.md"]
+        directive = self.eng._plan_context_directive("plan")
+        self.assertIn("Important context for planning.", directive)
+        self.assertIn("NOTES.md", directive)
+
+    def test_missing_context_file_does_not_raise(self):
+        self.cfg.plan.context_files = ["does-not-exist.md"]
+        directive = self.eng._plan_context_directive("plan")
+        self.assertEqual(directive, "")
+
+    def test_render_prompt_prepends_context_for_plan(self):
+        self.cfg.plan.include_git_log = True
+        run_id = self.eng.create_run("t", "test")
+        prompt = self.eng.render_prompt("plan", run_id)
+        self.assertIn("Recent history", prompt)
+        # Context comes before the stage's own base instructions.
+        self.assertLess(prompt.index("Recent history"), prompt.index("Stage: plan"))
+
+
+class TestPlanDepthTemplateSelection(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+        self.prompts_dir = self.target / ".gantry" / "prompts"
+        self.prompts_dir.mkdir(parents=True)
+        (self.prompts_dir / "plan.md").write_text("# Detailed plan template\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_default_depth_uses_plan_md(self):
+        path = self.eng._prompt_template_path("plan")
+        self.assertEqual(path.name, "plan.md")
+
+    def test_brief_depth_falls_back_to_plan_md_when_no_brief_variant_exists(self):
+        self.cfg.plan.depth = "brief"
+        path = self.eng._prompt_template_path("plan")
+        self.assertEqual(path.name, "plan.md")
+
+    def test_brief_depth_uses_plan_brief_md_when_it_exists(self):
+        (self.prompts_dir / "plan-brief.md").write_text("# Brief plan template\n")
+        self.cfg.plan.depth = "brief"
+        path = self.eng._prompt_template_path("plan")
+        self.assertEqual(path.name, "plan-brief.md")
+
+    def test_depth_only_affects_plan_stage(self):
+        (self.prompts_dir / "build.md").write_text("# Build template\n")
+        self.cfg.plan.depth = "brief"
+        path = self.eng._prompt_template_path("build")
+        self.assertEqual(path.name, "build.md")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -86,7 +86,7 @@ class Engine:
         return p if p.is_absolute() else (self.target / p)
 
     def render_prompt(self, stage: str, run_id: str) -> str:
-        template_path = self._prompts_dir() / f"{stage}.md"
+        template_path = self._prompt_template_path(stage)
         if not template_path.exists():
             # fall back to a minimal generic instruction so a bare repo still runs
             artifact = self.cfg.artifact_for(stage)
@@ -95,7 +95,56 @@ class Engine:
                     f"and write your output to .agent-runs/{run_id}/{artifact}.\n")
         else:
             base = template_path.read_text().replace("{RUN_ID}", run_id)
-        return base + self._skills_directive(stage) + self._evidence_output_directive(stage)
+        return (self._plan_context_directive(stage) + base + self._skills_directive(stage)
+                + self._evidence_output_directive(stage))
+
+    def _prompt_template_path(self, stage: str) -> Path:
+        """Which prompt template file to use for this stage.
+
+        Only the plan stage has a depth variant today: [plan].depth = "brief"
+        selects prompts/plan-brief.md INSTEAD OF prompts/plan.md, but only if
+        that brief variant actually exists in this project's prompts_dir —
+        falls back to the single existing template otherwise, so a project
+        that sets depth="brief" without ever adding the variant file sees no
+        behavior change (same as never setting it)."""
+        if stage == "plan" and self.cfg.plan.depth == "brief":
+            brief_path = self._prompts_dir() / "plan-brief.md"
+            if brief_path.exists():
+                return brief_path
+        return self._prompts_dir() / f"{stage}.md"
+
+    def _plan_context_directive(self, stage: str) -> str:
+        """Prepended to the plan stage's prompt: recent git history and/or
+        the contents of explicitly configured context files, when
+        [plan].include_git_log / context_files are set. Empty (today's
+        behavior) when neither is configured — the plan agent only ever saw
+        intake.md and whatever it found itself via its own tools."""
+        if stage != "plan":
+            return ""
+        sections = []
+        if self.cfg.plan.include_git_log:
+            log = self._recent_git_log(self.cfg.plan.git_log_lines)
+            if log:
+                sections.append(f"## Recent history\n```\n{log}\n```\n")
+        for rel_path in self.cfg.plan.context_files:
+            path = self.target / rel_path
+            if path.is_file():
+                sections.append(f"## Referenced file: {rel_path}\n```\n{path.read_text()}\n```\n")
+            else:
+                logger.warning("plan.context_files entry not found: %s", rel_path)
+        if not sections:
+            return ""
+        return "# Context\n\n" + "\n".join(sections) + "\n---\n\n"
+
+    def _recent_git_log(self, n: int) -> str:
+        import subprocess as _subprocess
+        try:
+            proc = _subprocess.run(["git", "log", "--oneline", f"-{n}"], cwd=str(self.target),
+                                   capture_output=True, text=True, timeout=30)
+            return proc.stdout.strip() if proc.returncode == 0 else ""
+        except Exception:
+            logger.debug("git log failed for plan context directive", exc_info=True)
+            return ""
 
     def _evidence_output_directive(self, stage: str) -> str:
         """Appended to the evidence stage's prompt only when
