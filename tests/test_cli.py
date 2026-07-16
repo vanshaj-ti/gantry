@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gantry.cli import build_parser
-from gantry.cli.run_commands import cmd_cancel, cmd_cleanup, cmd_init, cmd_retry, cmd_run, cmd_status
+from gantry.cli.run_commands import (
+    cmd_cancel, cmd_cleanup, cmd_hold, cmd_init, cmd_mark_shipped, cmd_resume_hold,
+    cmd_retry, cmd_run, cmd_status,
+)
 from gantry.git import ensure_worktree
 
 
@@ -240,6 +243,153 @@ class TestCmdCancelAndCleanup(unittest.TestCase):
         result = subprocess.run(["git", "worktree", "list"], cwd=str(self.target),
                                 capture_output=True, text=True, check=True)
         self.assertNotIn(run_id, result.stdout)
+
+
+class TestCmdHoldAndResume(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self._env_patch = patch.dict("os.environ", {"GANTRY_TARGET": str(self.target)})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def _run_and_capture(self, func, args):
+        with patch("builtins.print") as mock_print:
+            rc = func(args)
+        out = "".join(c.args[0] for c in mock_print.call_args_list if c.args)
+        return rc, out
+
+    def test_hold_then_resume_round_trips_prior_status(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        store = RunStore(self.target)
+        store.update_state(run_id, status="blocked", blocked_on="checks")
+
+        hold_args = build_parser().parse_args(["hold", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_hold, hold_args)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "held")
+        self.assertEqual(payload["held_from_status"], "blocked")
+        self.assertEqual(store.state(run_id)["status"], "held")
+
+        resume_args = build_parser().parse_args(["resume", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_resume_hold, resume_args)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(store.state(run_id)["status"], "blocked")
+
+    def test_hold_refuses_while_stage_running(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="build_running")
+
+        hold_args = build_parser().parse_args(["hold", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_hold, hold_args)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+
+    def test_hold_refuses_when_already_held(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="held", held_from_status="blocked")
+
+        hold_args = build_parser().parse_args(["hold", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_hold, hold_args)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+
+    def test_resume_refuses_when_not_held(self):
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+
+        resume_args = build_parser().parse_args(["resume", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_resume_hold, resume_args)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+
+    def test_held_run_excluded_from_advance_all(self):
+        from gantry.advance import advance_all
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        store = RunStore(self.target)
+        store.update_state(run_id, status="held", held_from_status="blocked")
+
+        from gantry.config import load_config
+        results = advance_all(self.target, load_config(self.target))
+        touched_ids = [r.get("run_id") for r in results]
+        self.assertNotIn(run_id, touched_ids)
+        self.assertEqual(store.state(run_id)["status"], "held")
+
+
+class TestCmdMarkShipped(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self._env_patch = patch.dict("os.environ", {"GANTRY_TARGET": str(self.target)})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def _run_and_capture(self, func, args):
+        with patch("builtins.print") as mock_print:
+            rc = func(args)
+        out = "".join(c.args[0] for c in mock_print.call_args_list if c.args)
+        return rc, out
+
+    def test_marks_shipped_manually(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+
+        args = build_parser().parse_args(["mark-shipped", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_mark_shipped, args)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "shipped_manually")
+        self.assertEqual(RunStore(self.target).state(run_id)["status"], "shipped_manually")
+
+    def test_refuses_when_already_shipped_without_force(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="shipped")
+
+        args = build_parser().parse_args(["mark-shipped", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_mark_shipped, args)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+
+    def test_force_overrides_already_shipped(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="shipped")
+
+        args = build_parser().parse_args(["mark-shipped", "--run", run_id, "--force"])
+        rc, out = self._run_and_capture(cmd_mark_shipped, args)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
 
 
 class TestCmdRetry(unittest.TestCase):

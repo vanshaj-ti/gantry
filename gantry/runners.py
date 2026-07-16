@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,9 @@ class RunnerResult:
     stdout: str
     stderr: str
     exit_code: int
+    usage: dict[str, Any] = field(default_factory=lambda: {
+        "cost_usd": None, "input_tokens": None, "output_tokens": None, "duration_ms": None,
+    })
 
 
 class AgentRunner:
@@ -64,6 +67,7 @@ class AgentRunner:
                 "exit_code": exit_code,
             }
         is_error = bool(data.get("is_error")) or exit_code != 0
+        from .cost import extract_usage
         return RunnerResult(
             ok=not is_error,
             session_id=data.get("session_id"),
@@ -71,6 +75,7 @@ class AgentRunner:
             stdout=stdout,
             stderr=stderr,
             exit_code=exit_code,
+            usage=extract_usage(data),
         )
 
     def run(
@@ -188,6 +193,13 @@ class CodexRunner(AgentRunner):
         thread_id: str | None = None
         last_message: str | None = None
         saw_turn_completed = False
+        # codex exec --json emits usage on turn.completed as
+        # {"type":"turn.completed","usage":{"input_tokens":...,"output_tokens":...}}
+        # per its own event schema — no cost-in-USD field exists in the stream
+        # (codex is ChatGPT-auth, not billed per-token via this CLI), so
+        # cost_usd stays None here even when token counts are present.
+        input_tokens: int | None = None
+        output_tokens: int | None = None
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -206,6 +218,9 @@ class CodexRunner(AgentRunner):
                     last_message = item.get("text")
             elif etype == "turn.completed":
                 saw_turn_completed = True
+                usage = event.get("usage") or {}
+                input_tokens = usage.get("input_tokens", input_tokens)
+                output_tokens = usage.get("output_tokens", output_tokens)
 
         is_error = exit_code != 0 or not saw_turn_completed or last_message is None
         raw = {
@@ -222,6 +237,8 @@ class CodexRunner(AgentRunner):
             stdout=stdout,
             stderr=stderr,
             exit_code=exit_code,
+            usage={"cost_usd": None, "input_tokens": input_tokens,
+                   "output_tokens": output_tokens, "duration_ms": None},
         )
 
 

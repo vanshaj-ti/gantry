@@ -119,6 +119,8 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     )
     store.save_session(run_id, "review", session_id=result.session_id,
                        model=cfg.review.model, runner=runner.name)
+    from .cost import accumulate as _accumulate_cost
+    _accumulate_cost(store, run_id, "review", result.usage)
 
     text = result.raw.get("result", "") if isinstance(result.raw, dict) else result.stdout
     verdict = _parse_verdict(str(text) or result.stdout, cfg) if result.ok else "ESCALATE"

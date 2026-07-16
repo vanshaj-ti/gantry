@@ -247,6 +247,8 @@ class Engine:
         self.store.write_result(run_id, f"{stage}-result.json", result.raw)
         self.store.save_session(run_id, stage, session_id=result.session_id,
                                 model=sm.model, runner=runner.name)
+        from .cost import accumulate as _accumulate_cost
+        _accumulate_cost(self.store, run_id, stage, result.usage)
         status = f"{stage}_complete" if result.ok else f"{stage}_failed"
         self._set_status(run_id, status)
         return {"stage": stage, "ok": result.ok, "session_id": result.session_id}
@@ -332,6 +334,8 @@ class Engine:
         self.store.write_log(run_id, "resolve.stdout", result.stdout)
         self.store.write_log(run_id, "resolve.stderr", result.stderr)
         self.store.write_result(run_id, "resolve-result.json", result.raw)
+        from .cost import accumulate as _accumulate_cost
+        _accumulate_cost(self.store, run_id, "resolve", result.usage)
 
         # Never trust the agent's own report — re-run real checks ourselves.
         verify = self.run_checks(run_id)

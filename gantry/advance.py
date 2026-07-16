@@ -70,12 +70,56 @@ STATUS_LABELS = {
     "shipped": "Shipped — PR open",
     "shipped_manually": "Shipped (manual) — PR open",
     "ship_failed": "Ship FAILED — push/PR error",
+    "held": "Held — human working on this run manually",
     "cancelled": "Cancelled",
 }
 
 
 def label(status: str) -> str:
     return STATUS_LABELS.get(status, status)
+
+
+# Compact labels for space-constrained displays (the cockpit status bar is
+# `gantry watch --live` running in a thin tmux pane, not a phone notification
+# body with room for "Review requested changes — rebuilding"). Falls back to
+# the raw status string for anything not listed here — every status not
+# worth a full sentence explanation is already short as-is (e.g.
+# "build_running" reads fine bare).
+SHORT_STATUS_LABELS = {
+    "queued": "Queued",
+    "awaiting_spec": "Awaiting spec",
+    "spec_running": "Writing spec",
+    "spec_complete": "Spec review",
+    "spec_failed": "Spec failed",
+    "awaiting_design": "Awaiting design",
+    "design_running": "Writing design",
+    "design_complete": "Design review",
+    "design_failed": "Design failed",
+    "awaiting_plan": "Ready to plan",
+    "plan_running": "Planning",
+    "plan_complete": "Plan done",
+    "build_running": "Building",
+    "build_complete": "Build done",
+    "evidence_running": "Evidence",
+    "evidence_complete": "Evidence done",
+    "review_running": "Reviewing",
+    "review_approved": "Approved",
+    "review_changes_requested": "Changes requested",
+    "review_escalated": "Review escalated",
+    "blocked": "Blocked",
+    "checks_escalated": "Checks escalated",
+    "resolve_running": "Resolving",
+    "resolve_escalated": "Resolve escalated",
+    "shipped": "Shipped",
+    "shipped_manually": "Shipped (manual)",
+    "ship_failed": "Ship failed",
+    "held": "Held",
+    "cancelled": "Cancelled",
+}
+
+
+def short_label(status: str) -> str:
+    return SHORT_STATUS_LABELS.get(status, status)
 
 
 # Emoji glyphs by outcome family — scannable at a glance in a phone notification
@@ -90,6 +134,7 @@ _STATUS_ICON = {
     "shipped": "\U0001f680",           # 🚀
     "shipped_manually": "\U0001f680",  # 🚀
     "ship_failed": "⚠️",            # ⚠️
+    "held": "\U0001f91a",              # 🤚
     "cancelled": "\U0001f6ab",         # 🚫
 }
 
@@ -168,6 +213,14 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
     header = f"{icon} *{_escape_md(run_id)}*\n{_escape_md(label(status))}"
     result = result or {}
 
+    # Cost-to-date on terminal states — the natural point a human reads this
+    # and might wonder what the run cost, without opening `gantry cost --run`.
+    if status in ("shipped", "shipped_manually") or status.endswith("_escalated"):
+        from .cost import report_for_run
+        cost = report_for_run(store, run_id).get("total_cost_usd")
+        if cost:
+            header += f"\nCost so far: ${cost:.2f}"
+
     if status in ("spec_complete", "design_complete"):
         stage = status.removesuffix("_complete")
         agent_text = ""
@@ -230,6 +283,14 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                 f"{_escape_md(note[:800])}\n\n"
                 f"*Reply 1* to approve as-is.\n"
                 f"*Reply 2* with guidance to send back for changes.")
+
+    if status == "held":
+        held_from = store.state(run_id).get("held_from_status", "")
+        return (f"{header}\n\n"
+                f"Paused for manual work (was: `{_escape_md(held_from)}`). Gantry will not "
+                f"advance or auto-retry this run while held.\n\n"
+                f"Run `gantry resume --run {_escape_md(run_id)}` when you're done to hand it "
+                f"back to the pipeline.")
 
     # Agent asked a clarifying question mid-stage instead of erroring (common on
     # plan/build when the request under-specifies an architecture decision).

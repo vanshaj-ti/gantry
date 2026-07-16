@@ -23,12 +23,14 @@ def _watch_color_family(status: str) -> str:
         return "red"
     if status.endswith("_running"):
         return "yellow"
+    if status == "held":
+        return "yellow"
     return ""
 
 
 def cmd_watch(args) -> int:
     """Live/one-shot dashboard of all runs in the target repo."""
-    from ..advance import label
+    from ..advance import short_label as label
     store = RunStore(_target())
     colorize = sys.stdout.isatty()
 
@@ -72,9 +74,11 @@ def cmd_watch(args) -> int:
         """Retry/blocked context only — agent/model/session now have their
         own columns (see running_session), so this stays scoped to what a
         stuck run is actually blocked on."""
-        if status not in ("blocked", "checks_escalated", "resolve_escalated"):
+        if status not in ("blocked", "checks_escalated", "resolve_escalated", "held"):
             return ""
         st = store.state(run_id)
+        if status == "held":
+            return f"was: {st.get('held_from_status', '')}"
         blocked_on = st.get("blocked_on", "")
         if status == "resolve_escalated":
             attempts = st.get("resolve_attempt_count")
@@ -96,30 +100,35 @@ def cmd_watch(args) -> int:
             return text
         return f"{_WATCH_COLOR[family]}{text}{_WATCH_COLOR['reset']}"
 
+    def cost_for(run_id: str) -> str:
+        cost = store.state(run_id).get("total_cost_usd")
+        return f"${cost:.2f}" if cost is not None else ""
+
     def render() -> None:
         cols = shutil.get_terminal_size().columns
         runs = store.list_runs()
         lines = [f"GANTRY — {len(runs)} run(s)", ""]
 
-        status_w, agent_w, model_w, session_w, detail_w, updated_w = 44, 12, 16, 10, 20, 10
-        fixed = status_w + agent_w + model_w + session_w + detail_w + updated_w
+        status_w, agent_w, model_w, session_w, cost_w, detail_w, updated_w = 20, 12, 16, 10, 8, 20, 10
+        fixed = status_w + agent_w + model_w + session_w + cost_w + detail_w + updated_w
         # Titles are short slugs in practice (run_id-derived) — absorbing
         # every leftover column in a wide status bar just leaves a huge
         # empty gap, not more useful information. Cap it well below "all
         # remaining space".
         title_w = max(20, min(40, cols - fixed - 6))
 
-        headers = ("TITLE", "STATUS", "AGENT", "MODEL", "SESSION", "DETAIL", "UPDATED")
-        widths = (title_w, status_w, agent_w, model_w, session_w, detail_w, updated_w)
+        headers = ("TITLE", "STATUS", "AGENT", "MODEL", "SESSION", "COST", "DETAIL", "UPDATED")
+        widths = (title_w, status_w, agent_w, model_w, session_w, cost_w, detail_w, updated_w)
         lines.append(" ".join(trunc(h, w) for h, w in zip(headers, widths)))
         lines.append("-" * min(cols, sum(widths) + 6))
         for r in runs:
             title = r["title"] or r["id"]
             status_text = label(r["status"])
             runner, model, sid = running_session(r["id"], r["status"])
+            cost_text = cost_for(r["id"])
             detail_text = detail_for(r["id"], r["status"])
             row = " ".join(trunc(v, w) for v, w in zip(
-                (title, status_text, runner, model, sid, detail_text, age(r["mtime"])), widths))
+                (title, status_text, runner, model, sid, cost_text, detail_text, age(r["mtime"])), widths))
             lines.append(paint(row, r["status"]))
 
         # Single write, not one print() per line: on a --live refresh the clear

@@ -10,9 +10,13 @@ Verbs:
   gantry approve --run ID --stage S  pass a human-review gate, advance
   gantry revise --run ID --stage S "comments"   send a stage back
   gantry ship --run ID                commit + push + open a PR (review_approved only)
+  gantry hold --run ID                pause a run so nothing auto-advances it (manual takeover)
+  gantry resume --run ID              un-pause a held run, restoring its prior status
+  gantry mark-shipped --run ID        record that a run was shipped outside `gantry ship`
   gantry status [--run ID]           show run(s) status
   gantry doctor                      check the environment (runners, git, config)
   gantry listen                      poll Telegram replies, act on the pending run
+  gantry cost [--run ID]               repo-wide cost total, or one run's per-stage breakdown
   gantry docs --run ID                render a run's spec/design/plan/evidence/review docs
   gantry cockpit                      open a tmux workspace pre-wired for this repo
   gantry update                       git pull + reinstall this gantry checkout
@@ -28,10 +32,12 @@ import sys
 from pathlib import Path
 
 from .. import __version__
+from .cost import cmd_cost
 from .docs import cmd_doctor, cmd_docs
 from .run_commands import (
-    cmd_advance, cmd_approve, cmd_cancel, cmd_checks, cmd_cleanup, cmd_init,
-    cmd_loop, cmd_retry, cmd_review, cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
+    cmd_advance, cmd_approve, cmd_cancel, cmd_checks, cmd_cleanup, cmd_hold, cmd_init,
+    cmd_loop, cmd_mark_shipped, cmd_resume_hold, cmd_retry, cmd_review, cmd_revise, cmd_run,
+    cmd_ship, cmd_stage, cmd_status,
 )
 from .system import cmd_cockpit, cmd_daemon, cmd_mcp, cmd_update
 from .watch import cmd_listen, cmd_watch
@@ -95,6 +101,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="ship even if status isn't review_approved")
     s.set_defaults(func=cmd_ship)
 
+    s = sub.add_parser("hold", help="pause a run so Gantry stops advancing/auto-retrying it — "
+                                     "for taking over the worktree by hand")
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_hold)
+
+    s = sub.add_parser("mark-shipped", help="record that a run was shipped outside `gantry ship` "
+                                             "(e.g. shipped by hand after a hold)")
+    s.add_argument("--run", required=True)
+    s.add_argument("--force", action="store_true", help="mark shipped even if already shipped")
+    s.set_defaults(func=cmd_mark_shipped)
+
+    s = sub.add_parser("resume", help="un-pause a held run, restoring its prior status")
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_resume_hold)
+
     s = sub.add_parser("cancel", help="cancel a run (mark cancelled, optionally clean up its worktree)")
     s.add_argument("--run", required=True)
     s.add_argument("--force", action="store_true", help="cancel even if already shipped")
@@ -143,6 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--nav", action="store_true",
                    help="persistent arrow-key navigator (curses): run list -> doc list -> content")
     s.set_defaults(func=cmd_docs)
+
+    s = sub.add_parser("cost", help="repo-wide cost total, or one run's per-stage breakdown")
+    s.add_argument("--run", help="show this run's per-stage cost breakdown (default: repo-wide total)")
+    s.set_defaults(func=cmd_cost)
 
     s = sub.add_parser("watch", help="dashboard of all runs")
     s.add_argument("--live", action="store_true", help="refresh every 2s (default: one-shot)")

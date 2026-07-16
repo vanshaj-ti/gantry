@@ -138,6 +138,65 @@ def cmd_ship(args) -> int:
     return _out(ship_run(eng, run_id))
 
 
+def cmd_mark_shipped(args) -> int:
+    """Tell Gantry a run was shipped outside its own `ship` command — e.g. the
+    human took over via `gantry hold`, made the PR/merge by hand, and now
+    wants the run to stop showing as active in `watch`/`cleanup`/`cancel`'s
+    "already shipped" guard. Distinct from `gantry ship` (which actually
+    commits/pushes/opens the PR itself) — this only records that shipping
+    already happened, matching how `shipped_manually` is already read
+    everywhere else in the codebase (watch's green coloring, cleanup's
+    default targets, cancel's already-shipped guard) despite nothing ever
+    having set it until now."""
+    store = RunStore(_target())
+    run_id = args.run
+    state = store.state(run_id)
+    if state.get("status") in ("shipped", "shipped_manually") and not args.force:
+        return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
+                    f"already marked shipped (use --force to override)"})
+    store.update_state(run_id, status="shipped_manually", shipped_at=now_iso())
+    return _out({"ok": True, "run_id": run_id, "status": "shipped_manually"})
+
+
+def cmd_hold(args) -> int:
+    """Pause a run so nothing in Gantry touches it — `advance --all`/`loop`
+    skip it, and the stale-running repair sweep leaves it alone — while a
+    human works on the worktree by hand. Distinct from `cancel`: hold is
+    reversible (`gantry resume` restores whatever status was active when
+    held), cancel is a terminal dead end.
+
+    Refuses on an already-*_running stage: holding mid-agent-invocation would
+    still leave that subprocess running unsupervised in the worktree (nothing
+    kills it), so the human would be editing files out from under a live
+    agent. Let that stage finish (or fail/timeout) first, then hold."""
+    store = RunStore(_target())
+    run_id = args.run
+    state = store.state(run_id)
+    current_status = state.get("status", "")
+    if current_status == "held":
+        return _out({"ok": False, "error": "run is already held"})
+    if current_status.endswith("_running"):
+        return _out({"ok": False, "error": f"run status is {current_status!r} — an agent stage "
+                    f"is actively running; wait for it to finish before holding"})
+    store.update_state(run_id, status="held", held_from_status=current_status, held_at=now_iso())
+    return _out({"ok": True, "run_id": run_id, "status": "held", "held_from_status": current_status})
+
+
+def cmd_resume_hold(args) -> int:
+    """Restore a held run to whatever status it was in before `gantry hold`,
+    handing it back to the normal auto-advance machinery. Named
+    resume_hold/`gantry resume` (not `unhold`) to read naturally as the
+    counterpart to a human pausing work and then resuming it."""
+    store = RunStore(_target())
+    run_id = args.run
+    state = store.state(run_id)
+    if state.get("status") != "held":
+        return _out({"ok": False, "error": f"run status is {state.get('status')!r}, not held"})
+    restored = state.get("held_from_status", "blocked")
+    store.update_state(run_id, status=restored, held_from_status=None)
+    return _out({"ok": True, "run_id": run_id, "status": restored})
+
+
 def cmd_cancel(args) -> int:
     """Mark a run cancelled — stops it from ever being auto-advanced or
     manually stage'd further. Doesn't touch the worktree unless --cleanup is
@@ -237,7 +296,7 @@ def cmd_advance(args) -> int:
 # `advance --run` tick would refuse to touch, plus terminal ship states.
 _LOOP_STOP_SUFFIXES = ("_failed", "_approved", "_escalated", "_shipped")
 _LOOP_STOP_PREFIXES = ("awaiting_", "shipped")
-_LOOP_STOP_EXACT = {"blocked", "cancelled"}
+_LOOP_STOP_EXACT = {"blocked", "cancelled", "held"}
 
 
 def _is_loop_terminal(status: str) -> bool:

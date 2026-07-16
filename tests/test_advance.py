@@ -454,6 +454,7 @@ class TestResolverStage(unittest.TestCase):
         fake_runner_result = type("R", (), {
             "ok": True, "stdout": "I fixed it and everything passes!",
             "stderr": "", "raw": {"result": "done"}, "session_id": "s1",
+            "usage": {"cost_usd": None, "input_tokens": None, "output_tokens": None, "duration_ms": None},
         })()
 
         with patch("gantry.engine.get_runner") as mock_get_runner, \
@@ -474,6 +475,7 @@ class TestResolverStage(unittest.TestCase):
         fake_runner_result = type("R", (), {
             "ok": True, "stdout": "fixed", "stderr": "", "raw": {"result": "done"},
             "session_id": "s1",
+            "usage": {"cost_usd": None, "input_tokens": None, "output_tokens": None, "duration_ms": None},
         })()
 
         with patch("gantry.engine.get_runner") as mock_get_runner, \
@@ -484,6 +486,22 @@ class TestResolverStage(unittest.TestCase):
 
         self.assertTrue(result["verified_pass"])
         self.assertEqual(eng.store.state(run_id)["status"], "build_complete")
+
+
+class TestShortLabel(unittest.TestCase):
+    def test_known_status_is_shorter_than_full_label(self):
+        from gantry.advance import label, short_label
+        status = "review_changes_requested"
+        self.assertLess(len(short_label(status)), len(label(status)))
+
+    def test_unknown_status_falls_back_to_raw_string(self):
+        from gantry.advance import short_label
+        self.assertEqual(short_label("some_new_status"), "some_new_status")
+
+    def test_held_and_shipped_manually_have_short_labels(self):
+        from gantry.advance import short_label
+        self.assertEqual(short_label("held"), "Held")
+        self.assertEqual(short_label("shipped_manually"), "Shipped (manual)")
 
 
 if __name__ == "__main__":
