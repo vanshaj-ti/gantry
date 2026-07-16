@@ -48,6 +48,12 @@ class AgentConfig:
     runner: str = "claude-code"        # "claude-code" | "cursor-cli"
     skip_permissions: bool = True       # pass the runner's auto-approve flag
     output_format: str = "json"
+    max_concurrent: int = 0    # cap on concurrently-running agent subprocesses
+                                 # across advance_all's per-tick sweep. 0 = unlimited
+                                 # (today's behavior: runs are processed one at a
+                                 # time in a single Python process anyway, so an
+                                 # unbounded cap changes nothing until advance_all
+                                 # actually parallelizes its per-run loop).
 
 
 # Per-runner install commands for agent skill libraries (e.g. superpowers).
@@ -74,6 +80,12 @@ class SkillsConfig:
     installers: dict[str, dict[str, str]] = field(
         default_factory=lambda: {k: dict(v) for k, v in DEFAULT_SKILL_INSTALLERS.items()}
     )
+    evidence_directive: str = ""  # override text for the evidence stage's mandated-skills
+                                    # block. Empty = evidence gets a verification-focused
+                                    # default ("confirm the plan was executed correctly; do
+                                    # not re-implement") instead of build's TDD/execution-
+                                    # focused directive — evidence and build need different
+                                    # framing even when they share the same `enabled` skills.
 
     def install_command(self, skill: str, runner: str) -> str | None:
         return (self.installers.get(skill) or {}).get(runner)
@@ -97,6 +109,19 @@ class ReviewConfig:
     approve_keywords: list[str] = field(default_factory=lambda: ["APPROVE"])
     request_changes_keywords: list[str] = field(default_factory=lambda: ["REQUEST_CHANGES"])
     escalate_keywords: list[str] = field(default_factory=lambda: ["ESCALATE"])
+    max_turns: int = 10   # review is an investigation, not open-ended implementation —
+                            # needs far fewer turns than build/evidence. Previously
+                            # silently inherited StageModel's generic default (60)
+                            # because "review" is rarely declared in [models].
+    checklist: list[str] = field(default_factory=list)  # project-specific items appended
+                                                          # to the review prompt that the
+                                                          # reviewer must explicitly address
+                                                          # (e.g. "confirm no secrets committed")
+    keyword_mode: str = "anywhere"  # "anywhere" (default, current behavior) | "line_start" —
+                                     # "line_start" requires the verdict keyword
+                                     # (APPROVE/REQUEST_CHANGES/ESCALATE) to be the first
+                                     # token of a line, eliminating false ESCALATE matches
+                                     # from prose that merely mentions the word.
 
 
 @dataclass
@@ -171,6 +196,28 @@ class ChecksConfig:
 
 
 @dataclass
+class E2eAppConfig:
+    """One app's e2e config. `apps` accepts a bare string (wrapped into this
+    with defaults) or a table `{command, spec_glob, retry}` — see
+    _coerce_e2e_app."""
+    command: str
+    spec_glob: str = ""   # "" = fall back to E2eConfig.spec_glob
+    retry: int = 0         # retry a failing app's e2e run this many times before
+                            # including it in the failure report — scoped per-app
+                            # since e2e flakiness is usually app-specific, unlike
+                            # checks.retry_checks which retries the whole build.
+
+
+def _coerce_e2e_app(item: Any) -> E2eAppConfig:
+    if isinstance(item, E2eAppConfig):
+        return item
+    if isinstance(item, str):
+        return E2eAppConfig(command=item)
+    return E2eAppConfig(command=item["command"], spec_glob=item.get("spec_glob", ""),
+                        retry=int(item.get("retry", 0)))
+
+
+@dataclass
 class E2eConfig:
     """Deterministic, non-LLM e2e test step run between checks and evidence.
 
@@ -180,12 +227,59 @@ class E2eConfig:
     expensive, hard-to-resume LLM evidence turn. Empty `apps` = step is a no-op
     (evidence stage falls back to running e2e itself, old behavior)."""
     enabled: bool = False
-    # app dir name (under apps/<name>) -> shell command to run its e2e suite
-    apps: dict[str, str] = field(default_factory=dict)
+    # app dir name (under apps/<name>) -> bare command string or
+    # {command, spec_glob, retry} table. run_e2e_tests coerces every value via
+    # _coerce_e2e_app, so direct dataclass construction with plain strings
+    # (existing behavior, existing tests) keeps working unchanged.
+    apps: dict[str, Any] = field(default_factory=dict)
     # glob (relative to the app dir) used to detect whether this run touched
     # that app's e2e-relevant surface at all — skip apps with no matching spec
     spec_glob: str = "tests/e2e/*.spec.ts"
     timeout: int = 1800
+
+
+@dataclass
+class PlanConfig:
+    """Context injection + depth for the plan stage's rendered prompt."""
+    include_git_log: bool = False   # prepend the last N `git log --oneline` lines
+                                      # as a "## Recent history" section
+    git_log_lines: int = 20
+    context_files: list[str] = field(default_factory=list)  # paths (relative to the
+                                                               # target repo) whose
+                                                               # contents get prepended
+                                                               # as a "## Referenced files"
+                                                               # section
+    depth: str = "detailed"   # "brief" | "detailed" — selects prompts/plan-brief.md
+                                # instead of prompts/plan.md when set to "brief" and
+                                # that template exists; falls back to the single
+                                # existing template otherwise (no behavior change for
+                                # a project that never adds a brief variant).
+
+
+@dataclass
+class BuildConfig:
+    """Pre-build setup hook, run once in the worktree before the build stage's
+    first (non-resumed) agent invocation for a run."""
+    pre_hook: str = ""   # shell command, e.g. "npm ci && make seed-db". Empty = no-op.
+    pre_hook_required: bool = False  # False (default): a failing pre_hook is logged
+                                       # but does not block build from starting, mirroring
+                                       # git._install_deps_if_npm_project's best-effort
+                                       # philosophy (a missing/failed setup step surfaces
+                                       # clearly later in whichever check actually needed
+                                       # it, rather than hard-failing upfront on something
+                                       # that might not even matter for this run).
+                                       # True: a failing pre_hook fails the build stage
+                                       # immediately instead of proceeding.
+
+
+@dataclass
+class EvidenceConfig:
+    """Evidence stage output shape."""
+    output_format: str = "prose"   # "prose" (default, current behavior) | "structured" —
+                                     # "structured" asks the evidence prompt for a trailing
+                                     # fenced JSON block (pass_count, fail_count,
+                                     # coverage_pct, scope_summary) that review.py can parse
+                                     # deterministically instead of re-deriving it from prose.
 
 
 @dataclass
@@ -286,6 +380,9 @@ class GantryConfig:
     scope: ScopeConfig = field(default_factory=ScopeConfig)
     checks: ChecksConfig = field(default_factory=ChecksConfig)
     e2e: E2eConfig = field(default_factory=E2eConfig)
+    plan: PlanConfig = field(default_factory=PlanConfig)
+    build: BuildConfig = field(default_factory=BuildConfig)
+    evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     git: GitConfig = field(default_factory=GitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
@@ -344,6 +441,7 @@ def load_config(target_workspace: Path) -> GantryConfig:
             runner=a.get("runner", "claude-code"),
             skip_permissions=bool(a.get("skip_permissions", True)),
             output_format=a.get("output_format", "json"),
+            max_concurrent=int(a.get("max_concurrent", 0)),
         )
     cfg.models = _coerce_models(raw.get("models", {}))
 
@@ -356,6 +454,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
             approve_keywords=r.get("approve_keywords", ["APPROVE"]),
             request_changes_keywords=r.get("request_changes_keywords", ["REQUEST_CHANGES"]),
             escalate_keywords=r.get("escalate_keywords", ["ESCALATE"]),
+            max_turns=int(r.get("max_turns", 10)),
+            checklist=r.get("checklist", []),
+            keyword_mode=r.get("keyword_mode", "anywhere"),
         )
     if "scope" in raw:
         s = raw["scope"]
@@ -384,12 +485,32 @@ def load_config(target_workspace: Path) -> GantryConfig:
                                   resolve_attempts=int(c.get("resolve_attempts", 2)))
     if "e2e" in raw:
         e = raw["e2e"]
+        # apps values are each either a bare string or a
+        # {command, spec_glob, retry} table — both valid TOML; run_e2e_tests'
+        # _coerce_e2e_app normalizes either shape, so no coercion needed here.
         cfg.e2e = E2eConfig(
             enabled=bool(e.get("enabled", False)),
             apps=dict(e.get("apps", {})),
             spec_glob=e.get("spec_glob", E2eConfig().spec_glob),
             timeout=int(e.get("timeout", 1800)),
         )
+    if "plan" in raw:
+        p = raw["plan"]
+        cfg.plan = PlanConfig(
+            include_git_log=bool(p.get("include_git_log", False)),
+            git_log_lines=int(p.get("git_log_lines", 20)),
+            context_files=p.get("context_files", []),
+            depth=p.get("depth", "detailed"),
+        )
+    if "build" in raw:
+        b = raw["build"]
+        cfg.build = BuildConfig(
+            pre_hook=b.get("pre_hook", ""),
+            pre_hook_required=bool(b.get("pre_hook_required", False)),
+        )
+    if "evidence" in raw:
+        ev = raw["evidence"]
+        cfg.evidence = EvidenceConfig(output_format=ev.get("output_format", "prose"))
     if "git" in raw:
         g = raw["git"]
         cfg.git = GitConfig(base_branch=g.get("base_branch", "main"),
@@ -402,7 +523,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
         sk = raw["skills"]
         installers = {k: dict(v) for k, v in DEFAULT_SKILL_INSTALLERS.items()}
         installers.update(sk.get("installers", {}))
-        cfg.skills = SkillsConfig(enabled=sk.get("enabled", []), installers=installers)
+        cfg.skills = SkillsConfig(enabled=sk.get("enabled", []), installers=installers,
+                                  evidence_directive=sk.get("evidence_directive", ""))
     # MCP: merge curated defaults with any user-declared servers.
     servers = {name: MCPServer(command=s["command"], args=s.get("args", []),
                                stages=s.get("stages", []), register=dict(s.get("register", {})))

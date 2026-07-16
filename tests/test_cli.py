@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from gantry.cli import build_parser
 from gantry.cli.run_commands import (
-    cmd_cancel, cmd_cleanup, cmd_hold, cmd_init, cmd_mark_shipped, cmd_resume_hold,
-    cmd_retry, cmd_run, cmd_status,
+    cmd_cancel, cmd_cleanup, cmd_hold, cmd_init, cmd_mark_merged, cmd_mark_shipped,
+    cmd_resume_hold, cmd_retry, cmd_run, cmd_status,
 )
 from gantry.git import ensure_worktree
 
@@ -390,6 +390,61 @@ class TestCmdMarkShipped(unittest.TestCase):
         rc, out = self._run_and_capture(cmd_mark_shipped, args)
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
+
+
+class TestCmdMarkMerged(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self._env_patch = patch.dict("os.environ", {"GANTRY_TARGET": str(self.target)})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def _run_and_capture(self, func, args):
+        with patch("builtins.print") as mock_print:
+            rc = func(args)
+        out = "".join(c.args[0] for c in mock_print.call_args_list if c.args)
+        return rc, out
+
+    def test_marks_merged_when_shipped(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="shipped")
+
+        args = build_parser().parse_args(["mark-merged", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_mark_merged, args)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["merged"])
+        self.assertTrue(RunStore(self.target).state(run_id)["merged"])
+
+    def test_marks_merged_when_shipped_manually(self):
+        from gantry.state import RunStore
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="shipped_manually")
+
+        args = build_parser().parse_args(["mark-merged", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_mark_merged, args)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+
+    def test_refuses_when_not_shipped(self):
+        run_args = build_parser().parse_args(["run", "--title", "my feature"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+
+        args = build_parser().parse_args(["mark-merged", "--run", run_id])
+        rc, out = self._run_and_capture(cmd_mark_merged, args)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
 
 
 class TestCmdRetry(unittest.TestCase):

@@ -13,6 +13,7 @@ Verbs:
   gantry hold --run ID                pause a run so nothing auto-advances it (manual takeover)
   gantry resume --run ID              un-pause a held run, restoring its prior status
   gantry mark-shipped --run ID        record that a run was shipped outside `gantry ship`
+  gantry mark-merged --run ID         record that a shipped run's PR was actually merged
   gantry status [--run ID]           show run(s) status
   gantry doctor                      check the environment (runners, git, config)
   gantry listen                      poll Telegram replies, act on the pending run
@@ -36,8 +37,8 @@ from .cost import cmd_cost
 from .docs import cmd_doctor, cmd_docs
 from .run_commands import (
     cmd_advance, cmd_approve, cmd_cancel, cmd_checks, cmd_cleanup, cmd_hold, cmd_init,
-    cmd_loop, cmd_mark_shipped, cmd_resume_hold, cmd_retry, cmd_review, cmd_revise, cmd_run,
-    cmd_ship, cmd_stage, cmd_status,
+    cmd_loop, cmd_mark_merged, cmd_mark_shipped, cmd_resume_hold, cmd_retry, cmd_review,
+    cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
 )
 from .system import cmd_cockpit, cmd_daemon, cmd_mcp, cmd_update
 from .watch import cmd_listen, cmd_watch
@@ -111,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run", required=True)
     s.add_argument("--force", action="store_true", help="mark shipped even if already shipped")
     s.set_defaults(func=cmd_mark_shipped)
+
+    s = sub.add_parser("mark-merged", help="record that a shipped run's PR was actually merged — "
+                                            "required for its dependents (depends_on) to start "
+                                            "when [git].auto_merge is off")
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_mark_merged)
 
     s = sub.add_parser("resume", help="un-pause a held run, restoring its prior status")
     s.add_argument("--run", required=True)

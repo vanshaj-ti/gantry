@@ -162,19 +162,30 @@ class Engine:
         return rid
 
     def _prereqs_met(self, run_id: str) -> bool:
-        """True if every run this run depends on has reached a terminal
-        success state. Terminal success = review_approved when review is
-        enabled (the normal case), or {last_stage}_complete when review is
-        disabled entirely for this project — a prereq stuck anywhere else
-        (still building, blocked, escalated, changes requested) is NOT met."""
+        """True if every run this run depends on has actually landed.
+
+        `review_approved` only means the LLM reviewer signed off — the PR
+        hasn't even been opened yet at that point, let alone merged. A
+        dependent run started the moment its prereq hit review_approved would
+        be building against code that doesn't exist on base_branch yet (ship
+        might still fail, or the PR might sit unmerged for days). So the only
+        states that count as "landed" are `shipped`/`shipped_manually` AND
+        (when [git].auto_merge is off, or shipped_manually — i.e. whenever
+        Gantry can't have merged it itself) the run's own `merged` flag is
+        explicitly True. auto_merge=True + status=shipped always implies
+        merged is already True or False on that same state (ship_run sets it
+        in the same call) — never absent — so no separate check is needed
+        there. For projects with no ship/review stage in cfg.stages at all,
+        {last_stage}_complete is still the correct terminal condition."""
         deps = self.store.state(run_id).get("depends_on") or []
         if not deps:
             return True
         last_stage = self.cfg.stages[-1] if self.cfg.stages else None
         terminal_incomplete_ok = f"{last_stage}_complete" if last_stage else None
         for dep in deps:
-            dep_status = self.store.state(dep).get("status", "")
-            if dep_status == "review_approved":
+            dep_state = self.store.state(dep)
+            dep_status = dep_state.get("status", "")
+            if dep_status in ("shipped", "shipped_manually") and dep_state.get("merged") is True:
                 continue
             if not self.cfg.review.enabled and dep_status == terminal_incomplete_ok:
                 continue

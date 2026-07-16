@@ -280,7 +280,9 @@ class TestRepairStaleRunning(unittest.TestCase):
 
 class TestRunDependencies(unittest.TestCase):
     """Queueing/prerequisite runs: create_run(depends_on=[...]) parks a run at
-    status="queued" until every listed run reaches review_approved; the
+    status="queued" until every listed run is actually merged (not merely
+    review_approved — a dependent starting the moment its prereq is approved
+    would build against code that isn't even on base_branch yet); the
     poller (advance_run/advance_all) auto-transitions it to awaiting_{stage}
     once prereqs clear, same as any other AUTO_TRANSITIONS status."""
 
@@ -318,24 +320,55 @@ class TestRunDependencies(unittest.TestCase):
         self.assertEqual(result["action"], "waiting_on_prereqs")
         self.assertEqual(self.eng.store.state(rid)["status"], "queued")
 
-    def test_advance_run_starts_queued_run_once_prereq_approved(self):
+    def test_advance_run_leaves_queued_run_parked_while_prereq_only_approved(self):
+        # review_approved alone must NOT satisfy prereqs — the PR hasn't even
+        # been opened yet at that point, let alone merged.
         prereq = self.eng.create_run("prereq", "test")
         rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
         self.eng.store.update_state(prereq, status="review_approved")
 
         result = advance_run(self.eng, rid)
+        self.assertFalse(result["advanced"])
+        self.assertEqual(self.eng.store.state(rid)["status"], "queued")
+
+    def test_advance_run_leaves_queued_run_parked_while_shipped_but_unmerged(self):
+        # shipped (PR opened) without merged=True still must not satisfy
+        # prereqs — the PR could still be sitting open, unreviewed, or closed
+        # without merging.
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+        self.eng.store.update_state(prereq, status="shipped")
+
+        result = advance_run(self.eng, rid)
+        self.assertFalse(result["advanced"])
+        self.assertEqual(self.eng.store.state(rid)["status"], "queued")
+
+    def test_advance_run_starts_queued_run_once_prereq_shipped_and_merged(self):
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+        self.eng.store.update_state(prereq, status="shipped", merged=True)
+
+        result = advance_run(self.eng, rid)
         self.assertTrue(result["advanced"])
         self.assertEqual(self.eng.store.state(rid)["status"], f"awaiting_{self.cfg.stages[0]}")
 
-    def test_prereqs_met_false_if_any_dependency_unapproved(self):
+    def test_advance_run_starts_queued_run_once_prereq_shipped_manually_and_merged(self):
+        prereq = self.eng.create_run("prereq", "test")
+        rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
+        self.eng.store.update_state(prereq, status="shipped_manually", merged=True)
+
+        result = advance_run(self.eng, rid)
+        self.assertTrue(result["advanced"])
+
+    def test_prereqs_met_false_if_any_dependency_not_merged(self):
         p1 = self.eng.create_run("p1", "test")
         p2 = self.eng.create_run("p2", "test")
         rid = self.eng.create_run("dependent", "test", depends_on=[p1, p2])
-        self.eng.store.update_state(p1, status="review_approved")
-        # p2 still awaiting_plan — not approved
+        self.eng.store.update_state(p1, status="shipped", merged=True)
+        # p2 still awaiting_plan — not shipped or merged
         self.assertFalse(self.eng._prereqs_met(rid))
 
-        self.eng.store.update_state(p2, status="review_approved")
+        self.eng.store.update_state(p2, status="shipped", merged=True)
         self.assertTrue(self.eng._prereqs_met(rid))
 
     def test_queued_is_in_auto_transitions(self):
@@ -346,14 +379,11 @@ class TestRunDependencies(unittest.TestCase):
         from gantry.advance import advance_all
         prereq = self.eng.create_run("prereq", "test")
         rid = self.eng.create_run("dependent", "test", depends_on=[prereq])
-        self.eng.store.update_state(prereq, status="review_approved")
+        self.eng.store.update_state(prereq, status="shipped", merged=True)
 
         with patch.object(Engine, "run_agent_stage", _fake_run_agent_stage):
-            results = advance_all(self.target, self.cfg)
+            advance_all(self.target, self.cfg)
 
-        matching = [r for r in results if r.get("run_id") == rid or rid in str(r)]
-        # advance_all's return shape may vary; assert on the actual state
-        # change instead of over-fitting to the return payload's exact keys.
         self.assertNotEqual(self.eng.store.state(rid)["status"], "queued")
 
 

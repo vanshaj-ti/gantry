@@ -158,6 +158,25 @@ def cmd_mark_shipped(args) -> int:
     return _out({"ok": True, "run_id": run_id, "status": "shipped_manually"})
 
 
+def cmd_mark_merged(args) -> int:
+    """Record that a shipped run's PR has actually been merged into
+    base_branch. Only matters when [git].auto_merge is off (the common case
+    — auto_merge itself already sets `merged` as part of ship_run): a run's
+    dependents (via `depends_on`) only start once their prereq is actually
+    merged, not merely shipped (PR opened but possibly still under review,
+    possibly never merged at all) — see Engine._prereqs_met. Without this
+    command a human merging a PR by hand via GitHub's UI has no way to tell
+    Gantry it happened, and every dependent run would wait forever."""
+    store = RunStore(_target())
+    run_id = args.run
+    state = store.state(run_id)
+    if state.get("status") not in ("shipped", "shipped_manually"):
+        return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
+                    f"not shipped/shipped_manually — nothing to mark merged"})
+    store.update_state(run_id, merged=True, merged_at=now_iso())
+    return _out({"ok": True, "run_id": run_id, "merged": True})
+
+
 def cmd_hold(args) -> int:
     """Pause a run so nothing in Gantry touches it — `advance --all`/`loop`
     skip it, and the stale-running repair sweep leaves it alone — while a
