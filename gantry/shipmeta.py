@@ -120,6 +120,8 @@ def draft_ship_meta(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) 
             session_id=None, plan_mode=False, skip_permissions=False,
             output_format="json", session_name=f"{run_id}-ship", max_turns=10,
         )
+        from .cost import accumulate as _accumulate_cost
+        _accumulate_cost(store, run_id, "ship", result.usage)
         text = result.raw.get("result", "") if isinstance(result.raw, dict) else result.stdout
         draft = _extract_json(str(text)) if result.ok else None
         if not _valid(draft):
