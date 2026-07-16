@@ -14,10 +14,11 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from .config import ChecksConfig, ScopeConfig
+from .config import CheckCommand, ChecksConfig, ScopeConfig, _coerce_check_command
 from .state import RunStore
 
 
@@ -226,21 +227,48 @@ def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, b
     return out
 
 
+def _run_one_check(cmd: CheckCommand, default_timeout: int, cwd: Path) -> dict[str, Any]:
+    proc = subprocess.run(cmd.command, shell=True, cwd=str(cwd), capture_output=True,
+                          text=True, timeout=cmd.timeout or default_timeout)
+    return {
+        "command": cmd.command,
+        "exit_code": proc.returncode,
+        "pass": proc.returncode == 0,
+        "stdout_tail": proc.stdout[-2000:],
+        "stderr_tail": proc.stderr[-2000:],
+    }
+
+
 def run_repo_checks(cfg: ChecksConfig, cwd: Path) -> dict[str, Any]:
-    results = []
-    all_pass = True
-    for command in cfg.commands:
-        proc = subprocess.run(command, shell=True, cwd=str(cwd),
-                              capture_output=True, text=True, timeout=cfg.timeout)
-        ok = proc.returncode == 0
-        all_pass = all_pass and ok
-        results.append({
-            "command": command,
-            "exit_code": proc.returncode,
-            "pass": ok,
-            "stdout_tail": proc.stdout[-2000:],
-            "stderr_tail": proc.stderr[-2000:],
-        })
+    """Runs cfg.commands in the order the caller listed them, but a
+    `parallel=true` command is bounded-concurrent with the OTHER
+    parallel=true commands via a thread pool (subprocess.run releases the
+    GIL while blocked on the child, so this is real wall-clock parallelism,
+    not just concurrency theater). Commands without parallel=true still run
+    serially, in list order, same as before this feature existed — so a
+    project with no [checks] commands using {parallel=true} sees byte-identical
+    behavior. Output shape ({"pass": bool, "results": [...]}) is unchanged
+    regardless of how commands were split, so run_all_checks/advance.py need
+    no changes."""
+    commands = [_coerce_check_command(c) for c in cfg.commands]
+    # Index-keyed, not command-string-keyed: two entries can legitimately
+    # share the same command string (e.g. the same lint command listed twice
+    # with different timeouts is unusual but not invalid), and a string key
+    # would silently collapse them to one result.
+    results: list[dict[str, Any] | None] = [None] * len(commands)
+    parallel_indices = [i for i, c in enumerate(commands) if c.parallel]
+    serial_indices = [i for i, c in enumerate(commands) if not c.parallel]
+
+    if parallel_indices:
+        with ThreadPoolExecutor(max_workers=max(1, cfg.max_parallel)) as pool:
+            futures = {pool.submit(_run_one_check, commands[i], cfg.timeout, cwd): i
+                      for i in parallel_indices}
+            for future in futures:
+                results[futures[future]] = future.result()
+    for i in serial_indices:
+        results[i] = _run_one_check(commands[i], cfg.timeout, cwd)
+
+    all_pass = all(r["pass"] for r in results)
     return {"pass": all_pass, "results": results}
 
 

@@ -126,11 +126,35 @@ class ScopeConfig:
 
 
 @dataclass
+class CheckCommand:
+    """One repo check command, with its own optional timeout/parallel override.
+    `commands` accepts a bare string (wrapped into this with defaults) or a
+    table `{command, timeout, parallel}` — see _coerce_check_command."""
+    command: str
+    timeout: int | None = None   # None = fall back to ChecksConfig.timeout
+    parallel: bool = False        # run concurrently with other parallel=true commands
+
+
+def _coerce_check_command(item: Any) -> CheckCommand:
+    if isinstance(item, CheckCommand):
+        return item
+    if isinstance(item, str):
+        return CheckCommand(command=item)
+    return CheckCommand(command=item["command"], timeout=item.get("timeout"),
+                        parallel=bool(item.get("parallel", False)))
+
+
+@dataclass
 class ChecksConfig:
     """Delegate house rules to the repo's own toolchain. Gantry runs these and
     gates on exit code. Works on any repo/language."""
-    commands: list[str] = field(default_factory=list)  # e.g. ["npm run lint", "npm run build"]
+    # Each entry is a bare string (simple case) or a CheckCommand/table (own
+    # timeout/parallel). run_repo_checks coerces every entry via
+    # _coerce_check_command, so direct dataclass construction with plain
+    # strings (existing behavior, existing tests) keeps working unchanged.
+    commands: list[Any] = field(default_factory=list)  # e.g. ["npm run lint", "npm run build"]
     timeout: int = 900
+    max_parallel: int = 4  # cap on concurrently-running parallel=true commands
     retry_checks: int = 3  # auto-resume build with failure feedback this many times
                            # before escalating to a human (checks_escalated)
     auto_resolve: bool = False   # if True, checks_escalated spawns a dedicated
@@ -349,7 +373,12 @@ def load_config(target_workspace: Path) -> GantryConfig:
         )
     if "checks" in raw:
         c = raw["checks"]
+        # commands entries are each either a bare string or a
+        # {command, timeout, parallel} table — both are valid TOML array
+        # elements; _coerce_check_command (checks.py's run_repo_checks call
+        # site) normalizes either shape, so no coercion needed here.
         cfg.checks = ChecksConfig(commands=c.get("commands", []), timeout=int(c.get("timeout", 900)),
+                                  max_parallel=int(c.get("max_parallel", 4)),
                                   retry_checks=int(c.get("retry_checks", 3)),
                                   auto_resolve=bool(c.get("auto_resolve", False)),
                                   resolve_attempts=int(c.get("resolve_attempts", 2)))

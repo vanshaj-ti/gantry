@@ -8,9 +8,10 @@ from gantry.checks import (
     _matches_any,
     _scope_additions_section,
     _strip_fenced_code_blocks,
+    run_repo_checks,
     run_scope_guard,
 )
-from gantry.config import ScopeConfig
+from gantry.config import ChecksConfig, ScopeConfig
 from gantry.state import RunStore
 
 
@@ -264,6 +265,64 @@ class TestMatchesAny(unittest.TestCase):
 
     def test_no_match(self):
         self.assertFalse(_matches_any("apps/core/src/main.ts", [".env", "**/*.pem"]))
+
+
+class TestRunRepoChecks(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_bare_string_commands_run_serially_preserve_order(self):
+        cfg = ChecksConfig(commands=["echo a", "echo b", "false"])
+        result = run_repo_checks(cfg, self.cwd)
+        self.assertFalse(result["pass"])
+        self.assertEqual([r["command"] for r in result["results"]], ["echo a", "echo b", "false"])
+        self.assertTrue(result["results"][0]["pass"])
+        self.assertTrue(result["results"][1]["pass"])
+        self.assertFalse(result["results"][2]["pass"])
+
+    def test_table_commands_with_parallel_flag_all_run_and_preserve_order(self):
+        cfg = ChecksConfig(commands=[
+            {"command": "echo first", "parallel": True},
+            {"command": "echo second", "parallel": True},
+            "echo third",
+        ])
+        result = run_repo_checks(cfg, self.cwd)
+        self.assertTrue(result["pass"])
+        self.assertEqual([r["command"] for r in result["results"]],
+                        ["echo first", "echo second", "echo third"])
+
+    def test_per_command_timeout_overrides_default(self):
+        cfg = ChecksConfig(commands=[{"command": "sleep 5", "timeout": 1}], timeout=900)
+        with self.assertRaises(Exception):
+            run_repo_checks(cfg, self.cwd)
+
+    def test_duplicate_command_strings_both_run_independently(self):
+        cfg = ChecksConfig(commands=[
+            {"command": "true", "parallel": True},
+            {"command": "true", "parallel": True},
+        ])
+        result = run_repo_checks(cfg, self.cwd)
+        self.assertEqual(len(result["results"]), 2)
+        self.assertTrue(all(r["pass"] for r in result["results"]))
+
+    def test_max_parallel_bounds_concurrency_still_runs_all(self):
+        cfg = ChecksConfig(
+            commands=[{"command": "echo x", "parallel": True} for _ in range(6)],
+            max_parallel=2,
+        )
+        result = run_repo_checks(cfg, self.cwd)
+        self.assertEqual(len(result["results"]), 6)
+        self.assertTrue(all(r["pass"] for r in result["results"]))
+
+    def test_empty_commands_passes(self):
+        cfg = ChecksConfig(commands=[])
+        result = run_repo_checks(cfg, self.cwd)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["results"], [])
 
 
 if __name__ == "__main__":
