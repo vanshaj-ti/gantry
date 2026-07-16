@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 from gantry.config import GantryConfig
 from gantry.runners import RunnerResult
-from gantry.review import _build_prompt, _parse_verdict, _structured_evidence_summary, run_review
+from gantry.review import (
+    _build_prompt, _checklist_section, _parse_verdict, _rebuild_diff_context,
+    _structured_evidence_summary, run_review,
+)
 from gantry.state import RunStore
 
 
@@ -51,6 +54,31 @@ class TestParseVerdict(unittest.TestCase):
     def test_escalate_takes_priority_over_approve(self):
         text = "Would APPROVE but I'm not confident; ESCALATE to a human"
         self.assertEqual(_parse_verdict(text, self.cfg), "ESCALATE")
+
+    def test_line_start_mode_ignores_keyword_in_prose(self):
+        self.cfg.review.keyword_mode = "line_start"
+        # "escalate" appears mid-sentence, not as a verdict declaration —
+        # line_start mode must not false-positive on this.
+        text = "I considered whether to escalate this but decided it's fine.\nAPPROVE"
+        self.assertEqual(_parse_verdict(text, self.cfg), "APPROVE")
+
+    def test_line_start_mode_matches_real_declaration(self):
+        self.cfg.review.keyword_mode = "line_start"
+        text = "Some reasoning here.\n\nREQUEST_CHANGES\n\nMore detail."
+        self.assertEqual(_parse_verdict(text, self.cfg), "REQUEST_CHANGES")
+
+    def test_line_start_mode_matches_with_markdown_emphasis_prefix(self):
+        self.cfg.review.keyword_mode = "line_start"
+        text = "Reasoning.\n\n**APPROVE**\n"
+        self.assertEqual(_parse_verdict(text, self.cfg), "APPROVE")
+
+    def test_line_start_mode_defaults_to_escalate_with_no_real_declaration(self):
+        self.cfg.review.keyword_mode = "line_start"
+        text = "This diff would probably approve if I were less careful."
+        self.assertEqual(_parse_verdict(text, self.cfg), "ESCALATE")
+
+    def test_anywhere_mode_is_default(self):
+        self.assertEqual(self.cfg.review.keyword_mode, "anywhere")
 
 
 class TestRunReview(unittest.TestCase):
@@ -103,6 +131,29 @@ class TestRunReview(unittest.TestCase):
         self.assertEqual(out["verdict"], "ESCALATE")
         self.assertEqual(self.store.state(self.run_id)["status"], "review_escalated")
 
+    def test_max_turns_from_config_passed_to_runner(self):
+        captured = {}
+
+        class _CapturingRunner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                captured.update(kwargs)
+                return RunnerResult(ok=True, session_id="s1", exit_code=0,
+                                    raw={"result": "APPROVE"}, stdout="APPROVE", stderr="")
+
+        self.cfg.review.max_turns = 25
+        with patch("gantry.review.get_runner", return_value=_CapturingRunner()):
+            run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(captured["max_turns"], 25)
+
+    def test_checklist_appears_in_logged_prompt(self):
+        self.cfg.review.checklist = ["confirm no secrets committed"]
+        with patch("gantry.review.get_runner", return_value=self._fake_runner("APPROVE")):
+            run_review(self.store, self.run_id, self.cfg, self.target)
+        prompt_log = self.store.read_artifact(self.run_id, "logs/review-prompt.md")
+        self.assertIn("confirm no secrets committed", prompt_log)
+
 
 class TestStructuredEvidenceSummary(unittest.TestCase):
     def setUp(self):
@@ -151,6 +202,46 @@ class TestStructuredEvidenceSummary(unittest.TestCase):
         self.store.artifact_path(self.run_id, "evidence-report.md").write_text(
             "# Evidence\n\n```json\n{\"unrelated\": true}\n```\n")
         self.assertIsNone(_structured_evidence_summary(self.store, self.run_id))
+
+
+class TestChecklistSection(unittest.TestCase):
+    def test_empty_when_no_checklist_configured(self):
+        cfg = GantryConfig()
+        self.assertEqual(_checklist_section(cfg), "")
+
+    def test_includes_each_item(self):
+        cfg = GantryConfig()
+        cfg.review.checklist = ["confirm no secrets committed", "confirm migration is reversible"]
+        section = _checklist_section(cfg)
+        self.assertIn("confirm no secrets committed", section)
+        self.assertIn("confirm migration is reversible", section)
+
+
+class TestRebuildDiffContext(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        self.store = RunStore(self.target)
+        self.run_id = self.store.new_run_id("t")
+        self.store.create(self.run_id, "t")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_when_no_prior_review(self):
+        self.assertEqual(_rebuild_diff_context(self.store, self.run_id), "")
+
+    def test_empty_when_prior_verdict_was_approve(self):
+        self.store.write_result(self.run_id, "review-result.json", {"verdict": "APPROVE"})
+        self.assertEqual(_rebuild_diff_context(self.store, self.run_id), "")
+
+    def test_includes_prior_comments_when_prior_verdict_was_request_changes(self):
+        self.store.write_result(self.run_id, "review-result.json", {"verdict": "REQUEST_CHANGES"})
+        self.store.artifact_path(self.run_id, "review-comments.md").write_text(
+            "# Review: changes requested\n\nMissing error handling on X.\n")
+        context = _rebuild_diff_context(self.store, self.run_id)
+        self.assertIn("Missing error handling on X.", context)
+        self.assertIn("RE-review", context)
 
 
 class TestBuildPromptIncludesStructuredSummary(unittest.TestCase):

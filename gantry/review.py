@@ -62,7 +62,45 @@ def _structured_evidence_summary(store: RunStore, run_id: str) -> dict[str, Any]
     return data
 
 
-def _build_prompt(store: RunStore, run_id: str, cwd: Path, base: str, template: str) -> str:
+def _rebuild_diff_context(store: RunStore, run_id: str) -> str:
+    """On a resumed review (this run went REQUEST_CHANGES -> rebuild ->
+    evidence -> review again), tell the reviewer what changed since its own
+    last verdict — without this, a resumed reviewer has no visibility into
+    what the rebuild actually did differently and can end up repeating
+    feedback the rebuild already addressed, or missing that its own prior
+    concern was fixed. Uses the previous review-result.json's own recorded
+    text (there's always exactly one prior verdict to compare against by the
+    time a second review call happens) plus whatever review-comments.md said
+    was requested — cheaper and more reliable than diffing two
+    build-summary.md snapshots, since build-summary.md already documents its
+    own pass-over-pass changes via its own "## Pass N" append convention."""
+    prior_result = store.read_result(run_id, "review-result.json")
+    if not prior_result or prior_result.get("verdict") != "REQUEST_CHANGES":
+        return ""
+    comments = store.read_artifact(run_id, "review-comments.md") or ""
+    return (
+        f"\n# This is a RE-review after your own prior REQUEST_CHANGES verdict\n"
+        f"Your previous feedback (from review-comments.md, what you asked to be fixed):\n"
+        f"{comments}\n\n"
+        f"Check specifically whether build-summary.md's latest `## Pass N` section "
+        f"addresses each point above before evaluating anything else — don't repeat "
+        f"feedback that pass already addressed, and don't assume it was addressed "
+        f"without checking.\n"
+    )
+
+
+def _checklist_section(cfg: GantryConfig) -> str:
+    if not cfg.review.checklist:
+        return ""
+    items = "\n".join(f"- {item}" for item in cfg.review.checklist)
+    return (
+        f"\n# Required checklist — address EACH item explicitly in your response\n"
+        f"{items}\n"
+    )
+
+
+def _build_prompt(store: RunStore, run_id: str, cwd: Path, base: str, template: str,
+                  cfg: GantryConfig | None = None) -> str:
     run_dir = store.run_dir(run_id)
     artifact_lines = []
     for name in REVIEW_ARTIFACTS:
@@ -92,16 +130,36 @@ def _build_prompt(store: RunStore, run_id: str, cwd: Path, base: str, template: 
             f"independently — do not treat this as ground truth on its own)\n"
             f"```json\n{json.dumps(structured, indent=2)}\n```\n"
         )
+    parts.append(_rebuild_diff_context(store, run_id))
+    if cfg is not None:
+        parts.append(_checklist_section(cfg))
     return "".join(parts)
 
 
+def _line_start_match(keywords: list[str], text: str) -> bool:
+    """True if any keyword is the first token of some line in text (allowing
+    common markdown/emphasis prefixes like `**`, `#`, `-`, whitespace before
+    it) — used by keyword_mode="line_start" to require a real verdict
+    declaration rather than the word merely appearing somewhere in prose."""
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("#*_- ").strip()
+        for kw in keywords:
+            if stripped.upper().startswith(kw.upper()):
+                return True
+    return False
+
+
 def _parse_verdict(text: str, cfg: GantryConfig) -> str:
-    upper = (text or "").upper()
-    if any(k.upper() in upper for k in cfg.review.request_changes_keywords):
+    text = text or ""
+    upper = text.upper()
+    mode = cfg.review.keyword_mode
+    matches = (lambda kws: _line_start_match(kws, text)) if mode == "line_start" else (
+        lambda kws: any(k.upper() in upper for k in kws))
+    if matches(cfg.review.request_changes_keywords):
         return "REQUEST_CHANGES"
-    if any(k.upper() in upper for k in cfg.review.escalate_keywords):
+    if matches(cfg.review.escalate_keywords):
         return "ESCALATE"
-    if any(k.upper() in upper for k in cfg.review.approve_keywords):
+    if matches(cfg.review.approve_keywords):
         return "APPROVE"
     return "ESCALATE"
 
@@ -124,7 +182,7 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
         "diff (see instructions below). Reply with exactly one of APPROVE, REQUEST_CHANGES, "
         "or ESCALATE, followed by your reasoning.\n")
 
-    prompt = _build_prompt(store, run_id, cwd, base, template)
+    prompt = _build_prompt(store, run_id, cwd, base, template, cfg)
     store.write_log(run_id, "review-prompt.md", prompt)
 
     _report_herdr(cfg, run_id, "review_running")
@@ -150,7 +208,7 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     result = runner.run(
         cwd=cwd, prompt=prompt, model=cfg.review.model,
         session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
-        output_format="json", session_name=f"{run_id}-review", max_turns=80, timeout=900,
+        output_format="json", session_name=f"{run_id}-review", max_turns=cfg.review.max_turns, timeout=900,
     )
     store.save_session(run_id, "review", session_id=result.session_id,
                        model=cfg.review.model, runner=runner.name)
