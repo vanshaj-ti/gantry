@@ -322,7 +322,20 @@ _LOOP_STOP_PREFIXES = ("awaiting_", "shipped")
 _LOOP_STOP_EXACT = {"blocked", "cancelled", "held"}
 
 
-def _is_loop_terminal(status: str) -> bool:
+def _is_loop_terminal(status: str, cfg=None) -> bool:
+    """review_approved and checks_escalated are only REAL terminal states
+    for a project that hasn't opted into auto_ship/auto_resolve — same
+    conditional-gate logic as advance_all's own AUTO_TRANSITIONS handling
+    (advance.py). Without this, `gantry loop --run ID` on a project with
+    auto_ship=true stops the moment review approves instead of continuing
+    to watch the run through to ship_run actually firing — auto_ship never
+    gets a chance to act under `loop`, exactly the bug auto_ship exists to
+    avoid under `advance --all`."""
+    if cfg is not None:
+        if status == "review_approved" and cfg.git.auto_ship:
+            return False
+        if status == "checks_escalated" and cfg.checks.auto_resolve:
+            return False
     if status in _LOOP_STOP_EXACT:
         return True
     if any(status.endswith(suf) for suf in _LOOP_STOP_SUFFIXES):
@@ -350,7 +363,7 @@ def cmd_loop(args) -> int:
             if args.run:
                 status = store.state(args.run).get("status", "")
                 print(f"[tick {ticks}] {args.run}: {status}", flush=True)
-                if _is_loop_terminal(status):
+                if _is_loop_terminal(status, cfg):
                     print(f"gantry loop: stopping, reached {status}", flush=True)
                     return 0
                 eng = Engine(tgt, cfg)

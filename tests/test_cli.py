@@ -547,5 +547,106 @@ class TestCmdWatchMergeDetail(unittest.TestCase):
         self.assertNotIn("not yet merged", output)
 
 
+class TestIsLoopTerminal(unittest.TestCase):
+    def test_review_approved_terminal_without_auto_ship(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        from gantry.config import GantryConfig
+        cfg = GantryConfig()
+        self.assertFalse(cfg.git.auto_ship)
+        self.assertTrue(_is_loop_terminal("review_approved", cfg))
+
+    def test_review_approved_not_terminal_with_auto_ship(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        from gantry.config import GantryConfig
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        self.assertFalse(_is_loop_terminal("review_approved", cfg))
+
+    def test_review_approved_terminal_when_cfg_omitted(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        self.assertTrue(_is_loop_terminal("review_approved"))
+
+    def test_checks_escalated_terminal_without_auto_resolve(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        from gantry.config import GantryConfig
+        cfg = GantryConfig()
+        self.assertTrue(_is_loop_terminal("checks_escalated", cfg))
+
+    def test_checks_escalated_not_terminal_with_auto_resolve(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        from gantry.config import GantryConfig
+        cfg = GantryConfig()
+        cfg.checks.auto_resolve = True
+        self.assertFalse(_is_loop_terminal("checks_escalated", cfg))
+
+    def test_other_terminal_statuses_unaffected_by_cfg(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        from gantry.config import GantryConfig
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        cfg.checks.auto_resolve = True
+        self.assertTrue(_is_loop_terminal("blocked", cfg))
+        self.assertTrue(_is_loop_terminal("build_failed", cfg))
+        self.assertTrue(_is_loop_terminal("review_escalated", cfg))
+        self.assertTrue(_is_loop_terminal("shipped", cfg))
+
+    def test_non_terminal_status_unaffected(self):
+        from gantry.cli.run_commands import _is_loop_terminal
+        from gantry.config import GantryConfig
+        cfg = GantryConfig()
+        self.assertFalse(_is_loop_terminal("build_running", cfg))
+        self.assertFalse(_is_loop_terminal("plan_complete", cfg))
+
+
+class TestCmdLoopAutoShip(unittest.TestCase):
+    """Real regression: `gantry loop --run ID` on an auto_ship project must
+    not stop at review_approved — it should keep ticking until ship_run
+    actually fires, same as advance_all already does."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self._env_patch = patch.dict("os.environ", {"GANTRY_TARGET": str(self.target)})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def _run_and_capture(self, func, args):
+        with patch("builtins.print") as mock_print:
+            rc = func(args)
+        out = "".join(c.args[0] for c in mock_print.call_args_list if c.args)
+        return rc, out
+
+    def test_loop_keeps_ticking_past_review_approved_when_auto_ship(self):
+        from gantry.cli.run_commands import cmd_loop
+        from gantry.state import RunStore
+
+        cfg_path = self.target / "gantry.toml"
+        cfg_path.write_text("[git]\nauto_ship = true\n")
+
+        run_args = build_parser().parse_args(["run", "--title", "t"])
+        _, run_out = self._run_and_capture(cmd_run, run_args)
+        run_id = json.loads(run_out)["run_id"]
+        RunStore(self.target).update_state(run_id, status="review_approved")
+
+        def fake_advance_run(eng, rid):
+            eng.store.update_state(rid, status="shipped", merged=True)
+            return {"advanced": True, "action": "shipped"}
+
+        loop_args = build_parser().parse_args(
+            ["loop", "--run", run_id, "--interval", "0", "--max-ticks", "3"])
+        with patch("gantry.advance.advance_run", fake_advance_run), \
+             patch("time.sleep"):
+            rc, out = self._run_and_capture(cmd_loop, loop_args)
+
+        # Must have actually advanced past review_approved to shipped, not
+        # stopped immediately at tick 1 reporting review_approved as terminal.
+        self.assertIn("shipped", out)
+        self.assertEqual(RunStore(self.target).state(run_id)["status"], "shipped")
+
+
 if __name__ == "__main__":
     unittest.main()
