@@ -26,6 +26,7 @@ from pathlib import Path
 
 STATUS_BAR_HEIGHT = 3
 CLAUDE_PANE_PERCENT = 60  # right pane (claude session) gets the larger share
+STATUS_PANE_HISTORY_LIMIT = 1000  # small scrollback cap for the status pane only
 
 
 def session_name(target: Path) -> str:
@@ -66,6 +67,20 @@ def build_cockpit(target: Path) -> dict:
     if proc.returncode != 0:
         return {"ok": False, "error": proc.stderr.strip() or "tmux new-session failed"}
 
+    # `history-limit` is a session-wide option in tmux (no per-pane override),
+    # but each pane's scrollback buffer is sized from whatever the option's
+    # value is AT THE MOMENT that pane is created — later changing the
+    # session option does not resize already-created panes. So: set it low
+    # right before creating the status-bar pane (the pane that repaints
+    # every 2s for the run's whole lifetime, see watch.py's Ghostty-leak
+    # comment), then restore it before creating the doc/claude panes so
+    # they keep the session's normal scrollback.
+    # -A: show the value even if only inherited from the global default
+    # (tmux prints it bare, with no session-local override, otherwise) —
+    # appends a trailing "*" to mark it as inherited, stripped below.
+    original_history_limit = _tmux("show-options", "-A", "-t", name, "history-limit").stdout.strip()
+    _tmux("set-option", "-t", name, "history-limit", str(STATUS_PANE_HISTORY_LIMIT))
+
     # Split off the top status bar: `-l N` on the ORIGINAL pane (index 0)
     # gives the NEW pane N lines and leaves the remainder with the original
     # pane — so the split target keeps pane 0 as the (large) bottom area and
@@ -75,6 +90,14 @@ def build_cockpit(target: Path) -> dict:
     if proc.returncode != 0:
         _tmux("kill-session", "-t", name)
         return {"ok": False, "error": proc.stderr.strip() or "tmux split-window (status) failed"}
+
+    if original_history_limit:
+        # "history-limit* 2000" (inherited, -A marks it with a trailing "*")
+        # or "history-limit 2000" (session-local) — the value is always the
+        # last whitespace-separated token.
+        _tmux("set-option", "-t", name, "history-limit", original_history_limit.split()[-1])
+    else:
+        _tmux("set-option", "-t", name, "-u", "history-limit")  # fall back to tmux's global default
 
     # Split the bottom pane left/right: doc viewer left, claude session right.
     # `-p N` on the ORIGINAL pane gives the NEW pane N% — the split target
