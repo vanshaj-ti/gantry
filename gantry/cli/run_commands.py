@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 
-from ..config import CONFIG_FILENAME, load_config
+from ..config import AGENT_STAGES, CONFIG_FILENAME, load_config
 from ..engine import Engine
 from ..git import remove_worktree
 from ..notify import get_notifier
@@ -318,7 +318,7 @@ def cmd_advance(args) -> int:
 # side — these are exactly the statuses NOT in AUTO_TRANSITIONS that a bare
 # `advance --run` tick would refuse to touch, plus terminal ship states.
 _LOOP_STOP_SUFFIXES = ("_failed", "_approved", "_escalated", "_shipped")
-_LOOP_STOP_PREFIXES = ("awaiting_", "shipped")
+_LOOP_STOP_PREFIXES = ("shipped",)
 _LOOP_STOP_EXACT = {"blocked", "cancelled", "held"}
 
 
@@ -330,7 +330,16 @@ def _is_loop_terminal(status: str, cfg=None) -> bool:
     auto_ship=true stops the moment review approves instead of continuing
     to watch the run through to ship_run actually firing — auto_ship never
     gets a chance to act under `loop`, exactly the bug auto_ship exists to
-    avoid under `advance --all`."""
+    avoid under `advance --all`.
+
+    awaiting_spec/awaiting_design are real human gates (DOC_STAGES) and stop
+    the loop; awaiting_plan/awaiting_build/awaiting_evidence (AGENT_STAGES)
+    are not — they just mean "approved to start, not yet kicked off" (see
+    advance.py's AUTO_TRANSITIONS comment), so the loop must fire the stage
+    itself instead of treating a freshly-created run as already terminal."""
+    if status.startswith("awaiting_"):
+        stage = status.removeprefix("awaiting_")
+        return stage not in AGENT_STAGES
     if cfg is not None:
         if status == "review_approved" and cfg.git.auto_ship:
             return False

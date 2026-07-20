@@ -597,6 +597,24 @@ class TestIsLoopTerminal(unittest.TestCase):
         self.assertFalse(_is_loop_terminal("build_running", cfg))
         self.assertFalse(_is_loop_terminal("plan_complete", cfg))
 
+    def test_awaiting_agent_stage_not_terminal(self):
+        """Real regression: a freshly-created run starts at awaiting_plan (the
+        first stage in gantry.toml's default `stages` list), not awaiting_build.
+        `gantry loop --run ID` must fire the plan stage instead of treating
+        the fresh run as already done — same non-human-gated semantics
+        advance.py's AUTO_TRANSITIONS already gives awaiting_{plan,build,evidence}."""
+        from gantry.cli.run_commands import _is_loop_terminal
+        self.assertFalse(_is_loop_terminal("awaiting_plan"))
+        self.assertFalse(_is_loop_terminal("awaiting_build"))
+        self.assertFalse(_is_loop_terminal("awaiting_evidence"))
+
+    def test_awaiting_doc_stage_still_terminal(self):
+        """awaiting_spec/awaiting_design are real human gates (DOC_STAGES) —
+        loop must still stop there for `gantry approve` to be meaningful."""
+        from gantry.cli.run_commands import _is_loop_terminal
+        self.assertTrue(_is_loop_terminal("awaiting_spec"))
+        self.assertTrue(_is_loop_terminal("awaiting_design"))
+
 
 class TestCmdLoopAutoShip(unittest.TestCase):
     """Real regression: `gantry loop --run ID` on an auto_ship project must

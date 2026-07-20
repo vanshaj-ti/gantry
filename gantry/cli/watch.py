@@ -114,7 +114,10 @@ def cmd_watch(args) -> int:
 
     def render() -> None:
         cols = shutil.get_terminal_size().columns
-        runs = store.list_runs()
+        # list_runs() returns newest-first (mtime desc); reverse so the most
+        # recently updated run sits at the bottom, nearest the cursor/prompt
+        # in a live-scrolling terminal instead of scrolled off the top.
+        runs = list(reversed(store.list_runs()))
         tag_filter = getattr(args, "tag", None)
         if tag_filter:
             runs = [r for r in runs if r.get("tag") == tag_filter]
@@ -149,31 +152,41 @@ def cmd_watch(args) -> int:
         # sequence and the new frame must land in the terminal as one unit —
         # otherwise a slow pipe (SSH, tmux over a laggy link) can flush the
         # clear before the content is fully written, showing a blank/partial
-        # pane for a frame. The footer line above must be part of THIS same
-        # write too — a separate print() after render() returns is a second,
-        # un-cleared stdout write every tick, which tmux/the terminal treats
-        # as new scrollback content rather than part of the repainted frame,
-        # making the pane scroll upward by one line on every refresh forever.
+        # pane for a frame.
         #
-        # \033[2J alone only clears the VISIBLE screen — tmux (and most
-        # terminal emulators) keep every prior write in their own scrollback
-        # buffer regardless, so each 2s tick still pushed a full new frame
-        # into scrollback even though the visible pane looked static. \033[3J
-        # (xterm's "erase scrollback buffer" extension, which tmux honors)
-        # actually discards it, so repeated frames don't accumulate at all.
-        clear = "\033[2J\033[3J\033[H" if args.live else ""
+        # --live runs on the ALTERNATE screen buffer (entered/exited around
+        # the loop below), which has no scrollback of its own — so a plain
+        # \033[H (cursor home) + repaint is enough; no \033[2J/\033[3J needed
+        # every tick. This used to clear+erase-scrollback on the MAIN screen
+        # every 2s for the run's whole lifetime (hours, for a multi-task
+        # pipeline), which repeatedly touches the terminal's scrollback-page
+        # allocator — the exact path several terminal emulators (e.g.
+        # Ghostty, see ghostty-org/ghostty#10251 and #10269) have leaked
+        # memory in under sustained full-frame redraw + scrollback churn.
+        # Alt-screen dashboards (top, htop) don't hit that path at all.
+        clear = "\033[H" if args.live else ""
         sys.stdout.write(clear + "\n".join(lines) + "\n")
         sys.stdout.flush()
 
     if not args.live:
         render()
         return 0
+    # \033[?1049h/l: enter/leave the alternate screen buffer. Restores the
+    # user's actual scrollback and prior screen contents on exit, same as
+    # vim/less/top — and means every 2s repaint below only touches the
+    # alt screen's fixed single-page buffer, never the main screen's
+    # scrollback store.
+    sys.stdout.write("\033[?1049h")
+    sys.stdout.flush()
     try:
         while True:
             render()
             time.sleep(2)
     except KeyboardInterrupt:
         return 0
+    finally:
+        sys.stdout.write("\033[?1049l")
+        sys.stdout.flush()
 
 
 def cmd_listen(args) -> int:
