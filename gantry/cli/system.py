@@ -67,9 +67,18 @@ def cmd_update(args) -> int:
 
 def cmd_daemon(args) -> int:
     from ..daemon import daemon_status, install_daemon, uninstall_daemon
+    tgt = _target()
     if args.daemon_action == "install":
-        tgt = _target()
         return _out(install_daemon(tgt, interval_seconds=args.interval))
     if args.daemon_action == "uninstall":
-        return _out(uninstall_daemon())
+        return _out(uninstall_daemon(tgt))
     return _out(daemon_status())
+
+
+def cmd_daemon_tick(args) -> int:
+    """Entrypoint the background job execs each interval — not meant to be
+    run by hand. Loops every registered target (see `daemon.add_target`)
+    and advances each once."""
+    from ..daemon import run_tick
+    run_tick()
+    return 0

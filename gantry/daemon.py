@@ -1,22 +1,37 @@
 """24/7 auto-advance daemon: install/uninstall a per-OS background job that
-runs `gantry advance --all` on a fixed interval against a target repo.
+runs the daemon tick (advancing every registered target repo) on a fixed
+interval.
 
 Without this, hands-off pipeline progression only exists as long as someone
 manually re-runs `gantry advance --all` (or the broken-until-recently
 `gantry loop`) in a foreground shell. This generates the OS-native background
 job (launchd on macOS, a systemd user timer on Linux) so it survives reboots
 and terminal closes, without hardcoding any machine's paths.
+
+A single job (fixed label/unit name) serves every target repo — the targets
+themselves are a small persisted list (see `add_target`/`remove_target`),
+not one job per repo. `run_tick` (in this module) is what the job actually
+execs each tick; it loops the persisted target list and calls
+`advance.advance_all` on each.
 """
 from __future__ import annotations
 
+import json
+import logging
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 LABEL = "ai.gantry.advance"
 SYSTEMD_UNIT_NAME = "gantry-advance"
+
+_CONFIG_DIR = Path.home() / ".config" / "gantry"
+_TARGETS_FILE = _CONFIG_DIR / "daemon-targets.json"
+_LOG_DIR = _CONFIG_DIR / "daemon-logs"
 
 
 def _launchd_plist_path() -> Path:
@@ -35,12 +50,74 @@ def _gantry_bin() -> str:
     return found or (str(Path(sys.executable).parent / "gantry"))
 
 
-def _macos_plist_xml(target: Path, interval_seconds: int, log_dir: Path) -> str:
+def _load_targets() -> list[Path]:
+    if not _TARGETS_FILE.exists():
+        return []
+    try:
+        raw = json.loads(_TARGETS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [Path(p) for p in raw]
+
+
+def _save_targets(targets: list[Path]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _TARGETS_FILE.write_text(json.dumps([str(t) for t in targets], indent=2))
+
+
+def add_target(target: Path) -> list[Path]:
+    """Register a target repo for the shared daemon tick. Idempotent —
+    re-adding an already-registered target is a no-op. Returns the full
+    target list after the add."""
+    target = target.resolve()
+    targets = _load_targets()
+    if target not in targets:
+        targets.append(target)
+        _save_targets(targets)
+    return targets
+
+
+def remove_target(target: Path) -> list[Path]:
+    """Unregister a target repo. Returns the remaining target list — an
+    empty result means the caller should tear the whole job down."""
+    target = target.resolve()
+    targets = [t for t in _load_targets() if t != target]
+    _save_targets(targets)
+    return targets
+
+
+def run_tick() -> list[dict]:
+    """What the background job actually execs each interval: advance every
+    registered target once. A broken target (deleted repo, bad gantry.toml)
+    is caught and reported per-target so it can't stop the rest from
+    advancing — this runs unattended, so one bad repo silently blocking
+    every other project's pipeline would be far worse than a single logged
+    error line."""
+    from .advance import advance_all
+    from .config import load_config
+
+    results = []
+    for target in _load_targets():
+        try:
+            cfg = load_config(target)
+            advanced = advance_all(target, cfg)
+            results.append({"target": str(target), "ok": True, "advanced": len(advanced)})
+        except Exception as exc:
+            results.append({"target": str(target), "ok": False, "error": str(exc)})
+    for r in results:
+        if r["ok"]:
+            print(f"{r['target']}: advanced {r['advanced']} run(s)")
+        else:
+            print(f"{r['target']}: ERROR {r['error']}")
+    return results
+
+
+def _macos_plist_xml(interval_seconds: int) -> str:
     gantry_bin = _gantry_bin()
     venv_bin_dir = str(Path(gantry_bin).parent)
     path_env = f"{venv_bin_dir}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    out_log = log_dir / "advance.log"
-    err_log = log_dir / "advance.error.log"
+    out_log = _LOG_DIR / "advance.log"
+    err_log = _LOG_DIR / "advance.error.log"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -51,19 +128,13 @@ def _macos_plist_xml(target: Path, interval_seconds: int, log_dir: Path) -> str:
     <key>ProgramArguments</key>
     <array>
         <string>{gantry_bin}</string>
-        <string>advance</string>
-        <string>--all</string>
+        <string>daemon-tick</string>
     </array>
-
-    <key>WorkingDirectory</key>
-    <string>{target}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>{path_env}</string>
-        <key>GANTRY_TARGET</key>
-        <string>{target}</string>
         <key>HOME</key>
         <string>{Path.home()}</string>
     </dict>
@@ -84,18 +155,16 @@ def _macos_plist_xml(target: Path, interval_seconds: int, log_dir: Path) -> str:
 """
 
 
-def _systemd_service_ini(target: Path, log_dir: Path) -> str:
+def _systemd_service_ini() -> str:
     gantry_bin = _gantry_bin()
     return f"""[Unit]
-Description=Gantry auto-advance ({target})
+Description=Gantry auto-advance (all registered targets)
 
 [Service]
 Type=oneshot
-WorkingDirectory={target}
-Environment=GANTRY_TARGET={target}
-ExecStart={gantry_bin} advance --all
-StandardOutput=append:{log_dir / "advance.log"}
-StandardError=append:{log_dir / "advance.error.log"}
+ExecStart={gantry_bin} daemon-tick
+StandardOutput=append:{_LOG_DIR / "advance.log"}
+StandardError=append:{_LOG_DIR / "advance.error.log"}
 """
 
 
@@ -114,14 +183,14 @@ WantedBy=timers.target
 
 
 def install_daemon(target: Path, interval_seconds: int = 60) -> dict:
+    add_target(target)
     system = platform.system()
-    log_dir = target / ".agent-runs" / "_daemon-logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     if system == "Darwin":
         plist_path = _launchd_plist_path()
         plist_path.parent.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(_macos_plist_xml(target, interval_seconds, log_dir))
+        plist_path.write_text(_macos_plist_xml(interval_seconds))
         subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
         proc = subprocess.run(["launchctl", "load", str(plist_path)],
                               capture_output=True, text=True)
@@ -129,14 +198,14 @@ def install_daemon(target: Path, interval_seconds: int = 60) -> dict:
             return {"ok": False, "platform": system, "error": proc.stderr.strip(),
                     "path": str(plist_path)}
         return {"ok": True, "platform": system, "path": str(plist_path),
-                "interval_seconds": interval_seconds}
+                "interval_seconds": interval_seconds, "targets": [str(t) for t in _load_targets()]}
 
     if system == "Linux":
         unit_dir = _systemd_unit_dir()
         unit_dir.mkdir(parents=True, exist_ok=True)
         service_path = unit_dir / f"{SYSTEMD_UNIT_NAME}.service"
         timer_path = unit_dir / f"{SYSTEMD_UNIT_NAME}.timer"
-        service_path.write_text(_systemd_service_ini(target, log_dir))
+        service_path.write_text(_systemd_service_ini())
         timer_path.write_text(_systemd_timer_ini(interval_seconds))
         proc = subprocess.run(
             ["systemctl", "--user", "enable", "--now", f"{SYSTEMD_UNIT_NAME}.timer"],
@@ -145,14 +214,19 @@ def install_daemon(target: Path, interval_seconds: int = 60) -> dict:
             return {"ok": False, "platform": system, "error": proc.stderr.strip(),
                     "path": str(timer_path)}
         return {"ok": True, "platform": system, "path": str(timer_path),
-                "interval_seconds": interval_seconds}
+                "interval_seconds": interval_seconds, "targets": [str(t) for t in _load_targets()]}
 
     return {"ok": False, "platform": system,
             "error": f"no daemon support for {system!r} yet — run "
-                     f"`gantry advance --all` on a cron/scheduled task manually."}
+                     f"`gantry daemon-tick` on a cron/scheduled task manually."}
 
 
-def uninstall_daemon() -> dict:
+def uninstall_daemon(target: Path) -> dict:
+    remaining = remove_target(target)
+    if remaining:
+        return {"ok": True, "note": "target removed; job keeps running for remaining targets",
+                "targets": [str(t) for t in remaining]}
+
     system = platform.system()
 
     if system == "Darwin":
@@ -181,23 +255,25 @@ def uninstall_daemon() -> dict:
 
 def daemon_status() -> dict:
     system = platform.system()
+    targets = [str(t) for t in _load_targets()]
 
     if system == "Darwin":
         plist_path = _launchd_plist_path()
         if not plist_path.exists():
-            return {"platform": system, "installed": False}
+            return {"platform": system, "installed": False, "targets": targets}
         proc = subprocess.run(["launchctl", "list", LABEL], capture_output=True, text=True)
         return {"platform": system, "installed": True, "loaded": proc.returncode == 0,
-                "path": str(plist_path)}
+                "path": str(plist_path), "targets": targets}
 
     if system == "Linux":
         timer_path = _systemd_unit_dir() / f"{SYSTEMD_UNIT_NAME}.timer"
         if not timer_path.exists():
-            return {"platform": system, "installed": False}
+            return {"platform": system, "installed": False, "targets": targets}
         proc = subprocess.run(["systemctl", "--user", "is-active", f"{SYSTEMD_UNIT_NAME}.timer"],
                               capture_output=True, text=True)
         return {"platform": system, "installed": True,
-                "active": proc.stdout.strip() == "active", "path": str(timer_path)}
+                "active": proc.stdout.strip() == "active", "path": str(timer_path),
+                "targets": targets}
 
-    return {"platform": system, "installed": False,
+    return {"platform": system, "installed": False, "targets": targets,
             "error": f"no daemon support for {system!r}"}

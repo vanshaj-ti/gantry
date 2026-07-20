@@ -589,7 +589,11 @@ def _repair_stale_running(engine: Engine, run: dict[str, Any]) -> dict[str, Any]
         detail = f"stale for {int(age)}s (stage timeout {timeout}s), no heartbeat recorded"
     engine.store.write_log(run["id"], f"{stage}.stderr",
                            f"Repaired stale status: {status} — {detail} — process presumed dead.")
-    engine._set_status(run["id"], f"{stage}_failed")
+    # Tagged so advance_run can tell "the subprocess got killed by something
+    # outside gantry's control" (infra hiccup — safe to auto-retry fresh)
+    # apart from a real `{stage}_failed` the agent itself reported (kept
+    # human-gated, since that might be a genuine content problem).
+    engine._set_status(run["id"], f"{stage}_failed", last_failure_reason="stale_heartbeat")
     return {"run_id": run["id"], "advanced": False, "action": "repaired_stale_running",
             "was": status, "age_seconds": int(age)}
 
@@ -608,6 +612,26 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
     repaired = _repair_stale_running(engine, run)
     if repaired:
         return repaired
+    if (run["status"].endswith("_failed")
+            and engine.store.state(rid).get("last_failure_reason") == "stale_heartbeat"):
+        # The prior attempt didn't fail on its own merits — its subprocess got
+        # killed by something outside gantry (OOM, terminal closed, machine
+        # slept). Retrying fresh (no resume — there's no useful session to
+        # continue from a process that never got to finish) is safe and
+        # matches what a human would do by hand via `gantry retry`. A real
+        # `{stage}_failed` from the agent itself has no this tag and stays
+        # human-gated, same as before.
+        stage = run["status"].removesuffix("_failed")
+        if not _acquire_lock(engine, rid):
+            return {"run_id": rid, "advanced": False, "action": "skipped_locked"}
+        try:
+            engine.store.update_state(rid, last_failure_reason=None)
+            engine.run_agent_stage(rid, stage, resume=False)
+            return {"run_id": rid, "advanced": True, "action": f"retry_after_stale_heartbeat_{stage}"}
+        except Exception as exc:
+            return {"run_id": rid, "advanced": False, "error": str(exc)}
+        finally:
+            _release_lock(engine, rid)
     if run["status"] not in auto_transitions:
         return None
     if not _acquire_lock(engine, rid):
