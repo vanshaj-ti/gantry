@@ -86,6 +86,41 @@ def remove_target(target: Path) -> list[Path]:
     return targets
 
 
+_TICK_LOCK = _CONFIG_DIR / "daemon-tick.lock"
+
+
+def _tick_lock_acquire() -> bool:
+    """Single-flight guard around the whole tick. launchd's StartInterval
+    fires every interval_seconds regardless of whether the previous
+    invocation finished — a resolve/build/evidence stage routinely runs
+    longer than the 60s default interval, so without this a second tick can
+    start advancing the same runs concurrently with the first, racing on
+    each run's state.json (the per-run .advance.lock only protects a single
+    run — an in-flight resolve/evidence call on run A doesn't stop a second
+    tick from processing run B, or worse, catching run A mid-write)."""
+    import os
+    if _TICK_LOCK.exists():
+        try:
+            held_pid = int(_TICK_LOCK.read_text().strip())
+        except (OSError, ValueError):
+            held_pid = None
+        if held_pid is not None:
+            try:
+                os.kill(held_pid, 0)
+                return False  # still alive — previous tick not done yet
+            except ProcessLookupError:
+                pass  # holder is dead — safe to reclaim
+            except PermissionError:
+                return False
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _TICK_LOCK.write_text(str(os.getpid()))
+    return True
+
+
+def _tick_lock_release() -> None:
+    _TICK_LOCK.unlink(missing_ok=True)
+
+
 def run_tick() -> list[dict]:
     """What the background job actually execs each interval: advance every
     registered target once. A broken target (deleted repo, bad gantry.toml)
@@ -96,20 +131,26 @@ def run_tick() -> list[dict]:
     from .advance import advance_all
     from .config import load_config
 
-    results = []
-    for target in _load_targets():
-        try:
-            cfg = load_config(target)
-            advanced = advance_all(target, cfg)
-            results.append({"target": str(target), "ok": True, "advanced": len(advanced)})
-        except Exception as exc:
-            results.append({"target": str(target), "ok": False, "error": str(exc)})
-    for r in results:
-        if r["ok"]:
-            print(f"{r['target']}: advanced {r['advanced']} run(s)")
-        else:
-            print(f"{r['target']}: ERROR {r['error']}")
-    return results
+    if not _tick_lock_acquire():
+        print("skipped — previous tick still running")
+        return []
+    try:
+        results = []
+        for target in _load_targets():
+            try:
+                cfg = load_config(target)
+                advanced = advance_all(target, cfg)
+                results.append({"target": str(target), "ok": True, "advanced": len(advanced)})
+            except Exception as exc:
+                results.append({"target": str(target), "ok": False, "error": str(exc)})
+        for r in results:
+            if r["ok"]:
+                print(f"{r['target']}: advanced {r['advanced']} run(s)")
+            else:
+                print(f"{r['target']}: ERROR {r['error']}")
+        return results
+    finally:
+        _tick_lock_release()
 
 
 def _macos_plist_xml(interval_seconds: int) -> str:

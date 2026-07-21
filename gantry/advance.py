@@ -577,7 +577,12 @@ def _repair_stale_running(engine: Engine, run: dict[str, Any]) -> dict[str, Any]
     heartbeat_at = state.get("heartbeat_at")
     if heartbeat_at:
         age = time.time() - _iso_to_ts(heartbeat_at)
-        grace = HEARTBEAT_INTERVAL * 3
+        # 3x was too tight in practice — a real resolve run observed taking
+        # ~60s (== 3 * HEARTBEAT_INTERVAL) got killed right at the edge of
+        # finishing. 6x gives real stages headroom against daemon-tick
+        # scheduling jitter without meaningfully slowing genuine-crash
+        # detection (still well under a minute at the default interval).
+        grace = HEARTBEAT_INTERVAL * 6
         if age <= grace:
             return None
         detail = f"no heartbeat for {int(age)}s (interval {HEARTBEAT_INTERVAL}s)"
