@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 IMAGE_NAME = "gantry:latest"
@@ -38,20 +39,67 @@ def build_image() -> dict:
 def _mount_args() -> list[str]:
     home = Path.home()
     mounts = []
-    # Read-only auth/config mounts for gh/git — identity is static enough to
-    # bind-mount safely. claude's (~/.claude) and codex's (~/.codex) own
-    # dirs are each a named, writable volume instead (see
-    # _claude_auth_volume/_codex_auth_volume) — both write their own
-    # session/cache state at runtime, and the host's own ~/.codex or
-    # ~/.claude shouldn't be shared live with a container's independent
-    # process anyway.
-    for host_path, container_path in [
-        (home / ".config" / "gh", "/home/gantry/.config/gh"),
-        (home / ".gitconfig", "/home/gantry/.gitconfig"),
-    ]:
-        if host_path.exists():
-            mounts += ["-v", f"{host_path}:{container_path}:ro"]
+    # Read-only auth mount for gh — identity is static enough to bind-mount
+    # safely. ~/.gitconfig is NOT bind-mounted here (see _write_container_gitconfig):
+    # it needs host-path sanitization first, so it's copied in instead.
+    # claude's (~/.claude) and codex's (~/.codex) own dirs are each a named,
+    # writable volume instead (see _claude_auth_volume/_codex_auth_volume) —
+    # both write their own session/cache state at runtime, and the host's own
+    # ~/.codex or ~/.claude shouldn't be shared live with a container's
+    # independent process anyway.
+    host_path = home / ".config" / "gh"
+    if host_path.exists():
+        mounts += ["-v", f"{host_path}:/home/gantry/.config/gh:ro"]
     return mounts
+
+
+_GH_HELPER_LINE_RE = re.compile(r"^(\s*helper\s*=\s*!).*/gh(\s+auth\s+git-credential.*)$")
+
+
+def _write_container_gitconfig(name: str) -> None:
+    """Copy host ~/.gitconfig into the container, rewritten for container use.
+
+    Bind-mounting ~/.gitconfig directly (the old approach) broke `gh` auth for
+    git push/pull: this org's config points the github.com credential helper
+    at an absolute host path (`!/opt/homebrew/bin/gh auth git-credential`),
+    which doesn't exist in the container (gh lives at /usr/bin/gh there,
+    installed by the Dockerfile) — every push failed with
+    "gh: not found" / "could not read Username for 'https://github.com'"
+    (real bug, hit ship_failed on a run that had already passed review).
+    Rewriting to a bare `!gh auth git-credential` resolves via $PATH in
+    either environment. Also drops `credential.helper = osxkeychain`
+    (macOS-only, meaningless — and would just silently no-op — inside a
+    Linux container) and any `includeIf "gitdir:...` pointing at a host-only
+    path (e.g. ~/Personal/), which the container will never match.
+    """
+    host_gitconfig = Path.home() / ".gitconfig"
+    if not host_gitconfig.exists():
+        return
+    lines = []
+    skip_next_helper_blank = False
+    for line in host_gitconfig.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[includeIf"):
+            skip_next_helper_blank = True
+            continue
+        if skip_next_helper_blank:
+            if stripped.startswith("path") or stripped == "":
+                continue
+            skip_next_helper_blank = False
+        if stripped == "helper = osxkeychain":
+            continue
+        m = _GH_HELPER_LINE_RE.match(line)
+        if m:
+            line = f"{m.group(1)}gh{m.group(2)}"
+        lines.append(line)
+    sanitized = "\n".join(lines) + "\n"
+    tmp = Path(tempfile.gettempdir()) / f"{name}-gitconfig"
+    tmp.write_text(sanitized)
+    subprocess.run(["docker", "cp", str(tmp), f"{name}:/home/gantry/.gitconfig"],
+                   capture_output=True)
+    subprocess.run(["docker", "exec", "-u", "root", name, "chown", "gantry:gantry",
+                   "/home/gantry/.gitconfig"], capture_output=True)
+    tmp.unlink(missing_ok=True)
 
 
 def _claude_auth_volume(target: Path) -> str:
@@ -154,6 +202,8 @@ def up(target: Path, interval_seconds: int = 60) -> dict:
                            capture_output=True)
             subprocess.run(["docker", "exec", "-u", "root", name, "chown", "gantry:gantry",
                            container_path], capture_output=True)
+
+    _write_container_gitconfig(name)
 
     return {"ok": True, "name": name, "container_id": container_id}
 
