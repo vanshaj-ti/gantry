@@ -185,6 +185,13 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     prompt = _build_prompt(store, run_id, cwd, base, template, cfg)
     store.write_log(run_id, "review-prompt.md", prompt)
 
+    # Unlike engine.run_agent_stage's plan/build/evidence stages, this used
+    # to only report "review_running" to herdr's sidebar without ever
+    # writing it to state.json — `gantry status`/`gantry watch` kept
+    # showing the run's prior status (e.g. "evidence_complete") for the
+    # entire review duration, then jumped straight to the final verdict
+    # with no visible "in progress" state at all.
+    store.update_state(run_id, status="review_running", current_stage="review")
     _report_herdr(cfg, run_id, "review_running")
     runner = get_runner(cfg.review.runner)
 
@@ -205,11 +212,16 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     # This is now an agentic investigation (the reviewer reads files, runs git
     # diff, re-checks tests itself), so it needs the same headless auto-approve
     # the other stages get, and more turns than a single-shot prompt needed.
-    result = runner.run(
-        cwd=cwd, prompt=prompt, model=cfg.review.model,
-        session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
-        output_format="json", session_name=f"{run_id}-review", max_turns=cfg.review.max_turns, timeout=900,
-    )
+    from .engine import _start_heartbeat, _stop_heartbeat
+    stop_hb, hb_thread = _start_heartbeat(store, run_id)
+    try:
+        result = runner.run(
+            cwd=cwd, prompt=prompt, model=cfg.review.model,
+            session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
+            output_format="json", session_name=f"{run_id}-review", max_turns=cfg.review.max_turns, timeout=900,
+        )
+    finally:
+        _stop_heartbeat(stop_hb, hb_thread)
     store.save_session(run_id, "review", session_id=result.session_id,
                        model=cfg.review.model, runner=runner.name)
     from .cost import accumulate as _accumulate_cost
