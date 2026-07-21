@@ -40,7 +40,7 @@ from .run_commands import (
     cmd_loop, cmd_mark_merged, cmd_mark_shipped, cmd_resume_hold, cmd_retry, cmd_review,
     cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
 )
-from .system import cmd_cockpit, cmd_daemon, cmd_daemon_tick, cmd_mcp, cmd_update
+from .system import cmd_cockpit, cmd_daemon, cmd_daemon_tick, cmd_docker, cmd_mcp, cmd_update
 from .watch import cmd_listen, cmd_watch
 
 
@@ -201,6 +201,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("daemon-tick", help="internal: advance every daemon-registered "
                                             "target once (invoked by the background job)")
     s.set_defaults(func=cmd_daemon_tick)
+
+    s = sub.add_parser("docker", help="run gantry for this project inside its own "
+                                       "Docker container (isolated from the host)")
+    s.add_argument("docker_action", choices=["build", "up", "down", "status"])
+    s.add_argument("--interval", type=int, default=60,
+                   help="seconds between ticks inside the container (default 60)")
+    s.set_defaults(func=cmd_docker)
 
     s = sub.add_parser("cockpit", help="open a tmux workspace pre-wired for this repo "
                                         "(status bar + doc viewer + live claude session)")

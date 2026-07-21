@@ -82,3 +82,19 @@ def cmd_daemon_tick(args) -> int:
     from ..daemon import run_tick
     run_tick()
     return 0
+
+
+def cmd_docker(args) -> int:
+    """Run gantry for the target project (GANTRY_TARGET / cwd, same
+    resolution as every other command) inside its own Docker container —
+    isolates its spawned claude/codex subprocesses from the host and any
+    other active session. See docker.py and the repo Dockerfile."""
+    from .. import docker as _docker
+    if args.docker_action == "build":
+        return _out(_docker.build_image())
+    if args.docker_action == "status":
+        return _out(_docker.status())
+    tgt = _target()
+    if args.docker_action == "up":
+        return _out(_docker.up(tgt, interval_seconds=args.interval))
+    return _out(_docker.down(tgt))
