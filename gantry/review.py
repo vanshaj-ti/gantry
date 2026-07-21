@@ -222,6 +222,12 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
         )
     finally:
         _stop_heartbeat(stop_hb, hb_thread)
+    # Unlike run_agent_stage, this never logged raw stdout/stderr — a
+    # failed review (result.ok=False, empty result text) left literally no
+    # diagnostic trail beyond review-result.json's bare {"ok": false,
+    # "verdict": "ESCALATE"}, no way to tell WHY the runner call failed.
+    store.write_log(run_id, "review.stdout", result.stdout)
+    store.write_log(run_id, "review.stderr", result.stderr)
     store.save_session(run_id, "review", session_id=result.session_id,
                        model=cfg.review.model, runner=runner.name)
     from .cost import accumulate as _accumulate_cost
