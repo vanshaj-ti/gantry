@@ -18,6 +18,7 @@ worktree it lives in.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -284,6 +285,11 @@ def push(worktree: Path, branch: str, remote_branch: str | None = None) -> dict:
             "remote_branch": remote_branch}
 
 
+_PR_ALREADY_EXISTS_RE = re.compile(
+    r'a pull request for branch ".*?" into branch ".*?" already exists:\s*(\S+)'
+)
+
+
 def create_pr(worktree: Path, remote_branch: str, base_branch: str, title: str, body: str) -> dict:
     """Uses `gh pr create`. Requires gh to be authenticated in the environment
     (GH_TOKEN or `gh auth login`). base_branch is normalized (strips 'origin/'
@@ -295,8 +301,17 @@ def create_pr(worktree: Path, remote_branch: str, base_branch: str, title: str, 
         worktree, timeout=60,
     )
     out = (proc.stdout + proc.stderr).strip()
-    return {"ok": proc.returncode == 0, "url": proc.stdout.strip() if proc.returncode == 0 else None,
-            "output": out[-1000:]}
+    if proc.returncode == 0:
+        return {"ok": True, "url": proc.stdout.strip(), "output": out[-1000:]}
+    # gh exits non-zero here (a real gantry bug, not a network/auth issue):
+    # a PR for this branch already open (e.g. an earlier auto-retry's ship
+    # already created it, and this call raced or re-ran against a stale
+    # ship_failed status) is functionally a success — the PR the caller
+    # wants already exists — not a failure needing another retry attempt.
+    already_exists = _PR_ALREADY_EXISTS_RE.search(out)
+    if already_exists:
+        return {"ok": True, "url": already_exists.group(1), "output": out[-1000:]}
+    return {"ok": False, "url": None, "output": out[-1000:]}
 
 
 def merge_pr(worktree: Path, remote_branch: str) -> dict:

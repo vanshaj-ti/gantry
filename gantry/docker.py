@@ -134,6 +134,23 @@ def _codex_env_args() -> list[str]:
     return ["-e", f"TFY_API_KEY={val}"] if val else []
 
 
+def _gh_env_args() -> list[str]:
+    """This host's `gh` CLI is authenticated via a `GH_TOKEN` env var (set in
+    the shell profile), NOT via `gh auth login`'s on-disk `~/.config/gh/
+    hosts.yml` — that file has no token in it at all here (`gh auth status`
+    on the host reports `Token: ... (GH_TOKEN)`). Bind-mounting
+    ~/.config/gh (the old assumption) therefore gave the container nothing
+    to authenticate with: every ship's push step failed with "could not
+    read Username for 'https://github.com'" even though `gh auth status`
+    inside the container reported "not logged into any GitHub hosts" — the
+    real gap was the missing token, not a stale/wrong mount. `gh` (and git's
+    own `!gh auth git-credential` helper, see _write_container_gitconfig)
+    both honor GH_TOKEN directly, so passing it through is sufficient."""
+    import os
+    val = os.environ.get("GH_TOKEN")
+    return ["-e", f"GH_TOKEN={val}"] if val else []
+
+
 def up(target: Path, interval_seconds: int = 60) -> dict:
     target = target.resolve()
     name = _container_name(target)
@@ -147,6 +164,7 @@ def up(target: Path, interval_seconds: int = 60) -> dict:
         "-v", f"{_claude_auth_volume(target)}:/home/gantry/.claude",
         "-v", f"{_codex_auth_volume(target)}:/home/gantry/.codex",
         *_codex_env_args(),
+        *_gh_env_args(),
         # Mounted at the SAME absolute path as on the host, not a fixed
         # /workspace — pre-existing worktrees under target/.worktrees/gantry/
         # have `.git` gitlink files pointing at an absolute host path
