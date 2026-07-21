@@ -429,6 +429,27 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
                 "action": "auto_shipped" if out.get("ok") else "auto_ship_failed",
                 "pr_url": (out.get("pr") or {}).get("url")}
 
+    if status == "ship_failed" and engine.cfg.git.auto_ship:
+        # Previously no auto-retry existed at all for ship_failed — every
+        # occurrence (git push/PR-create step interrupted mid-flight, a
+        # transient network blip, gh rate-limiting) needed manual
+        # intervention every time, even though the underlying commit was
+        # already real and a bare re-run of ship_run is safe (commit_all is
+        # a no-op if nothing changed, push/create_pr are naturally
+        # idempotent-ish for a retry). Capped at the same resolve_attempts
+        # limit as the resolver escalation path — not a dedicated config
+        # knob, since ship failures are rarer and don't need their own.
+        ship_attempts = engine.store.state(run_id).get("ship_attempt_count", 0)
+        if ship_attempts >= engine.cfg.checks.resolve_attempts:
+            return {"advanced": False, "from": status, "action": "no_auto_transition"}
+        engine.store.update_state(run_id, ship_attempt_count=ship_attempts + 1)
+        from .ship import ship_run
+        out = ship_run(engine, run_id)
+        return {"advanced": True, "from": status,
+                "action": "auto_shipped" if out.get("ok") else "auto_ship_retry_failed",
+                "ship_attempts": ship_attempts + 1,
+                "pr_url": (out.get("pr") or {}).get("url")}
+
     if status == "blocked":
         blocked_on = engine.store.state(run_id).get("blocked_on")
         if blocked_on not in ("scope", "checks", "e2e"):
@@ -611,7 +632,7 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
     the bound that keeps concurrent advance_one_run calls from racing on a
     single run's state.json."""
     auto_transitions = (AUTO_TRANSITIONS
-                       | ({"review_approved"} if cfg.git.auto_ship else set())
+                       | ({"review_approved", "ship_failed"} if cfg.git.auto_ship else set())
                        | ({"checks_escalated"} if cfg.checks.auto_resolve else set()))
     rid = run["id"]
     repaired = _repair_stale_running(engine, run)

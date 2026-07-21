@@ -22,18 +22,26 @@ def ship_run(engine: Engine, run_id: str) -> dict[str, Any]:
     meta = draft_ship_meta(engine.store, run_id, engine.cfg, wt)
     title, body, remote_branch = meta["title"], meta["body"], meta["branch_slug"]
 
+    # Every step below previously discarded its own `output` on failure —
+    # ship_failed left no trail beyond a bare status flip, same gap fixed in
+    # review.py. Without this, diagnosing WHY a ship failed (real git error?
+    # network blip? gh not authenticated?) required re-running the exact
+    # same commit/push/PR sequence by hand and hoping to reproduce it.
     commit_res = commit_all(wt, title)
     if not commit_res["ok"]:
+        engine.store.write_log(run_id, "ship.stderr", f"commit failed: {commit_res}")
         engine.store.update_state(run_id, status="ship_failed")
         return {"ok": False, "stage": "commit", **commit_res}
 
     push_res = push(wt, branch, remote_branch=remote_branch)
     if not push_res["ok"]:
+        engine.store.write_log(run_id, "ship.stderr", f"push failed: {push_res}")
         engine.store.update_state(run_id, status="ship_failed")
         return {"ok": False, "stage": "push", **push_res}
 
     pr_res = create_pr(wt, remote_branch, engine.cfg.git.base_branch, title, body)
     if not pr_res["ok"]:
+        engine.store.write_log(run_id, "ship.stderr", f"create_pr failed: {pr_res}")
         engine.store.update_state(run_id, status="ship_failed", pr_url=None)
         return {"ok": False, "commit": commit_res, "push": push_res, "pr": pr_res,
                 "branch": remote_branch, "title": title}
