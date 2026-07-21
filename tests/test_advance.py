@@ -278,10 +278,10 @@ class TestRepairStaleRunning(unittest.TestCase):
         import time
         self.eng.store.update_state(self.run_id, status="build_running",
                                     heartbeat_at=now_iso())
-        # Backdate the heartbeat past the grace window (3x HEARTBEAT_INTERVAL)
+        # Backdate the heartbeat past the grace window (6x HEARTBEAT_INTERVAL)
         # without sleeping in the test.
         from gantry.engine import HEARTBEAT_INTERVAL
-        stale_ts = time.time() - (HEARTBEAT_INTERVAL * 3 + 5)
+        stale_ts = time.time() - (HEARTBEAT_INTERVAL * 6 + 5)
         from datetime import datetime, timezone
         stale_iso = datetime.fromtimestamp(stale_ts, tz=timezone.utc).isoformat()
         self.eng.store.update_state(self.run_id, heartbeat_at=stale_iso)
