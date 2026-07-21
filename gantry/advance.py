@@ -627,6 +627,17 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
         # `{stage}_failed` from the agent itself has no this tag and stays
         # human-gated, same as before.
         stage = run["status"].removesuffix("_failed")
+        if stage == "resolve":
+            # run_resolver_stage doesn't self-track resolve_attempt_count
+            # (the checks_escalated caller below does) — a heartbeat-killed
+            # resolve attempt never got the chance to increment it either,
+            # so without this check the stale-heartbeat path could retry
+            # resolve forever, blowing straight past resolve_attempts.
+            resolve_attempts = engine.store.state(rid).get("resolve_attempt_count", 0)
+            if resolve_attempts >= engine.cfg.checks.resolve_attempts:
+                engine.store.update_state(rid, status="resolve_escalated", last_failure_reason=None)
+                return {"run_id": rid, "advanced": False, "action": "resolve_escalated",
+                        "resolve_attempts": resolve_attempts}
         if not _acquire_lock(engine, rid):
             return {"run_id": rid, "advanced": False, "action": "skipped_locked"}
         try:
@@ -636,6 +647,7 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
                 # resume semantics) — run_resolver_stage is its own method,
                 # see Engine.run_resolver_stage. Calling run_agent_stage here
                 # would mis-resolve cfg.model_for("resolve") and blow up.
+                engine.store.update_state(rid, resolve_attempt_count=resolve_attempts + 1)
                 engine.run_resolver_stage(rid)
             elif stage == "review":
                 # Also not a normal agent stage — run_review has its own
