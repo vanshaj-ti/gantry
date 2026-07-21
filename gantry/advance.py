@@ -626,7 +626,18 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
             return {"run_id": rid, "advanced": False, "action": "skipped_locked"}
         try:
             engine.store.update_state(rid, last_failure_reason=None)
-            engine.run_agent_stage(rid, stage, resume=False)
+            if stage == "resolve":
+                # Not a normal agent stage (no render_prompt template, no
+                # resume semantics) — run_resolver_stage is its own method,
+                # see Engine.run_resolver_stage. Calling run_agent_stage here
+                # would mis-resolve cfg.model_for("resolve") and blow up.
+                engine.run_resolver_stage(rid)
+            elif stage == "review":
+                # Also not a normal agent stage — run_review has its own
+                # (store, run_id, cfg, cwd) signature, see review.py.
+                run_review(engine.store, rid, engine.cfg, engine.work_dir(rid))
+            else:
+                engine.run_agent_stage(rid, stage, resume=False)
             return {"run_id": rid, "advanced": True, "action": f"retry_after_stale_heartbeat_{stage}"}
         except Exception as exc:
             return {"run_id": rid, "advanced": False, "error": str(exc)}
