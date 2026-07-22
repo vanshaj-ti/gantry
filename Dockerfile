@@ -17,7 +17,11 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # codex CLI — npm global (matches host's @openai/codex install)
-RUN npm install -g @openai/codex
+# ccusage — codex-cli reports token counts but no cost_usd field (ChatGPT-auth
+# isn't billed per-token via this CLI); ccusage computes real $ cost from
+# local ~/.codex/sessions rollout files + LiteLLM/gateway pricing, see
+# gantry/cost.py's _codex_cost_from_ccusage.
+RUN npm install -g @openai/codex ccusage@20
 
 # gantry itself
 COPY . /opt/gantry

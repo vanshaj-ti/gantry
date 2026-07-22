@@ -9,9 +9,15 @@ or reaches directly into cost.json's shape.
 """
 from __future__ import annotations
 
+import json
+import logging
+import shutil
+import subprocess
 from typing import Any
 
 from .state import RunStore
+
+logger = logging.getLogger(__name__)
 
 COST_RESULT_NAME = "cost.json"
 
@@ -39,7 +45,36 @@ def _empty_report() -> dict[str, Any]:
     return {"total_cost_usd": 0.0, "total_input_tokens": 0, "total_output_tokens": 0, "by_stage": {}}
 
 
-def accumulate(store: RunStore, run_id: str, stage: str, usage: dict[str, Any]) -> dict[str, Any]:
+def _codex_cost_from_ccusage(session_id: str | None) -> float | None:
+    """codex-cli (ChatGPT/gateway-auth) never reports cost_usd in its own
+    `--json` event stream — no billing field exists there at all, only token
+    counts (see runners.py CodexRunner._parse_jsonl). ccusage
+    (https://ccusage.com, npm package) computes real $ cost from the local
+    ~/.codex/sessions rollout files against LiteLLM/gateway pricing, keyed by
+    the same thread_id gantry already stores as session_id. Returns None
+    (never raises) if ccusage isn't installed, the session hasn't been
+    written to disk yet, or nothing matches — callers already treat None as
+    "no data", same as an unsupported runner."""
+    if not session_id or not shutil.which("npx"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["npx", "--yes", "ccusage@20", "codex", "session", "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+        for session in data.get("sessions", []):
+            if session_id in session.get("sessionId", ""):
+                return session.get("costUSD")
+    except Exception:
+        logger.debug("ccusage cost lookup failed for session_id=%s", session_id, exc_info=True)
+    return None
+
+
+def accumulate(store: RunStore, run_id: str, stage: str, usage: dict[str, Any],
+               runner: str = "", session_id: str | None = None) -> dict[str, Any]:
     """Fold one stage invocation's usage into the run's cost.json, and mirror
     the running total onto state.json (cheap: `gantry watch` and the herdr
     status pane both want the total without opening cost.json for every run
@@ -49,6 +84,8 @@ def accumulate(store: RunStore, run_id: str, stage: str, usage: dict[str, Any]) 
         report = _empty_report()
 
     cost = usage.get("cost_usd")
+    if cost is None and runner == "codex-cli":
+        cost = _codex_cost_from_ccusage(session_id)
     in_tok = usage.get("input_tokens")
     out_tok = usage.get("output_tokens")
 
@@ -70,7 +107,16 @@ def accumulate(store: RunStore, run_id: str, stage: str, usage: dict[str, Any]) 
     report["by_stage"][stage] = entry
 
     store.write_result(run_id, COST_RESULT_NAME, report)
-    store.update_state(run_id, total_cost_usd=report["total_cost_usd"])
+    # Mirror token totals alongside cost_usd — codex-cli (ChatGPT-auth) never
+    # reports cost_usd at all (ChatGPT auth isn't billed per-token via this
+    # CLI, see CodexRunner._parse_jsonl), so a codex-only run's total_cost_usd
+    # stays 0.0 forever even though real token usage IS being tracked in
+    # cost.json. Without this, `gantry watch`'s status pane looked like codex
+    # stages weren't being cost-tracked at all — they were, just not in the
+    # $-denominated field the pane displayed.
+    store.update_state(run_id, total_cost_usd=report["total_cost_usd"],
+                       total_input_tokens=report["total_input_tokens"],
+                       total_output_tokens=report["total_output_tokens"])
     return report
 
 
