@@ -1,4 +1,4 @@
-"""System/environment commands: cockpit, update, daemon, mcp."""
+"""System/environment commands: cockpit, update, daemon, mcp, setup."""
 from __future__ import annotations
 
 import shutil
@@ -82,6 +82,42 @@ def cmd_daemon_tick(args) -> int:
     from ..daemon import run_tick
     run_tick()
     return 0
+
+
+def _runner_availability() -> dict:
+    from ..runners import _RUNNERS
+    return {name: bool(shutil.which(cls().build_command(
+        prompt="x", model="", session_id=None, plan_mode=False, skip_permissions=False,
+        output_format="json", session_name="x", max_turns=1)[0]))
+        for name, cls in _RUNNERS.items()}
+
+
+def cmd_setup(args) -> int:
+    """One-command project bring-up: scaffold gantry.toml + prompts, build the
+    Docker image (claude + codex both installed, see Dockerfile), start the
+    per-project container. Composes the three existing steps a user would
+    otherwise run by hand (`init`, `docker build`, `docker up`) — no new
+    behavior beyond that, so failures are attributable to the exact
+    underlying command that produced them."""
+    from .run_commands import scaffold
+    from .. import docker as _docker
+    if not shutil.which("docker"):
+        return _out({"ok": False, "error": "docker not found on PATH — required for `gantry setup`"})
+    tgt = _target()
+    result: dict = {"ok": True, "runners_available": _runner_availability()}
+    result["init"] = scaffold(tgt, force=getattr(args, "force", False))
+    if not result["init"]["ok"] and not getattr(args, "force", False):
+        # gantry.toml already existed — not fatal, setup still proceeds to
+        # build/up against whatever config is already there.
+        pass
+    result["docker_build"] = _docker.build_image()
+    if not result["docker_build"]["ok"]:
+        result["ok"] = False
+        return _out(result)
+    result["docker_up"] = _docker.up(tgt, interval_seconds=getattr(args, "interval", 60))
+    if not result["docker_up"]["ok"]:
+        result["ok"] = False
+    return _out(result)
 
 
 def cmd_docker(args) -> int:

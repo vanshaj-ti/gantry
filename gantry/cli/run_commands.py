@@ -15,24 +15,29 @@ from ..state import RunStore, now_iso
 from ._shared import TEMPLATE_DIR, _engine, _notify, _out, _target
 
 
-def cmd_init(args) -> int:
-    tgt = _target()
+def scaffold(tgt, force: bool = False, with_skills: bool = False) -> dict:
+    """Scaffold gantry.toml + .gantry/prompts in `tgt`. Shared by `cmd_init`
+    and `cmd_setup` (setup's first step is exactly this)."""
     cfg_path = tgt / CONFIG_FILENAME
-    if cfg_path.exists() and not args.force:
-        return _out({"ok": False, "error": f"{CONFIG_FILENAME} already exists (use --force)"})
+    if cfg_path.exists() and not force:
+        return {"ok": False, "error": f"{CONFIG_FILENAME} already exists (use --force)"}
     tmpl = TEMPLATE_DIR / "gantry.toml"
     cfg_path.write_text(tmpl.read_text() if tmpl.exists() else "project_id = \"project\"\n")
     prompts = tgt / ".gantry" / "prompts"
     prompts.mkdir(parents=True, exist_ok=True)
-    for stage in ["plan", "build", "evidence", "review"]:
+    for stage in ["spec", "design", "plan", "build", "evidence", "review"]:
         src = TEMPLATE_DIR / "prompts" / f"{stage}.md"
         dst = prompts / f"{stage}.md"
         if src.exists() and not dst.exists():
             shutil.copy(src, dst)
     result = {"ok": True, "config": str(cfg_path), "prompts_dir": str(prompts)}
-    if args.with_skills:
+    if with_skills:
         result["skills_install"] = _install_skills(load_config(tgt))
-    return _out(result)
+    return result
+
+
+def cmd_init(args) -> int:
+    return _out(scaffold(_target(), force=args.force, with_skills=args.with_skills))
 
 
 def _install_skills(cfg) -> list[dict]:
