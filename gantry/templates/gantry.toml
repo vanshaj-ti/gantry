@@ -151,6 +151,14 @@ backend = "none"              # "none" | "telegram" | "webhook"
 # telegram reads GANTRY_TELEGRAM_BOT_TOKEN / GANTRY_TELEGRAM_CHAT_ID from env
 # webhook_url = "https://hooks.example.com/..."
 
+[daemon]
+# Wall-clock cap on how long the background `gantry daemon-tick` job (see
+# `gantry daemon install`) spends on THIS target before moving on to the
+# next registered target in the same tick. Keep comfortably under the
+# daemon's own tick interval (default 60s) so one hung target can't eat
+# every other project's turn.
+per_target_timeout_seconds = 45
+
 [skills]
 # Agent skill libraries mandated for the BUILD and EVIDENCE stages only (execution
 # discipline — TDD, systematic debugging, review rigor). Scoped so they augment

@@ -318,6 +318,19 @@ class NotifyConfig:
 
 
 @dataclass
+class DaemonConfig:
+    """The background auto-advance job's own per-target guard (see
+    gantry/daemon.py). Distinct from any per-stage timeout in [models.*] —
+    this bounds how long the daemon tick spends on ONE target before moving
+    on to the next, so a hung `load_config`/subprocess check on one repo
+    can't silently eat the whole tick's time budget for every other
+    registered target. Default (45s) sits comfortably under the 60s default
+    daemon interval (see `install_daemon`) so a single slow target still
+    leaves room for the rest before the next tick fires."""
+    per_target_timeout_seconds: int = 45
+
+
+@dataclass
 class HerdrConfig:
     """Optional herdr (terminal multiplexer) integration. When enabled and Gantry
     runs inside a herdr pane (HERDR_ENV=1), report semantic pipeline state to the
@@ -416,6 +429,7 @@ class GantryConfig:
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     git: GitConfig = field(default_factory=GitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     herdr: HerdrConfig = field(default_factory=HerdrConfig)
@@ -595,5 +609,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
         h = raw["herdr"]
         cfg.herdr = HerdrConfig(enabled=bool(h.get("enabled", True)),
                                 report_state=bool(h.get("report_state", True)))
+    if "daemon" in raw:
+        d = raw["daemon"]
+        cfg.daemon = DaemonConfig(
+            per_target_timeout_seconds=int(d.get("per_target_timeout_seconds", 45)))
     cfg.proxy = _coerce_proxy(raw.get("proxy", {}))
     return cfg
