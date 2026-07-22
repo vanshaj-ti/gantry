@@ -359,6 +359,23 @@ class TestRunScopeGuardModes(unittest.TestCase):
         self.assertFalse(result["pass"])
         self.assertIn(".env", result["forbidden_files"])
 
+    def test_high_risk_files_recorded_without_affecting_pass(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`, `auth/login.ts`.\n")
+        self._touch("auth/login.ts")
+        cfg = ScopeConfig(high_risk_paths=["auth/"])
+        result = run_scope_guard(self.store, self.run_id, cfg, self.repo, "main")
+        self.assertIn("auth/login.ts", result["high_risk_files"])
+        self.assertTrue(result["pass"])
+
+    def test_no_high_risk_match_leaves_high_risk_files_empty(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        cfg = ScopeConfig(high_risk_paths=["auth/"])
+        result = run_scope_guard(self.store, self.run_id, cfg, self.repo, "main")
+        self.assertEqual(result["high_risk_files"], [])
+        self.assertTrue(result["pass"])
+
 
 class TestMatchesAny(unittest.TestCase):
     def test_exact_match(self):

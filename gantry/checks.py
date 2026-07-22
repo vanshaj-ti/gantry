@@ -231,6 +231,11 @@ def _allowed_paths(store: RunStore, run_id: str) -> list[str]:
 def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, base: str) -> dict[str, Any]:
     files = _changed_files(cwd, base)
     forbidden = [f for f in files if _matches_any(f, cfg.forbid_paths)]
+    # High-risk is a separate signal from forbidden/unexpected — it does NOT
+    # affect `pass` below. It is surfaced here for advance.py to escalate to a
+    # human-gated status (checks_high_risk_escalated) regardless of autonomy
+    # flags; a scope-guard failure/pass is orthogonal to that decision.
+    high_risk = [f for f in files if _matches_any(f, cfg.high_risk_paths)]
 
     unexpected: list[str] = []
     warnings: list[str] = []
@@ -255,6 +260,7 @@ def run_scope_guard(store: RunStore, run_id: str, cfg: ScopeConfig, cwd: Path, b
         "changed_files": files,
         "forbidden_files": forbidden,
         "unexpected_files": unexpected,
+        "high_risk_files": high_risk,
         "warnings": warnings,
         "pass": not forbidden and not unexpected,
     }

@@ -16,7 +16,7 @@ from ..engine import Engine
 # Statuses where a run is actually waiting on a human decision — the set
 # `gantry listen` matches replies against.
 NEEDS_INPUT_STATUSES = {
-    "blocked", "review_escalated",
+    "blocked", "review_escalated", "checks_high_risk_escalated",
     "spec_complete", "design_complete",  # always human-gated — never auto-advanced
     "spec_failed", "design_failed", "plan_failed", "build_failed", "evidence_failed",
 }

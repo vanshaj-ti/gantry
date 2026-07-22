@@ -27,7 +27,15 @@ Required plan sections:
 3. Allowed files — list every path you intend to touch, in backticks (the scope
    guard reads these; anything changed outside this list is flagged).
 4. Forbidden files / non-goals
-5. Ordered implementation steps
+5. Ordered implementation steps — each step must name its own specific
+   verification (a command, a test name, or a concrete check) that proves
+   THAT step is done correctly, e.g. "Step 3: add `validate_email` to
+   `auth/validators.py` — verify: `pytest tests/test_validators.py::test_validate_email`".
+   Don't defer all verification to the separate "Test plan and exact
+   commands" section below — that section is for the overall/final
+   verification once every step is complete, this per-step verification is
+   what lets the build agent confirm and commit each step independently
+   before moving to the next.
 6. Test plan and exact commands
 7. Evidence requirements
 8. Rollback / safety notes

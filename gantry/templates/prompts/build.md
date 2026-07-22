@@ -13,6 +13,34 @@ Input files for this stage live in `.agent-runs/{RUN_ID}/`:
 
 Your job: execute the implementation plan exactly. Do NOT redesign. Do NOT expand scope.
 
+## Verified slices, committed incrementally
+
+Execute the plan's ordered implementation steps in sequence, one at a time,
+with this discipline for EACH step:
+1. Implement just that step.
+2. Run that step's own declared verification (the command/test/check the
+   plan named for this specific step — see the plan's "Ordered
+   implementation steps" section).
+3. Once that verification passes, commit ONLY the files that step touched
+   (`git add <specific files>`, never `git add -A`/`git add .`), with a
+   commit message naming the step (e.g. `step 3: add validate_email`).
+   Then move on to the next step.
+4. If a step's verification fails and you can't fix it after a reasonable
+   attempt, STOP — do not push into later steps that may depend on the
+   broken one. Report in `build-summary.md` exactly which step failed and
+   why.
+
+This leaves clean, verified, committed partial progress if you run out of
+turns or crash mid-build, instead of one uncommitted all-or-nothing blob.
+
+Note: this per-step commit loop happens WITHIN this single build invocation.
+It is a different level from the "## Pass N" convention below, which is
+about a build-summary.md appended across SEPARATE, resumed build
+invocations (e.g. a fresh pass after review sends the run back with
+feedback) — do not conflate the two. Within one pass, commit per verified
+step as above; across passes, keep appending "## Pass N" sections as
+described below.
+
 Rules:
 - Touch only files listed in the plan's "Allowed files" section.
 - If implementation reveals you genuinely need to create or touch a file the
@@ -25,7 +53,9 @@ Rules:
   guard. Reserve stopping to ask a question for cases where you're genuinely
   unsure whether the new file is in scope at all, not for routine discoveries.
 - Do not read or write `.env` or credential files.
-- Do not run `git push`, `git commit`, or destructive git commands.
+- Do not run `git push` or destructive git commands. The one exception is
+  `git commit` for each verified step, per "Verified slices, committed
+  incrementally" above — that is required, not prohibited.
 - Run only the verification commands necessary for the change.
 - Follow this repo's own conventions and package manager as declared in its
   context files — do not introduce a different toolchain.
@@ -41,6 +71,9 @@ In your summary (or appended section), include:
 3. Tests/commands run with outcomes
 4. Deviations from plan
 5. Remaining risks or questions
+6. Which steps got their own verified commit, and which did not (and why —
+   e.g. a step that was implemented but blocked before its verification
+   passed, so it was left uncommitted)
 
 If blocked, ask exactly one concise inline question in your final result and stop.
 

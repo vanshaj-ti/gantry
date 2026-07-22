@@ -124,6 +124,12 @@ mode = "block"                 # "block" | "warn" | "off"
 # require_declared_additions is False — with the default (True), an
 # undeclared file is still flagged even in "warn" mode.
 require_declared_additions = true
+# Empty by default — project opt-in only, no project-agnostic guessing at
+# what's "sensitive" for an arbitrary repo. Any changed file matching one of
+# these globs forces a human-gated status (checks_high_risk_escalated)
+# regardless of auto_approve_docs/auto_ship/auto_resolve — always requires an
+# explicit `gantry approve`, never auto-advances.
+# high_risk_paths = ["**/auth/**", "**/migrations/**"]
 
 [checks]
 # Delegate house rules to THIS repo's own toolchain. Gantry runs each command

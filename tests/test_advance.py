@@ -752,5 +752,64 @@ class TestStageSkip(unittest.TestCase):
         self.assertEqual(result["action"], "checks_passed->evidence")
 
 
+class TestHighRiskEscalation(unittest.TestCase):
+    """High-risk path escalation must force a human-gated status regardless
+    of auto_approve_docs/auto_ship/auto_resolve — mirrors how review_escalated
+    is always excluded from AUTO_TRANSITIONS/_advance_one_run's conditionally-
+    unioned auto-transition sets."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_high_risk_file_forces_escalated_status_even_with_full_autonomy(self):
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        cfg.git.auto_approve_docs = True
+        cfg.checks.auto_resolve = True
+        cfg.scope.high_risk_paths = ["auth/"]
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        fake_checks = {"pass": True, "scope": {"pass": True, "high_risk_files": ["auth/login.ts"]},
+                       "checks": {"pass": True, "results": []}}
+        with patch.object(Engine, "run_checks", return_value=fake_checks), \
+             patch("gantry.advance.run_e2e_tests") as mock_e2e:
+            result = advance_run(eng, run_id)
+
+        self.assertFalse(mock_e2e.called)
+        self.assertEqual(result["action"], "checks_high_risk_escalated")
+        self.assertEqual(eng.store.state(run_id)["status"], "checks_high_risk_escalated")
+
+        # Never auto-advanced, no matter which autonomy flags are enabled.
+        from gantry.advance import AUTO_TRANSITIONS, _advance_one_run
+        self.assertNotIn("checks_high_risk_escalated", AUTO_TRANSITIONS)
+        run_row = {"id": run_id, "status": "checks_high_risk_escalated", "mtime": 0, "tag": None}
+        res = _advance_one_run(eng, run_row, cfg)
+        self.assertIsNone(res)
+
+    def test_no_high_risk_match_behaves_like_today(self):
+        cfg = GantryConfig()
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="build_complete")
+
+        fake_checks = {"pass": True, "scope": {"pass": True, "high_risk_files": []},
+                       "checks": {"pass": True, "results": []}}
+        with patch.object(Engine, "run_checks", return_value=fake_checks), \
+             patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+             patch.object(Engine, "run_agent_stage") as mock_run_agent_stage:
+            result = advance_run(eng, run_id)
+
+        mock_run_agent_stage.assert_called_once_with(run_id, "evidence", resume=False)
+        self.assertEqual(result["action"], "checks_passed->evidence")
+        self.assertNotEqual(eng.store.state(run_id)["status"], "checks_high_risk_escalated")
+
+
 if __name__ == "__main__":
     unittest.main()

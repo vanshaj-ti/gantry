@@ -153,6 +153,19 @@ class ScopeConfig:
                                               # new file through with a warning
                                               # (in "warn" mode) with no
                                               # declaration required.
+    high_risk_paths: list[str] = field(default_factory=list)  # project-configurable
+                                              # glob list (same matching semantics as
+                                              # forbid_paths, via checks._matches_any)
+                                              # of paths sensitive enough that touching
+                                              # them should always force a human-gated
+                                              # status (checks_high_risk_escalated),
+                                              # regardless of auto_approve_docs/
+                                              # auto_ship/auto_resolve. Empty by
+                                              # default — no project-agnostic guessing
+                                              # at what's "sensitive" for an arbitrary
+                                              # repo; each project opts in via its own
+                                              # gantry.toml, e.g.
+                                              # ["**/auth/**", "**/migrations/**"].
 
 
 @dataclass
@@ -555,6 +568,7 @@ def load_config(target_workspace: Path) -> GantryConfig:
             enforce_plan_scope=enforce_plan_scope,
             mode=s.get("mode", default_mode),
             require_declared_additions=bool(s.get("require_declared_additions", True)),
+            high_risk_paths=s.get("high_risk_paths", ScopeConfig().high_risk_paths),
         )
     if "checks" in raw:
         c = raw["checks"]

@@ -9,7 +9,8 @@ transitions that don't require a human gate:
   review_changes_requested -> resume build (with review-comments.md)
 
 Human-gated transitions (awaiting_spec, awaiting_design, review_escalated,
-blocked) are intentionally NOT auto-advanced — they wait for `gantry approve`.
+checks_high_risk_escalated, blocked) are intentionally NOT auto-advanced —
+they wait for `gantry approve`.
 
 `advance_run` runs synchronously (used by `gantry advance --run ID`).
 `advance_all` ticks every run once (used by the poller cron).
@@ -23,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .checks import _matches_any
 from .config import AGENT_STAGES, GantryConfig
 from .e2e import run_e2e_tests
 from .engine import HEARTBEAT_INTERVAL, Engine
@@ -65,6 +67,7 @@ STATUS_LABELS = {
     "review_changes_requested": "Review requested changes — rebuilding",
     "review_escalated": "Review ESCALATED — human decision needed",
     "blocked": "Blocked — needs input",
+    "checks_high_risk_escalated": "High-risk path touched — human decision needed",
     "checks_escalated": "Checks ESCALATED — auto-retry exhausted",
     "resolve_running": "Resolver agent fixing escalated checks",
     "resolve_escalated": "Resolver ESCALATED — auto-fix exhausted",
@@ -108,6 +111,7 @@ SHORT_STATUS_LABELS = {
     "review_changes_requested": "Changes requested",
     "review_escalated": "Review escalated",
     "blocked": "Blocked",
+    "checks_high_risk_escalated": "High-risk escalated",
     "checks_escalated": "Checks escalated",
     "resolve_running": "Resolving",
     "resolve_escalated": "Resolve escalated",
@@ -130,6 +134,11 @@ _STATUS_ICON = {
     "review_escalated": "❗",       # ❗
     "checks_escalated": "❗",       # ❗
     "resolve_escalated": "❗",       # ❗
+    "checks_high_risk_escalated": "\U0001f6a8",  # 🚨 — distinct from the plain ❗
+                                                   # escalated statuses: this one is
+                                                   # never about a failure, it's a
+                                                   # deliberate "stop and look" signal
+                                                   # even when everything else passed.
     "review_approved": "✅",        # ✅
     "review_changes_requested": "\U0001f501",  # 🔁
     "shipped": "\U0001f680",           # 🚀
@@ -226,6 +235,24 @@ def _spec_gate_failure_detail(store: Any, run_id: str) -> str:
     return f"Structural gate failed: {gate.get('reason', 'acceptance-criteria.json invalid')}"
 
 
+def _high_risk_detail(store: Any, run_id: str, cfg: GantryConfig | None = None) -> str:
+    """Concrete detail for checks_high_risk_escalated: which changed file(s)
+    matched which configured `high_risk_paths` glob(s), so a human reading
+    the notification knows exactly what to look at and why — not just a bare
+    'high risk files touched' label."""
+    scope = store.read_result(run_id, "checks.json") or {}
+    high_risk = ((scope.get("scope") or {}).get("high_risk_files")) or []
+    if not high_risk:
+        return "High-risk path(s) touched."
+    patterns = cfg.scope.high_risk_paths if cfg is not None else []
+    lines = []
+    for f in high_risk[:8]:
+        matched = [p for p in patterns if _matches_any(f, [p])] if patterns else []
+        glob_note = f" (matched `{matched[0]}`)" if matched else ""
+        lines.append(f"  • `{f}`{glob_note}")
+    return "High-risk path(s) touched:\n" + "\n".join(lines)
+
+
 def _e2e_failure_detail(store: Any, run_id: str) -> str:
     """Same purpose as _checks_failure_detail, for the deterministic e2e step
     (e2e-report.json) — surfaces which app/spec failed, not just 'e2e failed'."""
@@ -291,6 +318,17 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                 f"*Blocked on:* {blocked_on} (auto-retry attempt {retry_count})\n"
                 f"{detail}\n\n"
                 f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere).\n"
+                f"*Reply 2* with guidance to send it back for a rebuild.")
+
+    if status == "checks_high_risk_escalated":
+        from .config import load_config
+        cfg = load_config(store.target)
+        detail = _high_risk_detail(store, run_id, cfg)
+        return (f"{header}\n\n"
+                f"{detail}\n\n"
+                f"This always requires a human decision, regardless of "
+                f"auto_approve_docs/auto_ship/auto_resolve settings.\n\n"
+                f"*Reply 1* to approve and let the run continue.\n"
                 f"*Reply 2* with guidance to send it back for a rebuild.")
 
     if status == "checks_escalated":
@@ -398,6 +436,19 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         if not checks["pass"]:
             return {"advanced": False, "from": status, "action": "checks_failed",
                     "blocked_on": engine.store.state(run_id).get("blocked_on")}
+        high_risk_files = checks.get("scope", {}).get("high_risk_files") or []
+        if high_risk_files:
+            # A high-risk path match forces a human-gated status regardless of
+            # auto_approve_docs/auto_ship/auto_resolve — see
+            # "checks_high_risk_escalated"'s exclusion from AUTO_TRANSITIONS
+            # and _advance_one_run's conditionally-unioned auto-transition
+            # sets (mirrors how review_escalated is always human-gated). This
+            # check runs regardless of any autonomy flag being enabled —
+            # that's the whole point of the feature.
+            engine.store.update_state(run_id, status="checks_high_risk_escalated",
+                                      blocked_on="high_risk_paths")
+            return {"advanced": False, "from": status, "action": "checks_high_risk_escalated",
+                    "high_risk_files": high_risk_files}
         # Deterministic e2e run (no LLM) between checks and the evidence stage —
         # keeps a slow/hanging Playwright suite from burning or killing the
         # expensive evidence agent turn. No-op (pass=True) when unconfigured.
