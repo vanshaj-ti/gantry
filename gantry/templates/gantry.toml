@@ -129,6 +129,9 @@ base_branch = "main"          # diff base for scope guard + review
                                # hands-off spec-to-merged-PR run with zero human
                                # gates. Default false: spec/design pause for a
                                # human to read and `gantry approve`/`revise`.
+ship_retry_attempts = 2        # cap on auto-retry attempts for ship_failed
+                               # (only relevant when auto_ship = true) before
+                               # the run is left for a human to inspect.
 
 [scope]
 # Gantry's built-in deterministic guard. Globs and path prefixes both work.

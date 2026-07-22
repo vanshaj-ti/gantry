@@ -71,6 +71,49 @@ class TestNewConfigSectionsDefaultOff(unittest.TestCase):
         self.assertEqual(cfg.evidence.output_format, "prose")
         self.assertEqual(cfg.skills.evidence_directive, "")
         self.assertEqual(cfg.checks.max_parallel, 4)
+        # Fix 3: ship_retry_attempts defaults to 2 — the exact value
+        # advance.py used to borrow from cfg.checks.resolve_attempts, so a
+        # project that never sets this explicitly sees zero behavior change.
+        self.assertEqual(cfg.git.ship_retry_attempts, 2)
+
+
+class TestShipRetryAttempts(unittest.TestCase):
+    def test_defaults_to_two_with_no_git_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.git.ship_retry_attempts, 2)
+
+    def test_configurable_via_toml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text("""
+[git]
+auto_ship = true
+ship_retry_attempts = 5
+""")
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.git.ship_retry_attempts, 5)
+        self.assertTrue(cfg.git.auto_ship)
+
+    def test_other_git_fields_still_default_when_ship_retry_attempts_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text("""
+[git]
+base_branch = "staging"
+""")
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.git.base_branch, "staging")
+        self.assertEqual(cfg.git.ship_retry_attempts, 2)
+
+    def test_template_gantry_toml_parses_with_new_field(self):
+        from gantry.cli._shared import TEMPLATE_DIR
+        tmpl = TEMPLATE_DIR / "gantry.toml"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text(tmpl.read_text())
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.git.ship_retry_attempts, 2)
 
 
 class TestNewConfigSectionsFromToml(unittest.TestCase):

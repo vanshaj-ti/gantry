@@ -281,6 +281,68 @@ class TestAutoShip(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+class TestShipRetryUsesDedicatedField(unittest.TestCase):
+    """Fix 3: the ship_failed auto-retry cap uses cfg.git.ship_retry_attempts
+    (its own dedicated field), not cfg.checks.resolve_attempts (the value it
+    used to borrow)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_retries_up_to_ship_retry_attempts_cap_not_resolve_attempts(self):
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        cfg.git.ship_retry_attempts = 1   # deliberately different from resolve_attempts (2)
+        cfg.checks.resolve_attempts = 99  # if the old borrowed-field bug regressed, this
+                                            # much higher cap would let the retry through
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="ship_failed", ship_attempt_count=1)
+
+        with patch("gantry.ship.ship_run") as mock_ship:
+            result = advance_run(eng, run_id)
+
+        self.assertFalse(mock_ship.called)
+        self.assertEqual(result["action"], "no_auto_transition")
+
+    def test_retries_while_under_ship_retry_attempts_cap(self):
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        cfg.git.ship_retry_attempts = 3
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="ship_failed", ship_attempt_count=1)
+
+        with patch("gantry.ship.ship_run") as mock_ship:
+            mock_ship.return_value = {"ok": True, "pr": {"url": "https://example.com/pr/1"}}
+            result = advance_run(eng, run_id)
+
+        self.assertTrue(mock_ship.called)
+        self.assertEqual(result["action"], "auto_shipped")
+        self.assertEqual(result["ship_attempts"], 2)
+
+    def test_default_ship_retry_attempts_matches_previously_borrowed_value(self):
+        # Default (2) matches the value the old code used to borrow from
+        # cfg.checks.resolve_attempts's own default (2) — zero behavior
+        # change for a project that never sets ship_retry_attempts explicitly.
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="ship_failed", ship_attempt_count=2)
+
+        with patch("gantry.ship.ship_run") as mock_ship:
+            result = advance_run(eng, run_id)
+
+        self.assertFalse(mock_ship.called)
+        self.assertEqual(result["action"], "no_auto_transition")
+
+
 class TestRepairStaleRunning(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

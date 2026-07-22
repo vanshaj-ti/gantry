@@ -390,6 +390,22 @@ class TestMatchesAny(unittest.TestCase):
     def test_no_match(self):
         self.assertFalse(_matches_any("apps/core/src/main.ts", [".env", "**/*.pem"]))
 
+    def test_double_star_matches_nested_path(self):
+        # Already-working case: fnmatch's regex conversion of "**/auth/**"
+        # requires a literal "/auth/" substring, which a nested path has.
+        self.assertTrue(_matches_any("apps/auth/x.ts", ["**/auth/**"]))
+
+    def test_double_star_matches_top_level_path(self):
+        # Previously-broken case: "auth/login.ts" has no leading "/" before
+        # "auth", so fnmatch.fnmatch("auth/login.ts", "**/auth/**") failed —
+        # the fix strips the leading "**/" and retries.
+        self.assertTrue(_matches_any("auth/login.ts", ["**/auth/**"]))
+
+    def test_double_star_general_pattern_top_level(self):
+        # Not a one-off special case for exactly "**/auth/**" — any
+        # "**/foo/**"-shaped pattern gets the same treatment.
+        self.assertTrue(_matches_any("migrations/0001_init.sql", ["**/migrations/**"]))
+
 
 class TestRunRepoChecks(unittest.TestCase):
     def setUp(self):

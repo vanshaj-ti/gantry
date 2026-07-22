@@ -28,8 +28,10 @@ from .checks import _matches_any
 from .config import AGENT_STAGES, GantryConfig
 from .e2e import run_e2e_tests
 from .engine import HEARTBEAT_INTERVAL, Engine
+from .retry import RetryPolicy
 from .review import run_review
 from .state import _iso_to_ts
+from .status import BlockedReason, FailureKind, Status
 
 logger = logging.getLogger(__name__)
 
@@ -542,8 +544,8 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
             # sets (mirrors how review_escalated is always human-gated). This
             # check runs regardless of any autonomy flag being enabled —
             # that's the whole point of the feature.
-            engine.store.update_state(run_id, status="checks_high_risk_escalated",
-                                      blocked_on="high_risk_paths")
+            engine.store.update_state(run_id, status=Status.CHECKS_HIGH_RISK_ESCALATED,
+                                      blocked_on=BlockedReason.HIGH_RISK_PATHS)
             return {"advanced": False, "from": status, "action": "checks_high_risk_escalated",
                     "high_risk_files": high_risk_files}
         # Deterministic e2e run (no LLM) between checks and the evidence stage —
@@ -552,7 +554,8 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         e2e = run_e2e_tests(engine.store, run_id, engine.cfg.e2e, engine.work_dir(run_id),
                             engine.cfg.git.base_branch)
         if not e2e["pass"]:
-            engine.store.update_state(run_id, status="blocked", blocked_on="e2e", checks="pass")
+            engine.store.update_state(run_id, status=Status.BLOCKED, blocked_on=BlockedReason.E2E,
+                                      checks="pass")
             return {"advanced": False, "from": status, "action": "e2e_failed"}
         if "evidence" not in engine.cfg.stages:
             # Project's cfg.stages skips the evidence stage entirely — jump
@@ -604,11 +607,10 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         # intervention every time, even though the underlying commit was
         # already real and a bare re-run of ship_run is safe (commit_all is
         # a no-op if nothing changed, push/create_pr are naturally
-        # idempotent-ish for a retry). Capped at the same resolve_attempts
-        # limit as the resolver escalation path — not a dedicated config
-        # knob, since ship failures are rarer and don't need their own.
+        # idempotent-ish for a retry). Capped at [git].ship_retry_attempts
+        # (own dedicated field — previously borrowed cfg.checks.resolve_attempts).
         ship_attempts = engine.store.state(run_id).get("ship_attempt_count", 0)
-        if ship_attempts >= engine.cfg.checks.resolve_attempts:
+        if RetryPolicy(max_attempts=engine.cfg.git.ship_retry_attempts).exhausted(ship_attempts):
             return {"advanced": False, "from": status, "action": "no_auto_transition"}
         engine.store.update_state(run_id, ship_attempt_count=ship_attempts + 1)
         from .ship import ship_run
@@ -620,11 +622,11 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
 
     if status == "blocked":
         blocked_on = engine.store.state(run_id).get("blocked_on")
-        if blocked_on not in ("scope", "checks", "e2e"):
+        if blocked_on not in (BlockedReason.SCOPE, BlockedReason.CHECKS, BlockedReason.E2E):
             return {"advanced": False, "from": status, "action": "no_auto_transition"}
         retry_count = engine.store.state(run_id).get("checks_retry_count", 0)
-        if retry_count >= engine.cfg.checks.retry_checks:
-            engine.store.update_state(run_id, status="checks_escalated")
+        if RetryPolicy(max_attempts=engine.cfg.checks.retry_checks).exhausted(retry_count):
+            engine.store.update_state(run_id, status=Status.CHECKS_ESCALATED)
             return {"advanced": False, "from": status, "action": "checks_escalated",
                     "retry_count": retry_count}
         detail = (_e2e_failure_detail(engine.store, run_id) if blocked_on == "e2e"
@@ -657,8 +659,8 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
         # and auto-retry kept re-running the identical broken state because
         # nothing re-verified the actual result).
         resolve_attempts = engine.store.state(run_id).get("resolve_attempt_count", 0)
-        if resolve_attempts >= engine.cfg.checks.resolve_attempts:
-            engine.store.update_state(run_id, status="resolve_escalated")
+        if RetryPolicy(max_attempts=engine.cfg.checks.resolve_attempts).exhausted(resolve_attempts):
+            engine.store.update_state(run_id, status=Status.RESOLVE_ESCALATED)
             return {"advanced": False, "from": status, "action": "resolve_escalated",
                     "resolve_attempts": resolve_attempts}
         engine.store.update_state(run_id, resolve_attempt_count=resolve_attempts + 1)
@@ -787,7 +789,7 @@ def _repair_stale_running(engine: Engine, run: dict[str, Any]) -> dict[str, Any]
     # outside gantry's control" (infra hiccup — safe to auto-retry fresh)
     # apart from a real `{stage}_failed` the agent itself reported (kept
     # human-gated, since that might be a genuine content problem).
-    engine._set_status(run["id"], f"{stage}_failed", last_failure_reason="stale_heartbeat")
+    engine._set_status(run["id"], f"{stage}_failed", last_failure_reason=FailureKind.STALE_HEARTBEAT)
     return {"run_id": run["id"], "advanced": False, "action": "repaired_stale_running",
             "was": status, "age_seconds": int(age)}
 
@@ -808,7 +810,7 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
     if repaired:
         return repaired
     if (run["status"].endswith("_failed")
-            and engine.store.state(rid).get("last_failure_reason") == "stale_heartbeat"):
+            and engine.store.state(rid).get("last_failure_reason") == FailureKind.STALE_HEARTBEAT):
         # The prior attempt didn't fail on its own merits — its subprocess got
         # killed by something outside gantry (OOM, terminal closed, machine
         # slept). Retrying fresh (no resume — there's no useful session to
@@ -824,8 +826,8 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
             # so without this check the stale-heartbeat path could retry
             # resolve forever, blowing straight past resolve_attempts.
             resolve_attempts = engine.store.state(rid).get("resolve_attempt_count", 0)
-            if resolve_attempts >= engine.cfg.checks.resolve_attempts:
-                engine.store.update_state(rid, status="resolve_escalated", last_failure_reason=None)
+            if RetryPolicy(max_attempts=engine.cfg.checks.resolve_attempts).exhausted(resolve_attempts):
+                engine.store.update_state(rid, status=Status.RESOLVE_ESCALATED, last_failure_reason=None)
                 return {"run_id": rid, "advanced": False, "action": "resolve_escalated",
                         "resolve_attempts": resolve_attempts}
         if not _acquire_lock(engine, rid):

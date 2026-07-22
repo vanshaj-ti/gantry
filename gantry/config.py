@@ -358,6 +358,13 @@ class GitConfig:
                                             # pause. Opt-in, same reasoning as auto_ship: the
                                             # agent's own spec/design output ships without a
                                             # human ever reading it first.
+    ship_retry_attempts: int = 2           # cap on ship_failed auto-retry attempts (advance.py's
+                                            # review_approved+auto_ship retry loop). Previously
+                                            # borrowed cfg.checks.resolve_attempts as its cap —
+                                            # this is its own dedicated field now; default 2
+                                            # matches that borrowed value exactly, so a project
+                                            # that never sets this explicitly sees zero behavior
+                                            # change.
 
 
 @dataclass
@@ -655,7 +662,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
         cfg.git = GitConfig(base_branch=g.get("base_branch", "main"),
                             auto_ship=bool(g.get("auto_ship", False)),
                             auto_merge=bool(g.get("auto_merge", False)),
-                            auto_approve_docs=bool(g.get("auto_approve_docs", False)))
+                            auto_approve_docs=bool(g.get("auto_approve_docs", False)),
+                            ship_retry_attempts=int(g.get("ship_retry_attempts", 2)))
     if "notify" in raw:
         n = raw["notify"]
         cfg.notify = NotifyConfig(backend=n.get("backend", "none"), webhook_url=n.get("webhook_url", ""))

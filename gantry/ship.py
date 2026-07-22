@@ -14,6 +14,7 @@ from .engine import Engine
 from .git import branch_name, commit_all, create_pr, is_conflict_shaped_failure, merge_pr, push
 from .redact import proxy_secrets, redact_secrets
 from .shipmeta import draft_ship_meta
+from .status import Status
 
 # Cap on conflict-resolver attempts per ship_run call — mirrors the bounded
 # nature of every other auto-retry loop in this codebase (checks.retry_checks,
@@ -98,7 +99,7 @@ def _run_final_gate(engine: Engine, run_id: str) -> dict[str, Any] | None:
             f"(defense-in-depth — this should never happen, see review._findings_verdict):\n"
             + "\n".join(f"  • [{f.get('severity', '?')}] {f.get('location', '')}: "
                         f"{f.get('description', '')}" for f in blocking))
-        engine.store.update_state(run_id, status="ship_checks_failed")
+        engine.store.update_state(run_id, status=Status.SHIP_CHECKS_FAILED)
         return {"ok": False, "stage": "ship_gate", "reason": "blocking_findings_survived",
                 "blocking_findings": blocking}
 
@@ -109,7 +110,7 @@ def _run_final_gate(engine: Engine, run_id: str) -> dict[str, Any] | None:
             run_id, "ship.stderr",
             f"ship blocked: final re-verification checks failed just before commit/push:\n"
             f"{_ship_checks_failure_detail(checks)}")
-        engine.store.update_state(run_id, status="ship_checks_failed")
+        engine.store.update_state(run_id, status=Status.SHIP_CHECKS_FAILED)
         return {"ok": False, "stage": "ship_gate", "reason": "checks_failed", "checks": checks}
 
     return None
@@ -182,7 +183,7 @@ def ship_run(engine: Engine, run_id: str) -> dict[str, Any]:
     if not commit_res["ok"]:
         engine.store.write_log(run_id, "ship.stderr",
                                redact_secrets(f"commit failed: {commit_res}", extra_secrets=secrets))
-        engine.store.update_state(run_id, status="ship_failed")
+        engine.store.update_state(run_id, status=Status.SHIP_FAILED)
         return {"ok": False, "stage": "commit", **commit_res}
 
     push_res = push(wt, branch, remote_branch=remote_branch)
@@ -220,13 +221,13 @@ def ship_run(engine: Engine, run_id: str) -> dict[str, Any]:
     if not push_res["ok"]:
         engine.store.write_log(run_id, "ship.stderr",
                                redact_secrets(f"push failed: {push_res}", extra_secrets=secrets))
-        engine.store.update_state(run_id, status="ship_failed")
+        engine.store.update_state(run_id, status=Status.SHIP_FAILED)
         return {"ok": False, "stage": "push", **push_res}
 
     if pr_res is None or not pr_res["ok"]:
         engine.store.write_log(run_id, "ship.stderr",
                                redact_secrets(f"create_pr failed: {pr_res}", extra_secrets=secrets))
-        engine.store.update_state(run_id, status="ship_failed", pr_url=None)
+        engine.store.update_state(run_id, status=Status.SHIP_FAILED, pr_url=None)
         return {"ok": False, "commit": commit_res, "push": push_res, "pr": pr_res,
                 "branch": remote_branch, "title": title}
 
@@ -237,10 +238,10 @@ def ship_run(engine: Engine, run_id: str) -> dict[str, Any]:
         # recoverable state (status stays "shipped", not "ship_failed"; a
         # human or a later retry can merge it manually), not the same failure
         # class as a broken commit/push/PR-creation step above.
-        engine.store.update_state(run_id, status="shipped", pr_url=pr_res.get("url"),
+        engine.store.update_state(run_id, status=Status.SHIPPED, pr_url=pr_res.get("url"),
                                   merged=merge_res["ok"])
     else:
-        engine.store.update_state(run_id, status="shipped", pr_url=pr_res.get("url"))
+        engine.store.update_state(run_id, status=Status.SHIPPED, pr_url=pr_res.get("url"))
 
     return {"ok": True, "commit": commit_res, "push": push_res, "pr": pr_res, "merge": merge_res,
             "branch": remote_branch, "title": title}

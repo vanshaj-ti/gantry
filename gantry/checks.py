@@ -21,6 +21,7 @@ from typing import Any
 
 from .config import CheckCommand, ChecksConfig, ScopeConfig, _coerce_check_command
 from .state import RunStore
+from .status import BlockedReason, Status
 
 
 def _merge_base(cwd: Path, base: str) -> str:
@@ -57,6 +58,18 @@ def _matches_any(path: str, patterns: list[str]) -> bool:
         if path == pat or path.startswith(pat.rstrip("/") + "/"):
             return True
         if fnmatch.fnmatch(path, pat):
+            return True
+        # fnmatch.fnmatch has no special "zero or more path segments" meaning
+        # for "**" — a pattern like "**/auth/**" compiles to a regex requiring
+        # a literal "/auth/" substring, so it matches a nested path like
+        # "apps/auth/x.ts" but NOT a top-level path like "auth/login.ts" (no
+        # leading "/" before "auth"). This silently under-matches for both
+        # [scope].forbid_paths and [scope].high_risk_paths. Fix generally: if
+        # the pattern starts with "**/", also try matching with that leading
+        # "**/" stripped — treating it as "zero or more segments" — so a
+        # top-level path matches too, for any "**/foo/**"-shaped pattern, not
+        # just this one reported example.
+        if pat.startswith("**/") and fnmatch.fnmatch(path, pat.removeprefix("**/")):
             return True
     return False
 
@@ -373,10 +386,10 @@ def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
         # transition — this is what makes `gantry checks --run ID` a real
         # recovery path after fixing a scope/lint/build failure, instead of
         # leaving the run permanently stuck at status=blocked.
-        store.update_state(run_id, status="build_complete", blocked_on=None, checks="pass")
+        store.update_state(run_id, status=Status.BUILD_COMPLETE, blocked_on=None, checks="pass")
     else:
-        blocked = "scope" if not scope["pass"] else "checks"
-        store.update_state(run_id, status="blocked", blocked_on=blocked, checks="fail")
+        blocked = BlockedReason.SCOPE if not scope["pass"] else BlockedReason.CHECKS
+        store.update_state(run_id, status=Status.BLOCKED, blocked_on=blocked, checks="fail")
     return out
 
 

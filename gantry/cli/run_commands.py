@@ -12,6 +12,7 @@ from ..git import remove_worktree
 from ..notify import get_notifier
 from ..review import run_review
 from ..state import RunStore, now_iso
+from ..status import Status, can_hold_or_cancel
 from ._shared import TEMPLATE_DIR, _engine, _notify, _out, _target
 
 
@@ -160,10 +161,10 @@ def cmd_mark_shipped(args) -> int:
     store = RunStore(_target())
     run_id = args.run
     state = store.state(run_id)
-    if state.get("status") in ("shipped", "shipped_manually") and not args.force:
+    if state.get("status") in (Status.SHIPPED, Status.SHIPPED_MANUALLY) and not args.force:
         return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
                     f"already marked shipped (use --force to override)"})
-    store.update_state(run_id, status="shipped_manually", shipped_at=now_iso())
+    store.update_state(run_id, status=Status.SHIPPED_MANUALLY, shipped_at=now_iso())
     return _out({"ok": True, "run_id": run_id, "status": "shipped_manually"})
 
 
@@ -201,12 +202,12 @@ def cmd_hold(args) -> int:
     run_id = args.run
     state = store.state(run_id)
     current_status = state.get("status", "")
-    if current_status == "held":
+    if current_status == Status.HELD:
         return _out({"ok": False, "error": "run is already held"})
-    if current_status.endswith("_running"):
+    if not can_hold_or_cancel(current_status):
         return _out({"ok": False, "error": f"run status is {current_status!r} — an agent stage "
                     f"is actively running; wait for it to finish before holding"})
-    store.update_state(run_id, status="held", held_from_status=current_status, held_at=now_iso())
+    store.update_state(run_id, status=Status.HELD, held_from_status=current_status, held_at=now_iso())
     return _out({"ok": True, "run_id": run_id, "status": "held", "held_from_status": current_status})
 
 
@@ -218,7 +219,7 @@ def cmd_resume_hold(args) -> int:
     store = RunStore(_target())
     run_id = args.run
     state = store.state(run_id)
-    if state.get("status") != "held":
+    if state.get("status") != Status.HELD:
         return _out({"ok": False, "error": f"run status is {state.get('status')!r}, not held"})
     restored = state.get("held_from_status", "blocked")
     store.update_state(run_id, status=restored, held_from_status=None)
@@ -233,10 +234,10 @@ def cmd_cancel(args) -> int:
     store = RunStore(_target())
     run_id = args.run
     state = store.state(run_id)
-    if state.get("status") in ("shipped", "shipped_manually") and not args.force:
+    if state.get("status") in (Status.SHIPPED, Status.SHIPPED_MANUALLY) and not args.force:
         return _out({"ok": False, "error": f"run status is {state.get('status')!r}, "
                     f"already shipped (use --force to cancel anyway)"})
-    store.update_state(run_id, status="cancelled", cancelled_at=now_iso())
+    store.update_state(run_id, status=Status.CANCELLED, cancelled_at=now_iso())
     result = {"ok": True, "run_id": run_id, "status": "cancelled"}
     if args.cleanup:
         result["worktree"] = remove_worktree(_target(), run_id)

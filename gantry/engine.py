@@ -26,6 +26,7 @@ from .git import ensure_worktree
 from .redact import proxy_secrets, redact_secrets
 from .runners import get_runner, resolve_proxy_env
 from .state import RunStore, now_iso
+from .status import Status
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ class Engine:
                 raise ValueError(f"depends_on references unknown run: {dep}")
         extra = {"tag": tag} if tag else {}
         if deps:
-            self.store.update_state(rid, status="queued", current_stage=first,
+            self.store.update_state(rid, status=Status.QUEUED, current_stage=first,
                                     title=title, depends_on=deps, **extra)
         else:
             self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first,
@@ -385,9 +386,9 @@ class Engine:
                 # stuck at "{stage}_running" forever — `gantry watch`/status then lies
                 # about a dead run still being in flight (see recovery notes in the
                 # workflow skill). Mark it failed like any other unsuccessful stage so
-                # the normal retry/escalate machinery (advance.py's "blocked"/
-                # "checks_escalated" path) can act on it instead of a human having to
-                # notice a stale lockfile and reset state by hand.
+                # the normal retry/escalate machinery (advance.py's Status.BLOCKED/
+                # Status.CHECKS_ESCALATED path) can act on it instead of a human having
+                # to notice a stale lockfile and reset state by hand.
                 self.store.write_log(run_id, f"{stage}.stderr",
                                      self._redact(f"Agent subprocess timed out after {sm.timeout}s"))
                 self._set_status(run_id, f"{stage}_failed")
@@ -582,7 +583,7 @@ class Engine:
         # one for the fix-it attempt.
         sm = self.cfg.model_for("resolve") if "resolve" in self.cfg.models else self.cfg.model_for("build")
         runner = get_runner(sm.runner or self.cfg.agent.runner)
-        self._set_status(run_id, "resolve_running", current_stage="build", heartbeat_at=now_iso())
+        self._set_status(run_id, Status.RESOLVE_RUNNING, current_stage="build", heartbeat_at=now_iso())
         stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
             proxy = self.cfg.proxy.get(runner.name)
@@ -612,9 +613,9 @@ class Engine:
         # Never trust the agent's own report — re-run real checks ourselves.
         verify = self.run_checks(run_id)
         if verify["pass"]:
-            self._set_status(run_id, "build_complete", blocked_on=None, checks="pass")
+            self._set_status(run_id, Status.BUILD_COMPLETE, blocked_on=None, checks="pass")
         else:
-            self._set_status(run_id, "checks_escalated", blocked_on=verify.get("scope") and
+            self._set_status(run_id, Status.CHECKS_ESCALATED, blocked_on=verify.get("scope") and
                              ("scope" if not verify["scope"]["pass"] else "checks"))
         return {"agent_ok": result.ok, "verified_pass": verify["pass"], "checks": verify}
 

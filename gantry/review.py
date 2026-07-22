@@ -49,6 +49,7 @@ from .config import GantryConfig
 from .redact import proxy_secrets, redact_secrets
 from .runners import get_runner, resolve_proxy_env
 from .state import RunStore
+from .status import Status
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +546,7 @@ def _run_review_two_axis(store: RunStore, run_id: str, cfg: GantryConfig, cwd: P
     """cfg.review.two_axis == True path (the default). See module docstring."""
     base = cfg.git.base_branch
 
-    store.update_state(run_id, status="review_running", current_stage="review")
+    store.update_state(run_id, status=Status.REVIEW_RUNNING, current_stage="review")
     _report_herdr(cfg, run_id, "review_running")
 
     high_risk_files = _high_risk_files_for(store, run_id)
@@ -586,8 +587,8 @@ def _run_review_two_axis(store: RunStore, run_id: str, cfg: GantryConfig, cwd: P
     }
     store.write_result(run_id, "review-result.json", out)
 
-    status = {"APPROVE": "review_approved", "REQUEST_CHANGES": "review_changes_requested",
-              "ESCALATE": "review_escalated"}[combined_verdict]
+    status = {"APPROVE": Status.REVIEW_APPROVED, "REQUEST_CHANGES": Status.REVIEW_CHANGES_REQUESTED,
+              "ESCALATE": Status.REVIEW_ESCALATED}[combined_verdict]
     store.update_state(run_id, status=status, review_verdict=combined_verdict)
     _report_herdr(cfg, run_id, status)
 
@@ -620,7 +621,7 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     # showing the run's prior status (e.g. "evidence_complete") for the
     # entire review duration, then jumped straight to the final verdict
     # with no visible "in progress" state at all.
-    store.update_state(run_id, status="review_running", current_stage="review")
+    store.update_state(run_id, status=Status.REVIEW_RUNNING, current_stage="review")
     _report_herdr(cfg, run_id, "review_running")
     runner = get_runner(cfg.review.runner)
 
@@ -676,8 +677,8 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
            "session_id": result.session_id, "result": str(text)[:8000]}
     store.write_result(run_id, "review-result.json", out)
 
-    status = {"APPROVE": "review_approved", "REQUEST_CHANGES": "review_changes_requested",
-              "ESCALATE": "review_escalated"}[verdict]
+    status = {"APPROVE": Status.REVIEW_APPROVED, "REQUEST_CHANGES": Status.REVIEW_CHANGES_REQUESTED,
+              "ESCALATE": Status.REVIEW_ESCALATED}[verdict]
     store.update_state(run_id, status=status, review_verdict=verdict)
     _report_herdr(cfg, run_id, status)
     if verdict == "REQUEST_CHANGES":

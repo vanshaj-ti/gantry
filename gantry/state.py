@@ -51,9 +51,10 @@ class RunStore:
         return f"{ts}-{slugify(title)}"
 
     def create(self, run_id: str, title: str) -> Path:
+        from .status import Status
         d = self.run_dir(run_id)
         (d / "logs").mkdir(parents=True, exist_ok=True)
-        self.update_state(run_id, status="created", current_stage="created", title=title)
+        self.update_state(run_id, status=Status.CREATED, current_stage="created", title=title)
         return d
 
     def exists(self, run_id: str) -> bool:
@@ -76,6 +77,22 @@ class RunStore:
     def update_state(self, run_id: str, **updates: Any) -> dict[str, Any]:
         path = self.run_dir(run_id) / "state.json"
         st = self._load(path, {}) or {}
+        if "status" in updates:
+            from .status import validate_transition
+            current_status = st.get("status")
+            # Which side field is relevant depends on which dimension the
+            # CURRENT status actually encodes: "blocked"'s second dimension
+            # is blocked_on; a "{stage}_failed" status's second dimension is
+            # last_failure_reason. Resolve whichever applies from this same
+            # call's updates, falling back to the currently-stored value if
+            # this call doesn't touch that field.
+            if current_status == "blocked":
+                side_field = updates.get("blocked_on", st.get("blocked_on"))
+            elif isinstance(current_status, str) and current_status.endswith("_failed"):
+                side_field = updates.get("last_failure_reason", st.get("last_failure_reason"))
+            else:
+                side_field = None
+            validate_transition(current_status, updates["status"], side_field)
         st.update(updates)
         st["updated_at"] = now_iso()
         self._write(path, st)
