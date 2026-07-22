@@ -403,9 +403,26 @@ class Engine:
         from .cost import accumulate as _accumulate_cost
         _accumulate_cost(self.store, run_id, stage, result.usage,
                          runner=runner.name, session_id=result.session_id)
-        status = f"{stage}_complete" if result.ok else f"{stage}_failed"
+        ok = result.ok
+        if stage == "spec" and ok:
+            # Deterministic structural gate — no LLM call — that the spec
+            # stage's own acceptance-criteria.json companion artifact
+            # actually exists and is well-formed, before letting the run
+            # reach spec_complete (a human-review gate downstream trusts that
+            # status to mean "the spec stage really finished its job").
+            # Scoped to spec only; design/plan/build/evidence have no
+            # equivalent structural gate here.
+            from .checks import check_spec_artifacts
+            gate = check_spec_artifacts(self.store, run_id)
+            self.store.write_result(run_id, "spec-gate.json", gate)
+            if not gate["pass"]:
+                ok = False
+                self.store.write_log(
+                    run_id, "spec-gate.stderr",
+                    self._redact(f"Spec stage structural gate failed: {gate['reason']}"))
+        status = f"{stage}_complete" if ok else f"{stage}_failed"
         self._set_status(run_id, status)
-        return {"stage": stage, "ok": result.ok, "session_id": result.session_id}
+        return {"stage": stage, "ok": ok, "session_id": result.session_id}
 
     def run_resolver_stage(self, run_id: str) -> dict[str, Any]:
         """Spawn a dedicated fix-it agent when the normal build/checks retry

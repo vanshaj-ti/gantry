@@ -31,5 +31,22 @@ Required design sections:
 6. Risks and trade-offs
 7. Open questions, if any
 
+In addition to the prose design above, also write (best-effort, optional)
+`.agent-runs/{RUN_ID}/decision-log.json` capturing each significant decision
+from section 5 as structured data:
+
+```json
+{
+  "decisions": [
+    {"decision": "...", "rationale": "...", "alternatives_considered": ["..."]}
+  ]
+}
+```
+
+One entry per significant architectural decision — `decision` is what was
+chosen, `rationale` is why, `alternatives_considered` lists the options that
+were rejected. This file is not gate-checked; write it as a structured
+companion to the prose "Alternatives considered" section.
+
 This stage produces a human-review gate by default (`gantry approve --stage design`
 sends it to plan; `gantry revise --stage design` sends it back with comments).

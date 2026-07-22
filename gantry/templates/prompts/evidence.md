@@ -18,7 +18,13 @@ Input files for this stage live in `.agent-runs/{RUN_ID}/`:
 - `architecture-design.md` if present
 - `implementation-plan.md`
 - `build-summary.md`
+- `acceptance-criteria.json` if present
 - optional `answers/evidence.md` if this is a resumed run
+
+If `acceptance-criteria.json` is present, read it and explicitly address EVERY
+`AC-N` id it lists in your report — for each one, state confirmed /
+not-confirmed / partial, with your reasoning, instead of pure free-form
+prose. Don't skip an id and don't invent ids that aren't in the file.
 
 Do not silently patch large implementation issues. If evidence shows the build is
 wrong, write that clearly and FAIL the evidence report.

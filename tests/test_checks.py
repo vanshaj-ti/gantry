@@ -2,12 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import json
+
 from gantry.checks import (
     _allowed_paths,
     _extract_code_spans,
     _matches_any,
     _scope_additions_section,
     _strip_fenced_code_blocks,
+    check_spec_artifacts,
     run_repo_checks,
     run_scope_guard,
 )
@@ -164,6 +167,110 @@ class TestAllowedPaths(unittest.TestCase):
             "# Build summary\n\nDid the plan, nothing extra.\n")
         allowed = _allowed_paths(self.store, self.run_id)
         self.assertEqual(allowed, ["src/planned.ts"])
+
+    def test_valid_allowed_files_json_used_instead_of_plan_prose(self):
+        # Prose is malformed/different on purpose — if allowed-files.json is
+        # honored, the prose must never even be consulted.
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "This prose mentions no backtick paths at all, and even if it did "
+            "they'd be irrelevant here.\n")
+        self.store.write_result(self.run_id, "allowed-files.json", {
+            "allowed_globs": ["src/json_declared.ts", "docs/**/*.md"],
+            "notes": {"src/json_declared.ts": "structured scope"},
+        })
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/json_declared.ts", "docs/**/*.md"])
+
+    def test_missing_allowed_files_json_falls_back_to_prose(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/planned.ts"])
+
+    def test_malformed_allowed_files_json_falls_back_to_prose(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        # Not valid JSON at all.
+        path = self.store.run_dir(self.run_id) / "allowed-files.json"
+        path.write_text("not json{{{")
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/planned.ts"])
+
+    def test_allowed_files_json_missing_key_falls_back_to_prose(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self.store.write_result(self.run_id, "allowed-files.json", {"notes": {}})
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/planned.ts"])
+
+    def test_allowed_files_json_empty_list_falls_back_to_prose(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "Touch `src/planned.ts`.\n")
+        self.store.write_result(self.run_id, "allowed-files.json", {"allowed_globs": []})
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertEqual(allowed, ["src/planned.ts"])
+
+    def test_valid_allowed_files_json_still_unions_build_declared_additions(self):
+        self.store.artifact_path(self.run_id, "implementation-plan.md").write_text(
+            "irrelevant prose\n")
+        self.store.write_result(self.run_id, "allowed-files.json", {
+            "allowed_globs": ["src/json_declared.ts"],
+        })
+        self.store.artifact_path(self.run_id, "build-summary.md").write_text(
+            "# Build summary\n\n## Scope additions\n\n"
+            "- `src/discovered.ts` — needed by new fixture\n")
+        allowed = _allowed_paths(self.store, self.run_id)
+        self.assertIn("src/json_declared.ts", allowed)
+        self.assertIn("src/discovered.ts", allowed)
+
+
+class TestCheckSpecArtifacts(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = RunStore(Path(self._tmp.name))
+        self.run_id = self.store.create("test-run", "Test run")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_file_fails(self):
+        result = check_spec_artifacts(self.store, self.run_id)
+        self.assertFalse(result["pass"])
+        self.assertIn("missing", result["reason"])
+
+    def test_invalid_json_fails(self):
+        self.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
+            "not valid json {{{")
+        result = check_spec_artifacts(self.store, self.run_id)
+        self.assertFalse(result["pass"])
+
+    def test_not_a_json_object_fails(self):
+        self.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
+            json.dumps(["AC-1"]))
+        result = check_spec_artifacts(self.store, self.run_id)
+        self.assertFalse(result["pass"])
+
+    def test_missing_criteria_key_fails(self):
+        self.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
+            json.dumps({"not_criteria": []}))
+        result = check_spec_artifacts(self.store, self.run_id)
+        self.assertFalse(result["pass"])
+
+    def test_empty_criteria_list_fails(self):
+        self.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
+            json.dumps({"criteria": []}))
+        result = check_spec_artifacts(self.store, self.run_id)
+        self.assertFalse(result["pass"])
+
+    def test_valid_criteria_passes(self):
+        self.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
+            json.dumps({"criteria": [
+                {"id": "AC-1", "text": "Does the thing", "verifiable_by": "test"},
+                {"id": "AC-2", "text": "Doesn't break the other thing", "verifiable_by": "manual"},
+            ]}))
+        result = check_spec_artifacts(self.store, self.run_id)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["criteria_count"], 2)
 
 
 class TestRunScopeGuardModes(unittest.TestCase):

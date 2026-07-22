@@ -12,6 +12,7 @@ Semantic/architectural judgment is NOT here — that's the LLM review stage.
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -171,10 +172,45 @@ def _scope_additions_section(build_summary: str) -> str:
     return rest[:next_heading.start()] if next_heading else rest
 
 
+def _base_allowed_paths(store: RunStore, run_id: str) -> list[str]:
+    """The plan stage's declared scope, BEFORE unioning build-declared
+    additions: `allowed-files.json` (structured, written by the plan prompt)
+    if it exists and parses with a non-empty `allowed_globs` list, else the
+    same backtick-quoted-paths scrape of `implementation-plan.md` prose used
+    before this file existed.
+
+    Fully backward compatible by construction: a project whose plan.md
+    template/agent doesn't yet write allowed-files.json never has the file at
+    all, so `read_result` returns `{}`, `allowed_globs` is missing, and this
+    falls straight through to the exact prose-scrape call that ran before
+    this function existed. A malformed file (not a dict, empty list, wrong
+    type) is treated the same as an absent one — fail open to the
+    known-good prose path rather than either blocking everything (empty
+    allowlist) or silently allowing everything (empty allowlist is also
+    falsy, which run_scope_guard already treats as "scope check off" via its
+    `if allowed:` guard) with no scope enforcement at all."""
+    try:
+        result = store.read_result(run_id, "allowed-files.json")
+    except (ValueError, OSError):
+        # store.read_result/_load does a bare json.loads with no error
+        # handling of its own — a malformed allowed-files.json (invalid
+        # JSON) must fall back to the prose path here, not propagate and
+        # blow up plan-stage scope checking for the whole run.
+        result = None
+    if isinstance(result, dict):
+        globs = result.get("allowed_globs")
+        if isinstance(globs, list) and globs:
+            return [g for g in globs if isinstance(g, str)]
+    plan = store.read_artifact(run_id, "implementation-plan.md")
+    return _paths_from_text(plan) if plan else []
+
+
 def _allowed_paths(store: RunStore, run_id: str) -> list[str]:
-    """Declared scope: backtick-quoted paths from the implementation plan,
-    UNION any paths the build stage declared under a "## Scope additions"
-    section in build-summary.md. Project-agnostic: no hardcoded allowlist.
+    """Declared scope: `allowed-files.json` if present and valid, else
+    backtick-quoted paths from the implementation plan prose (see
+    `_base_allowed_paths`) — UNION any paths the build stage declared under a
+    "## Scope additions" section in build-summary.md. Project-agnostic: no
+    hardcoded allowlist.
 
     The plan is written once before build starts, so it can never anticipate
     a file the build agent only discovers it needs mid-implementation (e.g. a
@@ -183,8 +219,7 @@ def _allowed_paths(store: RunStore, run_id: str) -> list[str]:
     section with a one-line reason; unioning it into the allowlist here means
     a build that's honest about scope drift doesn't get penalized for it —
     only genuinely undeclared/unexplained new files still trip the guard."""
-    plan = store.read_artifact(run_id, "implementation-plan.md")
-    allowed = _paths_from_text(plan) if plan else []
+    allowed = _base_allowed_paths(store, run_id)
     build_summary = store.read_artifact(run_id, "build-summary.md")
     if build_summary:
         additions = _scope_additions_section(build_summary)
@@ -299,3 +334,29 @@ def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
         blocked = "scope" if not scope["pass"] else "checks"
         store.update_state(run_id, status="blocked", blocked_on=blocked, checks="fail")
     return out
+
+
+def check_spec_artifacts(store: RunStore, run_id: str) -> dict[str, Any]:
+    """Structural (deterministic, no LLM call) gate check for the spec stage
+    only: does `.agent-runs/{run_id}/acceptance-criteria.json` exist, parse as
+    valid JSON, and have `criteria` as a non-empty list?
+
+    This is intentionally narrow — it does not judge whether the criteria are
+    GOOD, just that the spec stage actually produced the structured artifact
+    the spec.md prompt template now asks for, so a spec that silently skips
+    the JSON companion (or writes it malformed) doesn't sail through to
+    `spec_complete` unnoticed. Scoped to the spec stage only; design/plan/
+    build/evidence have no equivalent structural gate here."""
+    raw = store.read_artifact(run_id, "acceptance-criteria.json")
+    if raw is None:
+        return {"pass": False, "reason": "acceptance-criteria.json is missing"}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {"pass": False, "reason": f"acceptance-criteria.json is not valid JSON: {exc}"}
+    if not isinstance(data, dict):
+        return {"pass": False, "reason": "acceptance-criteria.json must be a JSON object"}
+    criteria = data.get("criteria")
+    if not isinstance(criteria, list) or not criteria:
+        return {"pass": False, "reason": "acceptance-criteria.json's \"criteria\" must be a non-empty list"}
+    return {"pass": True, "criteria_count": len(criteria)}

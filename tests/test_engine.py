@@ -89,6 +89,43 @@ class TestRunAgentStage(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.eng.run_agent_stage("does-not-exist", "plan")
 
+    def test_spec_stage_with_valid_acceptance_criteria_reaches_complete(self):
+        self.eng.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
+            '{"criteria": [{"id": "AC-1", "text": "does the thing", '
+            '"verifiable_by": "test"}]}')
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": "done"},
+            stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            res = self.eng.run_agent_stage(self.run_id, "spec")
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "spec_complete")
+        gate = self.eng.store.read_result(self.run_id, "spec-gate.json")
+        self.assertTrue(gate["pass"])
+
+    def test_spec_stage_missing_acceptance_criteria_fails_gate(self):
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": "done"},
+            stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            res = self.eng.run_agent_stage(self.run_id, "spec")
+        self.assertFalse(res["ok"])
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "spec_failed")
+        gate = self.eng.store.read_result(self.run_id, "spec-gate.json")
+        self.assertFalse(gate["pass"])
+
+    def test_spec_gate_does_not_apply_to_other_stages(self):
+        # No acceptance-criteria.json exists at all — a non-spec agent stage
+        # must still reach *_complete normally, since the structural gate is
+        # scoped to spec only.
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": "done"},
+            stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            res = self.eng.run_agent_stage(self.run_id, "plan")
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "plan_complete")
+
     def test_heartbeat_set_at_stage_start(self):
         fake = _FakeRunner(result=RunnerResult(
             ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr=""))

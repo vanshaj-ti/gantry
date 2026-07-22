@@ -213,6 +213,19 @@ def _checks_failure_detail(store: Any, run_id: str) -> str:
     return "Checks failed."
 
 
+def _spec_gate_failure_detail(store: Any, run_id: str) -> str:
+    """Same purpose as _checks_failure_detail, for the spec stage's
+    deterministic structural gate (spec-gate.json, written by
+    Engine.run_agent_stage when stage == "spec") — surfaces the concrete
+    reason acceptance-criteria.json failed the gate instead of a bare
+    'stage errored'. Returns "" (no detail available) if the run never
+    reached the gate check at all (e.g. the agent itself errored first)."""
+    gate = store.read_result(run_id, "spec-gate.json")
+    if not gate or gate.get("pass"):
+        return ""
+    return f"Structural gate failed: {gate.get('reason', 'acceptance-criteria.json invalid')}"
+
+
 def _e2e_failure_detail(store: Any, run_id: str) -> str:
     """Same purpose as _checks_failure_detail, for the deterministic e2e step
     (e2e-report.json) — surfaces which app/spec failed, not just 'e2e failed'."""
@@ -309,9 +322,11 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                     f"Ran out of turns before finishing the *{stage}* stage.\n\n"
                     f"*Reply 1* to retry the same stage.\n"
                     f"*Reply 2* to leave it — you'll check the logs yourself later.")
+        gate_detail = _spec_gate_failure_detail(store, run_id) if stage == "spec" else ""
+        gate_note = f"\n{_escape_md(gate_detail)}\n" if gate_detail else ""
         return (f"{header}\n\n"
                 f"Stage errored (`{subtype or 'unknown'}`).\n"
-                f"{_escape_md(agent_text)}\n\n"
+                f"{_escape_md(agent_text)}\n{gate_note}\n"
                 f"*Reply 1* to retry.\n"
                 f"*Reply 2* to leave it — you'll check the logs yourself later.")
 

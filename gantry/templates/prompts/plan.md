@@ -32,3 +32,20 @@ Required plan sections:
 7. Evidence requirements
 8. Rollback / safety notes
 9. Open questions, if any
+
+In addition to the prose "Allowed files" section above, also write
+`.agent-runs/{RUN_ID}/allowed-files.json` with the same paths as a structured
+glob list:
+
+```json
+{
+  "allowed_globs": ["path/or/glob", "..."],
+  "notes": {"path": "why"}
+}
+```
+
+`allowed_globs` must be non-empty and cover every path/glob you listed in the
+prose section above (the scope guard reads this file directly instead of
+scraping the prose backticks when it's present). `notes` is optional —
+a short one-line reason per path/glob, keyed by the same string used in
+`allowed_globs`.
