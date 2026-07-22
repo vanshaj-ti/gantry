@@ -1,39 +1,31 @@
-# Pivot decision needed: standalone CLI vs. agent-skills integration
+# Decision: standalone CLI, not a plugin pivot
 
-**Status:** undecided — flagged here, not resolved.
+**Status:** resolved — 2026-07-21.
 
-## Background
+**Supersedes:** the "pivot decision needed" framing this file previously
+held, and the recommendation in
+`docs/research/2026-07-06-tool-ecosystem-triage.md`.
 
-`docs/research/2026-07-06-tool-ecosystem-triage.md` is a self-authored
-competitive analysis concluding that the "agent-skills" ecosystem has won
-distribution, and that Gantry's core insights — deterministic stage gates,
-repo-owned lint/build checks as the source of truth, an independent LLM as
-final reviewer — should survive but be re-delivered differently:
+## Decision
 
-- **Short term:** ship as a Claude Code plugin that augments agent-skills,
-  rather than compete as a standalone CLI.
-- **Medium term:** a standalone skill usable by other agent runners
-  (Cursor, Codex), not just Claude Code.
-- **Long term:** narrow the CLI itself into a multi-repo / multi-agent
-  orchestration layer, rather than a single-agent stage driver.
+Gantry stays a standalone CLI. No pivot to a Claude Code plugin, short or
+long term. The engine keeps expanding its own command surface (`gantry
+setup`, spec/design stage execution, autonomy toggles) rather than
+re-delivering its stage-gate/checks/independent-review model through
+agent-skills.
 
-The doc frames this as urgent ("the window to pivot is now").
+## Why
 
-## Why this doc exists
+Gantry's core value — deterministic stage gates, repo-owned checks as the
+source of truth, an independent LLM as final reviewer, pluggable runners
+(claude-code, cursor-cli, codex-cli) — is orchestration logic that outlives
+any single agent tool's plugin surface. Continued CLI investment since
+2026-07-06 (Docker isolation, multi-target daemon, per-project containers)
+already assumes and depends on the standalone-CLI shape; re-platforming onto
+a plugin model would discard that work for a distribution bet, not a
+technical one.
 
-No tracking issue or ADR exists for this recommendation anywhere else in the
-repo (checked: no reference in code, commit messages, or other docs). Every
-`cli.py` feature landed since 2026-07-06 has continued building on the
-standalone-CLI assumption the triage doc argues against. That's a real risk:
-each new command/feature surface added to `gantry/cli/` is more to migrate
-or discard if the pivot recommendation is later accepted.
+## Re-check
 
-This doc does not make the call — that's a product decision for the
-maintainer, not something to resolve silently via code changes. It exists so
-the open question is visible instead of buried in `docs/research/`.
-
-## Next step
-
-Once decided, replace this doc with a dated decision record stating the
-actual choice (accept and pivot / reject and continue as standalone CLI /
-explicitly defer with a re-check date), and link it from here.
+No fixed re-check date — revisit only if plugin distribution becomes a
+concrete blocker (e.g. installs stall on the CLI path specifically).
