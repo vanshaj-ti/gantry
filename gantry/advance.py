@@ -74,6 +74,7 @@ STATUS_LABELS = {
     "shipped": "Shipped — PR open",
     "shipped_manually": "Shipped (manual) — PR open",
     "ship_failed": "Ship FAILED — push/PR error",
+    "ship_checks_failed": "Ship BLOCKED — re-verification found a real problem",
     "held": "Held — human working on this run manually",
     "cancelled": "Cancelled",
 }
@@ -118,6 +119,7 @@ SHORT_STATUS_LABELS = {
     "shipped": "Shipped",
     "shipped_manually": "Shipped (manual)",
     "ship_failed": "Ship failed",
+    "ship_checks_failed": "Ship blocked",
     "held": "Held",
     "cancelled": "Cancelled",
 }
@@ -144,6 +146,13 @@ _STATUS_ICON = {
     "shipped": "\U0001f680",           # 🚀
     "shipped_manually": "\U0001f680",  # 🚀
     "ship_failed": "⚠️",            # ⚠️
+    "ship_checks_failed": "\U0001f6a8",  # 🚨 same "stop and look" family as
+                                           # checks_high_risk_escalated: never a
+                                           # mechanical push/PR error, means a
+                                           # fresh re-check (or a surviving
+                                           # blocking review finding) failed
+                                           # right before commit/push - always
+                                           # human-gated, never auto-resumed.
     "held": "\U0001f91a",              # 🤚
     "cancelled": "\U0001f6ab",         # 🚫
 }
@@ -220,6 +229,36 @@ def _checks_failure_detail(store: Any, run_id: str) -> str:
     if failing:
         return "Failing command(s):\n" + "\n".join(f"  • `{c}`" for c in failing)
     return "Checks failed."
+
+
+def _ship_checks_failure_detail(store: Any, run_id: str,
+                                blocking_findings: list[dict[str, Any]] | None = None) -> str:
+    """Mirrors `_checks_failure_detail`'s pattern for `ship_checks_failed` —
+    ship.py's own re-verification gate, distinct from the normal build/checks
+    failure loop this run may have already passed through earlier. Two
+    possible causes, surfaced separately since they're diagnostically very
+    different:
+
+      1. A fresh `run_checks` call at ship time failed (the code regressed,
+         or drifted, between review_approved and ship — e.g. a sibling run's
+         merge introduced a real conflict/regression). Reuses
+         `_checks_failure_detail`'s own formatting for this case so a human
+         reading either notification sees the same failure shape.
+      2. A `blocking` finding survived to ship time despite REQUEST_CHANGES
+         already gating on blocking findings earlier in the pipeline (Task 2's
+         defense-in-depth check in ship.py) — `blocking_findings` is passed
+         when this is the actual trigger, and takes precedence in the message
+         since it means something more surprising happened (a review/ship
+         handoff bug, not just an ordinary regression)."""
+    if blocking_findings:
+        lines = "\n".join(
+            f"  • [{f.get('severity', '?')}] {f.get('location', '')}: {f.get('description', '')}"
+            for f in blocking_findings[:8]
+        )
+        return (f"A `blocking` review finding survived to ship time (this should never happen — "
+                f"REQUEST_CHANGES already gates on blocking findings earlier in the pipeline; "
+                f"this is defense-in-depth catching a review→ship handoff bug):\n{lines}")
+    return _checks_failure_detail(store, run_id)
 
 
 def _spec_gate_failure_detail(store: Any, run_id: str) -> str:
@@ -351,6 +390,18 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                 f"*Blocked on:* {blocked_on} (auto-retry attempt {retry_count})\n"
                 f"{detail}\n\n"
                 f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere).\n"
+                f"*Reply 2* with guidance to send it back for a rebuild.")
+
+    if status == "ship_checks_failed":
+        ship_result = store.read_result(run_id, "ship-checks-result.json") or {}
+        detail = _ship_checks_failure_detail(store, run_id,
+                                             blocking_findings=ship_result.get("blocking_findings"))
+        return (f"{header}\n\n"
+                f"{detail}\n\n"
+                f"This always requires a human decision, regardless of auto_ship — a ship-time "
+                f"re-verification found a real problem, not a push/PR mechanics error.\n\n"
+                f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere) "
+                f"and re-attempt ship.\n"
                 f"*Reply 2* with guidance to send it back for a rebuild.")
 
     if status == "checks_high_risk_escalated":

@@ -424,38 +424,20 @@ class Engine:
         self._set_status(run_id, status)
         return {"stage": stage, "ok": ok, "session_id": result.session_id}
 
-    def run_resolver_stage(self, run_id: str) -> dict[str, Any]:
-        """Spawn a dedicated fix-it agent when the normal build/checks retry
-        loop has been exhausted (checks_escalated) — instead of dead-ending
-        at a human, gated behind cfg.checks.auto_resolve.
-
-        Deliberately does NOT trust the resolver agent's own claim of
-        success — that's exactly the failure mode that motivated this: a
-        resumed build agent reported build_complete while a real, unresolved
-        git merge-conflict marker was still committed in the file, and the
-        auto-retry loop kept re-running the identical broken state three
-        times because nothing re-verified the actual result. This method
-        re-runs real checks itself (self.run_checks) after the resolver
-        agent finishes, and the caller (advance.py) decides success based on
-        THAT, never on the agent's stdout/self-report.
-
-        Builds its own prompt (not render_prompt/a stage template) because
-        the resolver's context is fundamentally different from build/plan/
-        evidence: it needs the concrete, current failure detail (not a spec
-        to implement), explicit instructions to actually run the repo's own
-        checks commands itself before finishing, and a hard requirement to
-        never claim success without that verification.
-        """
+    def _resolver_checks_prompt(self, run_id: str, wt: Path) -> str:
+        """Prompt-building for the ORIGINAL resolver purpose: checks_escalated
+        after the normal build/checks auto-retry loop exhausted itself.
+        Unchanged behavior from before `run_resolver_stage` gained a
+        `failure_kind` parameter — see `run_resolver_stage`'s docstring."""
         from .advance import _checks_failure_detail
         detail = _checks_failure_detail(self.store, run_id)
-        wt = self.work_dir(run_id)
         import subprocess as _subprocess
         diff_stat = _subprocess.run(["git", "diff", "--stat", "HEAD"], cwd=str(wt),
                                     capture_output=True, text=True, timeout=30).stdout
         status = _subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
                                  capture_output=True, text=True, timeout=30).stdout
         commands_list = "\n".join(f"  {c}" for c in self.cfg.checks.commands)
-        prompt = (
+        return (
             f"# Resolver stage — checks were escalated after exhausting normal auto-retry\n\n"
             f"Run: {run_id}\n\n"
             f"This run's build/checks/rebuild loop failed repeatedly on the SAME issue and "
@@ -479,6 +461,116 @@ class Engine:
             f"what you found — do not claim a fix that isn't real. A false claim of success "
             f"here wastes the retry budget and is worse than an honest 'I could not fix this.'\n"
         )
+
+    def _resolver_conflict_prompt(self, run_id: str, wt: Path, conflict_output: str) -> str:
+        """Prompt-building for the NEW conflict-shaped-ship-failure purpose
+        (ship.py's push/create_pr hit a real conflict/diverged-branches
+        condition — see git.is_conflict_shaped_failure). Framed around
+        resolving BY INTENT, not blind ours/theirs: feeds the run's own
+        planning artifacts (what this run was actually trying to achieve) so
+        the resolver can trace each conflicting side back to its rationale,
+        same principle as mattpocock-skills:resolving-merge-conflicts —
+        preserve both intents where compatible, pick the side matching this
+        run's stated goal where genuinely incompatible (and say so
+        explicitly), NEVER blind ours/theirs, NEVER leave the merge/rebase
+        aborted or half-finished."""
+        import subprocess as _subprocess
+        diff_stat = _subprocess.run(["git", "diff", "--stat", "HEAD"], cwd=str(wt),
+                                    capture_output=True, text=True, timeout=30).stdout
+        status = _subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
+                                 capture_output=True, text=True, timeout=30).stdout
+        intake = self.store.read_artifact(run_id, "intake.md") or "<missing>"
+        product_spec = self.store.read_artifact(run_id, "product-spec.md") or "<missing>"
+        build_summary = self.store.read_artifact(run_id, "build-summary.md") or "<missing>"
+        return (
+            f"# Resolver stage — ship-time push/PR failure looked conflict-shaped\n\n"
+            f"Run: {run_id}\n\n"
+            f"This run's changes are already built, tested, and independently reviewed "
+            f"(APPROVE). At ship time, pushing/opening the PR failed with output that looks "
+            f"like a real content conflict or diverged-branches condition — most likely "
+            f"another run's branch shipped and moved the base branch out from under this "
+            f"one's own branch. You are being invoked to resolve this BY INTENT, not by "
+            f"blindly discarding either side.\n\n"
+            f"## Captured push/create_pr output (the actual conflict signal)\n"
+            f"```\n{conflict_output[:8000]}\n```\n\n"
+            f"## Current git status (uncommitted changes, if any)\n```\n{status or '(clean)'}\n```\n\n"
+            f"## Current diff stat vs HEAD\n```\n{diff_stat or '(no diff)'}\n```\n\n"
+            f"## This run's own intent (what THIS side of the conflict was trying to achieve)\n"
+            f"### intake.md\n{intake[:4000]}\n\n"
+            f"### product-spec.md\n{product_spec[:4000]}\n\n"
+            f"### build-summary.md\n{build_summary[:4000]}\n\n"
+            f"## Requirements — resolve by intent, never blind ours/theirs\n"
+            f"1. If this repo is mid-merge/mid-rebase (check `git status` above for "
+            f"conflict markers / an in-progress merge or rebase), first understand what "
+            f"each side of every conflicting hunk was actually trying to do — read the "
+            f"actual conflicting hunks, not just this run's own artifacts above; the OTHER "
+            f"side's intent has to be inferred from its own commit(s)/diff, since you don't "
+            f"have its planning artifacts here.\n"
+            f"2. Preserve both intents where they are genuinely compatible (e.g. two "
+            f"additions to different parts of the same function, or complementary changes "
+            f"to the same file).\n"
+            f"3. Where the two sides are genuinely incompatible, prefer the side that "
+            f"matches THIS run's stated goal above (that's what this ship is actually "
+            f"trying to land) — but say so EXPLICITLY in your summary: state which side you "
+            f"kept, which you dropped, and why, so a human reviewing this later can see the "
+            f"tradeoff was a deliberate decision, not an accident.\n"
+            f"4. NEVER use `git checkout --ours`/`--theirs` (or the merge/rebase equivalent) "
+            f"as a blanket resolution — that's exactly the blind-discard failure mode this "
+            f"stage exists to avoid. Resolve conflict markers by hand, hunk by hunk, with "
+            f"the intent above in mind.\n"
+            f"5. NEVER leave the merge/rebase aborted or half-finished — finish it: resolve "
+            f"every conflict, then commit (or continue the rebase) so the worktree ends in a "
+            f"clean, mergeable state ready to push again.\n"
+            f"6. If you cannot determine a safe resolution, say so explicitly and describe "
+            f"exactly what remains unresolved — do not claim success without an actually "
+            f"clean git state.\n"
+        )
+
+    def run_resolver_stage(self, run_id: str, failure_kind: str = "checks",
+                           conflict_output: str = "") -> dict[str, Any]:
+        """Spawn a dedicated fix-it agent for one of two failure contexts,
+        selected by `failure_kind`:
+
+          - "checks" (default, original/only behavior before this parameter
+            existed): the normal build/checks retry loop has been exhausted
+            (checks_escalated) — gated behind cfg.checks.auto_resolve. After
+            the agent finishes, re-runs real checks (self.run_checks) and
+            sets this run's status itself: build_complete on a real pass,
+            checks_escalated again on a real (still-)failure. Callers
+            (advance.py) read that status back; this is the ONLY failure_kind
+            that mutates run status here.
+
+          - "conflict": ship.py's push/create_pr hit a conflict-shaped
+            failure (see git.is_conflict_shaped_failure) — resolve by intent
+            (see `_resolver_conflict_prompt`), never blind ours/theirs, never
+            leave the merge/rebase aborted. Does NOT run checks or set any
+            run status itself — ship.py owns re-attempting push/create_pr
+            and deciding the outcome from THAT (same "never trust the
+            resolver's own claim, re-verify for real" discipline as the
+            checks path, just applied to a different verification action).
+
+        Deliberately does NOT trust the resolver agent's own claim of success
+        in either mode — that's exactly the failure mode that motivated this
+        stage originally: a resumed build agent reported build_complete while
+        a real, unresolved git merge-conflict marker was still committed in
+        the file, and the auto-retry loop kept re-running the identical
+        broken state three times because nothing re-verified the actual
+        result.
+
+        Builds its own prompt (not render_prompt/a stage template) because
+        the resolver's context is fundamentally different from build/plan/
+        evidence: it needs the concrete, current failure detail (not a spec
+        to implement), explicit instructions to actually verify the fix
+        itself before finishing, and a hard requirement to never claim
+        success without that verification.
+        """
+        if failure_kind not in ("checks", "conflict"):
+            raise ValueError(f"run_resolver_stage: unknown failure_kind {failure_kind!r}")
+        wt = self.work_dir(run_id)
+        if failure_kind == "conflict":
+            prompt = self._resolver_conflict_prompt(run_id, wt, conflict_output)
+        else:
+            prompt = self._resolver_checks_prompt(run_id, wt)
         self.store.write_log(run_id, "resolve-prompt.md", prompt)
         # Uses [models.resolve] if the project configures it, else falls back
         # to [models.build]'s model/runner (model_for's own default behavior
@@ -510,6 +602,13 @@ class Engine:
         _accumulate_cost(self.store, run_id, "resolve", result.usage,
                          runner=runner.name, session_id=result.session_id)
 
+        if failure_kind == "conflict":
+            # ship.py owns re-verification here (re-attempting the actual
+            # push/create_pr call) and any status transition — this stage
+            # only ran the fix-it agent and reports whether it claims to have
+            # finished; ship.py never trusts agent_ok alone.
+            return {"agent_ok": result.ok}
+
         # Never trust the agent's own report — re-run real checks ourselves.
         verify = self.run_checks(run_id)
         if verify["pass"]:
@@ -518,6 +617,7 @@ class Engine:
             self._set_status(run_id, "checks_escalated", blocked_on=verify.get("scope") and
                              ("scope" if not verify["scope"]["pass"] else "checks"))
         return {"agent_ok": result.ok, "verified_pass": verify["pass"], "checks": verify}
+
 
     def run_checks(self, run_id: str) -> dict[str, Any]:
         # Catch up this run's branch with base_branch BEFORE the scope guard

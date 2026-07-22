@@ -259,6 +259,27 @@ class TestAutoShip(unittest.TestCase):
         self.assertEqual(len(touched), 1)
         self.assertEqual(touched[0]["action"], "auto_shipped")
 
+    def test_ship_checks_failed_never_auto_resumed_even_with_auto_ship_on(self):
+        """ship_checks_failed (Task 1/2's new status) is never added to
+        AUTO_TRANSITIONS, even conditionally under auto_ship — unlike
+        ship_failed (a push/PR-mechanics problem, auto-retried when
+        auto_ship is on), a ship-time re-verification failure is treated like
+        checks_high_risk_escalated/review_escalated: always human-gated,
+        never auto-resumed."""
+        from gantry.advance import advance_all
+        cfg = GantryConfig()
+        cfg.git.auto_ship = True
+        eng = Engine(self.target, cfg)
+        run_id = eng.create_run("t", "test")
+        eng.store.update_state(run_id, status="ship_checks_failed")
+
+        with patch("gantry.ship.ship_run") as mock_ship:
+            results = advance_all(self.target, cfg)
+
+        self.assertFalse(mock_ship.called)
+        touched = [r for r in results if r.get("run_id") == run_id]
+        self.assertEqual(touched, [])
+
 
 class TestRepairStaleRunning(unittest.TestCase):
     def setUp(self):
@@ -553,6 +574,55 @@ class TestResolverStage(unittest.TestCase):
 
         self.assertTrue(result["verified_pass"])
         self.assertEqual(eng.store.state(run_id)["status"], "build_complete")
+
+    def test_conflict_failure_kind_does_not_run_checks_or_set_status(self):
+        """The new failure_kind='conflict' path is ship.py's re-verification
+        responsibility, not run_resolver_stage's — the resolver just runs the
+        fix-it agent with the intent-framing prompt and reports agent_ok;
+        it must NOT call run_checks or mutate run status itself, unlike the
+        default 'checks' failure_kind."""
+        eng = self._make_engine(auto_resolve=True)
+        run_id = eng.create_run("t", "test")
+        eng.store.write_result(run_id, "intake.md", "irrelevant")  # not read via read_result
+        eng.store.artifact_path(run_id, "intake.md").write_text("Fix the login bug")
+        eng.store.artifact_path(run_id, "product-spec.md").write_text("Spec: fix login")
+        eng.store.artifact_path(run_id, "build-summary.md").write_text("Changed auth.py")
+
+        fake_runner_result = type("R", (), {
+            "ok": True, "stdout": "resolved", "stderr": "", "raw": {"result": "done"},
+            "session_id": "s1",
+            "usage": {"cost_usd": None, "input_tokens": None, "output_tokens": None, "duration_ms": None},
+        })()
+
+        captured_prompt = {}
+
+        def _fake_run(cwd, prompt, **kw):
+            captured_prompt["text"] = prompt
+            return fake_runner_result
+
+        with patch("gantry.engine.get_runner") as mock_get_runner, \
+             patch.object(Engine, "run_checks") as mock_run_checks:
+            mock_get_runner.return_value.run.side_effect = _fake_run
+            result = eng.run_resolver_stage(
+                run_id, failure_kind="conflict",
+                conflict_output="! [rejected] main -> main (non-fast-forward)")
+
+        mock_run_checks.assert_not_called()
+        self.assertEqual(result, {"agent_ok": True})
+        self.assertNotIn("verified_pass", result)
+        # Status was set to resolve_running during the call but never
+        # transitioned to build_complete/checks_escalated afterward (that's
+        # ship.py's job for this failure_kind).
+        self.assertEqual(eng.store.state(run_id)["status"], "resolve_running")
+        self.assertIn("resolve by intent", captured_prompt["text"].lower())
+        self.assertIn("non-fast-forward", captured_prompt["text"])
+        self.assertIn("Fix the login bug", captured_prompt["text"])
+
+    def test_invalid_failure_kind_raises(self):
+        eng = self._make_engine(auto_resolve=True)
+        run_id = eng.create_run("t", "test")
+        with self.assertRaises(ValueError):
+            eng.run_resolver_stage(run_id, failure_kind="bogus")
 
 
 class TestShortLabel(unittest.TestCase):

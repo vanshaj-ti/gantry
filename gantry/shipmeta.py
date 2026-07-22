@@ -41,12 +41,23 @@ evidence-report = proof it works) and the git diff, then produce:
 3. A short branch slug: 2-5 lowercase words, hyphen-separated, optionally \
    prefixed with a conventional type (`feat/`, `fix/`, `chore/`, `refactor/`), \
    e.g. `chore/remove-dead-webhook-handler`. No dates, no run IDs, no "gantry".
+4. A short rollback note: what CODE/BEHAVIOR-OBSERVABLE sign would indicate this \
+   change needs reverting (e.g. "if the /webhooks endpoint starts returning 500s" \
+   or "if test_webhook_retry starts flaking"), plus a CONCRETE rollback procedure \
+   referencing the actual diff/build-summary.md (e.g. "revert this PR; if a \
+   migration was added its down-step is in <file>" — name the real file/step if \
+   one exists, say plainly if there is none, e.g. no schema change to revert). Do \
+   NOT invent generic boilerplate like "monitor metrics and roll back if needed" \
+   — there is no live monitoring here, only what a human can observe in behavior \
+   or re-running tests/checks. If you genuinely can't identify anything more \
+   specific than "revert this PR", say exactly that — an honest minimal note \
+   beats a padded fake one.
 
 Do not mention any pipeline, tool, or agent that produced this change anywhere \
 in the title, body, or slug — write as if a human engineer did this themselves.
 
 Reply with ONLY a JSON object, no prose before or after:
-{"title": "...", "body": "...", "branch_slug": "..."}
+{"title": "...", "body": "...", "branch_slug": "...", "rollback_note": "..."}
 
 # Artifacts
 """
@@ -83,6 +94,12 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 def _valid(draft: dict[str, Any] | None) -> bool:
+    # rollback_note is intentionally NOT required here — an agent response
+    # missing everything else is unusable and falls back wholesale, but a
+    # response with a good title/body/branch_slug and a missing/empty
+    # rollback_note still ships fine with the fallback rollback_note alone
+    # (see draft_ship_meta's return below); ship must never block on the
+    # rollback note specifically being present.
     if not draft:
         return False
     return bool(draft.get("title")) and bool(draft.get("body")) and bool(draft.get("branch_slug"))
@@ -102,13 +119,18 @@ def _slugify_branch(slug: str) -> str:
 
 
 def draft_ship_meta(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> dict[str, str]:
-    """Best-effort PR title/body/branch-slug draft. Always returns usable values —
-    falls back to the run's stored title on any failure so ship never blocks."""
+    """Best-effort PR title/body/branch-slug(/rollback_note) draft. Always
+    returns usable values — falls back to the run's stored title (and a
+    minimal honest rollback fallback) on any failure so ship never blocks."""
     fallback_title = store.state(run_id).get("title", run_id)
     fallback = {
         "title": fallback_title,
         "body": f"## Summary\n\n{fallback_title}",
         "branch_slug": slugify(fallback_title),
+        # No agent call happened (or it failed/was unusable) — the only
+        # honest rollback note available without one is the generic "revert
+        # this PR"; no fabricated trigger-condition/procedure detail.
+        "rollback_note": "Revert this PR to roll back.",
     }
 
     try:
@@ -131,6 +153,7 @@ def draft_ship_meta(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) 
             "title": str(draft["title"]).strip()[:100] or fallback["title"],
             "body": str(draft["body"]).strip() or fallback["body"],
             "branch_slug": _slugify_branch(str(draft["branch_slug"]).strip()) or fallback["branch_slug"],
+            "rollback_note": str(draft.get("rollback_note") or "").strip() or fallback["rollback_note"],
         }
     except Exception:
         logger.debug("ship draft generation failed, using fallback title", exc_info=True)

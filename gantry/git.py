@@ -289,6 +289,35 @@ _PR_ALREADY_EXISTS_RE = re.compile(
     r'a pull request for branch ".*?" into branch ".*?" already exists:\s*(\S+)'
 )
 
+# Same "pattern-match a specific known failure shape out of raw git/gh CLI
+# output text" approach as _PR_ALREADY_EXISTS_RE above, for a different known
+# shape: a real content conflict / diverged-branches condition (as opposed to
+# a network blip, auth failure, or rate limit) on `git push` or `gh pr
+# create`. Deliberately broad (a reasonable phrase list, not an exhaustive
+# one) — a false positive here just means the conflict-resolver agent gets
+# invoked on what turns out to be a non-conflict failure and finds nothing to
+# resolve (harmless, if wasteful); a false negative means a genuine conflict
+# falls through to the generic ship_failed retry path, which will keep
+# failing identically forever until a human intervenes anyway. Bias toward
+# catching it.
+_CONFLICT_SHAPE_RE = re.compile(
+    r"merge conflict|\bconflict\s*\(|\bCONFLICT\b|diverged|non-fast-forward|"
+    r"failed to push some refs|updates were rejected|needs merge|"
+    r"fix conflicts and then commit the result|automatic merge failed",
+    re.IGNORECASE,
+)
+
+
+def is_conflict_shaped_failure(output: str) -> bool:
+    """True if captured `push`/`create_pr` output text looks like a real
+    content conflict or diverged-branches condition (e.g. a sibling run
+    shipped first and moved the base branch out from under this one) rather
+    than a transient/mechanical failure (network blip, gh not authenticated,
+    rate limiting). Used by ship.py to decide whether a push/create_pr
+    failure should route to the conflict-resolver stage (resolve by intent)
+    instead of the generic ship_failed blind-retry path."""
+    return bool(_CONFLICT_SHAPE_RE.search(output or ""))
+
 
 def create_pr(worktree: Path, remote_branch: str, base_branch: str, title: str, body: str) -> dict:
     """Uses `gh pr create`. Requires gh to be authenticated in the environment
