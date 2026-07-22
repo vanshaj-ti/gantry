@@ -369,6 +369,11 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
             return {"advanced": True, "from": status, "action": f"start_{stage}"}
         return {"advanced": False, "from": status, "action": "no_auto_transition"}
 
+    if status in ("spec_complete", "design_complete") and engine.cfg.git.auto_approve_docs:
+        stage = status.removesuffix("_complete")
+        nxt = engine.approve(run_id, stage)
+        return {"advanced": True, "from": status, "action": f"auto_approved_{stage}->{nxt}"}
+
     if status == "plan_complete":
         engine.run_agent_stage(run_id, "build")
         return {"advanced": True, "from": status, "action": "build"}
@@ -633,7 +638,8 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
     single run's state.json."""
     auto_transitions = (AUTO_TRANSITIONS
                        | ({"review_approved", "ship_failed"} if cfg.git.auto_ship else set())
-                       | ({"checks_escalated"} if cfg.checks.auto_resolve else set()))
+                       | ({"checks_escalated"} if cfg.checks.auto_resolve else set())
+                       | ({"spec_complete", "design_complete"} if cfg.git.auto_approve_docs else set()))
     rid = run["id"]
     repaired = _repair_stale_running(engine, run)
     if repaired:
