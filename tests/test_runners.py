@@ -1,6 +1,8 @@
+import os
 import unittest
 
-from gantry.runners import ClaudeCodeRunner, CursorCliRunner, CodexRunner, get_runner
+from gantry.config import ProxyConfig
+from gantry.runners import ClaudeCodeRunner, CursorCliRunner, CodexRunner, get_runner, resolve_proxy_env
 
 
 def _base_kwargs(**overrides):
@@ -108,6 +110,59 @@ class TestCodexRunner(unittest.TestCase):
         result = CodexRunner()._parse_jsonl(jsonl, "", 0)
         self.assertTrue(result.ok)
         self.assertEqual(result.raw["result"], "ok")
+
+
+class TestCodexProxyConfigArgs(unittest.TestCase):
+    def test_no_proxy_adds_no_flags(self):
+        cmd = CodexRunner().build_command(**_base_kwargs(model="gpt-5.5"))
+        self.assertNotIn("-c", cmd)
+
+    def test_base_url_and_api_key_env_add_c_flags(self):
+        proxy = ProxyConfig(base_url="https://gw.example.com", api_key_env="MY_TOKEN")
+        cmd = CodexRunner().build_command(**_base_kwargs(model="gpt-5.5", proxy=proxy))
+        joined = " ".join(cmd)
+        self.assertIn("model_providers.gantry-proxy.base_url=https://gw.example.com", joined)
+        self.assertIn("model_providers.gantry-proxy.env_key=MY_TOKEN", joined)
+        self.assertIn("model_provider=gantry-proxy", joined)
+
+    def test_headers_add_http_headers_flags(self):
+        proxy = ProxyConfig(headers={"X-Foo": "bar"})
+        cmd = CodexRunner().build_command(**_base_kwargs(model="gpt-5.5", proxy=proxy))
+        joined = " ".join(cmd)
+        self.assertIn("model_providers.gantry-proxy.http_headers.X-Foo=bar", joined)
+
+    def test_empty_proxy_config_adds_no_flags(self):
+        cmd = CodexRunner().build_command(**_base_kwargs(model="gpt-5.5", proxy=ProxyConfig()))
+        self.assertNotIn("-c", cmd)
+
+
+class TestResolveProxyEnv(unittest.TestCase):
+    def test_none_proxy_returns_none(self):
+        self.assertIsNone(resolve_proxy_env("claude-code", None))
+
+    def test_empty_proxy_config_returns_none(self):
+        self.assertIsNone(resolve_proxy_env("claude-code", ProxyConfig()))
+
+    def test_claude_code_sets_base_url_and_auth_token(self):
+        os.environ["GANTRY_TEST_TOKEN"] = "secret-value"
+        try:
+            proxy = ProxyConfig(base_url="https://gw.example.com", api_key_env="GANTRY_TEST_TOKEN")
+            env = resolve_proxy_env("claude-code", proxy)
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gw.example.com")
+            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "secret-value")
+        finally:
+            del os.environ["GANTRY_TEST_TOKEN"]
+
+    def test_claude_code_missing_api_key_env_var_skips_token(self):
+        proxy = ProxyConfig(base_url="https://gw.example.com", api_key_env="GANTRY_TEST_TOKEN_MISSING")
+        env = resolve_proxy_env("claude-code", proxy)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+
+    def test_codex_cli_env_untouched_by_base_url(self):
+        proxy = ProxyConfig(base_url="https://gw.example.com", api_key_env="SOME_TOKEN")
+        env = resolve_proxy_env("codex-cli", proxy)
+        # codex's overrides go through -c flags, not env vars
+        self.assertNotIn("OPENAI_BASE_URL", env or {})
 
 
 class TestGetRunner(unittest.TestCase):

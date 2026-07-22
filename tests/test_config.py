@@ -192,5 +192,50 @@ class TestCoerceHelpers(unittest.TestCase):
         self.assertEqual(result.spec_glob, "x/*.spec.ts")
 
 
+class TestProxyConfig(unittest.TestCase):
+    def test_missing_proxy_section_yields_empty_dict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.proxy, {})
+
+    def test_proxy_claude_code_and_codex_cli_parsed(self):
+        toml_text = """
+[proxy.claude-code]
+base_url = "https://gateway.example.com"
+api_key_env = "MY_ANTHROPIC_TOKEN"
+
+[proxy.codex-cli]
+base_url = "https://gateway.example.com"
+api_key_env = "MY_OPENAI_TOKEN"
+headers = { "X-My-Header" = "value" }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text(toml_text)
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.proxy["claude-code"].base_url, "https://gateway.example.com")
+        self.assertEqual(cfg.proxy["claude-code"].api_key_env, "MY_ANTHROPIC_TOKEN")
+        self.assertEqual(cfg.proxy["codex-cli"].headers, {"X-My-Header": "value"})
+
+    def test_proxy_cursor_cli_ignored(self):
+        toml_text = """
+[proxy.cursor-cli]
+base_url = "https://gateway.example.com"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text(toml_text)
+            cfg = load_config(Path(tmp))
+        self.assertNotIn("cursor-cli", cfg.proxy)
+
+    def test_coerce_proxy_direct(self):
+        from gantry.config import ProxyConfig, _coerce_proxy
+        out = _coerce_proxy({
+            "claude-code": {"base_url": "https://x", "api_key_env": "TOK"},
+            "cursor-cli": {"base_url": "https://y"},
+        })
+        self.assertEqual(out, {"claude-code": ProxyConfig(base_url="https://x", api_key_env="TOK")})
+
+
 if __name__ == "__main__":
     unittest.main()

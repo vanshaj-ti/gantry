@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 from ..config import CONFIG_FILENAME, load_config
-from ..runners import _RUNNERS
 from ..state import RunStore
 from ._shared import _target, _out
 
@@ -210,13 +212,29 @@ def _render_doc(heading: str, content: str, glow_path: str | None) -> None:
     print(content)
 
 
+_AGENT_RUNNER_LINE_RE = re.compile(r'^(\s*runner\s*=\s*)"([^"]*)"(\s*.*)$', re.MULTILINE)
+
+
+def _fix_agent_runner(cfg_path: Path, new_runner: str) -> dict:
+    """Text-level edit of gantry.toml's [agent] runner line (gantry.toml is
+    hand-authored template text, not dataclass-dumped — see scaffold()).
+    Only rewrites the FIRST `runner = "..."` line, which is [agent].runner
+    (models.<stage>.runner lines live under their own [models.<stage>]
+    tables further down and are never the first match)."""
+    text = cfg_path.read_text()
+    m = _AGENT_RUNNER_LINE_RE.search(text)
+    if not m:
+        return {"ok": False, "error": "could not find an [agent] runner line to edit"}
+    new_text = text[:m.start()] + f'{m.group(1)}"{new_runner}"{m.group(3)}' + text[m.end():]
+    cfg_path.write_text(new_text)
+    return {"ok": True, "runner": new_runner}
+
+
 def cmd_doctor(args) -> int:
+    from .system import _runner_availability
     tgt = _target()
     cfg = load_config(tgt)
-    runners = {name: bool(shutil.which(cls().build_command(
-        prompt="x", model="", session_id=None, plan_mode=False, skip_permissions=False,
-        output_format="json", session_name="x", max_turns=1)[0]))
-        for name, cls in _RUNNERS.items()}
+    runners = _runner_availability()
     git_ok = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
                             cwd=str(tgt), capture_output=True, text=True).returncode == 0
     herdr_installed = bool(shutil.which("herdr"))
@@ -224,8 +242,13 @@ def cmd_doctor(args) -> int:
     herdr_status = ("active (inside pane)" if (herdr_installed and inside_herdr)
                     else "installed (run Gantry inside a herdr pane to activate)" if herdr_installed
                     else "not installed (optional enhanced integration — see README)")
-    tmux_available = bool(shutil.which("tmux"))
-    return _out({
+
+    required_tools = {
+        name: {"available": bool(shutil.which(name))}
+        for name in ("gh", "tmux", "fzf", "glow")
+    }
+
+    out = {
         "target": str(tgt),
         "config_present": (tgt / CONFIG_FILENAME).exists(),
         "active_runner": cfg.agent.runner,
@@ -241,6 +264,63 @@ def cmd_doctor(args) -> int:
         "mandated_skills": cfg.skills.enabled,
         "mcp_enabled": cfg.mcp.enabled,
         "mcp_available": sorted(cfg.mcp.servers.keys()),
-        "tmux": tmux_available if tmux_available else "not installed — required for `gantry cockpit`",
+        "required_tools": required_tools,
         "herdr": herdr_status,
-    })
+    }
+
+    if getattr(args, "fix", False):
+        out["fix"] = _run_doctor_fix(tgt, cfg, runners, getattr(args, "yes", False))
+
+    return _out(out)
+
+
+def _run_doctor_fix(tgt: Path, cfg, runners: dict, auto_yes: bool) -> dict:
+    """`gantry doctor --fix`: if a runner CLI is available on PATH but isn't
+    the configured [agent].runner (and no [models.<stage>].runner override
+    already references it), offer to register it as [agent].runner.
+
+    Never silently overrides an explicit existing runner choice without
+    --yes: gantry.toml's template always writes an [agent] runner line, so
+    "no runner is currently meaningfully configured" is treated narrowly —
+    only a gantry.toml with no [agent] runner line at all (or no gantry.toml
+    to edit) counts as unconfigured and gets fixed without confirmation.
+    Everything else requires --yes, or an interactive y/n confirmation when
+    stdin is a tty; if stdin isn't a tty and --yes wasn't passed, this only
+    reports, it never modifies gantry.toml.
+    """
+    configured = {cfg.agent.runner} | {sm.runner for sm in cfg.models.values() if sm.runner}
+    candidates = [name for name, available in runners.items() if available and name not in configured]
+    if not candidates:
+        return {"ok": True, "action": "none", "detail": "no unregistered PATH-available runner found"}
+
+    detected = candidates[0]
+    cfg_path = tgt / CONFIG_FILENAME
+    report = {"detected_but_not_registered": detected, "currently_configured": cfg.agent.runner}
+
+    if not cfg_path.exists():
+        report["action"] = "reported_only"
+        report["note"] = f"no {CONFIG_FILENAME} to edit"
+        return {"ok": True, **report}
+
+    has_explicit_runner_line = bool(_AGENT_RUNNER_LINE_RE.search(cfg_path.read_text()))
+
+    apply = auto_yes or not has_explicit_runner_line
+    if not apply:
+        if sys.stdin.isatty():
+            answer = input(
+                f"Detected {detected!r} on PATH but gantry.toml's [agent].runner is "
+                f"{cfg.agent.runner!r}. Update it to {detected!r}? [y/N] ").strip().lower()
+            apply = answer in ("y", "yes")
+        else:
+            report["action"] = "reported_only"
+            report["note"] = "stdin is not a tty and --yes was not passed — not modifying gantry.toml"
+            return {"ok": True, **report}
+
+    if not apply:
+        report["action"] = "declined"
+        return {"ok": True, **report}
+
+    result = _fix_agent_runner(cfg_path, detected)
+    report["action"] = "updated" if result["ok"] else "failed"
+    report.update(result)
+    return {"ok": result["ok"], **report}

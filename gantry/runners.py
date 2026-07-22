@@ -18,7 +18,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .config import ProxyConfig
+
 logger = logging.getLogger(__name__)
+
+# Stable model_provider id used for codex's per-invocation `-c` proxy
+# overrides — must match between the model_providers.<id>.* overrides and
+# the `--config model_provider=<id>` / provider-selection override so codex
+# actually routes through the overridden provider entry.
+CODEX_PROXY_PROVIDER_ID = "gantry-proxy"
 
 
 @dataclass
@@ -50,6 +58,7 @@ class AgentRunner:
         output_format: str,
         session_name: str,
         max_turns: int,
+        proxy: ProxyConfig | None = None,
     ) -> list[str]:
         raise NotImplementedError
 
@@ -91,6 +100,8 @@ class AgentRunner:
         session_name: str = "gantry",
         max_turns: int = 60,
         timeout: int = 900,
+        env: dict | None = None,
+        proxy: ProxyConfig | None = None,
     ) -> RunnerResult:
         cmd = self.build_command(
             prompt=prompt,
@@ -101,8 +112,12 @@ class AgentRunner:
             output_format=output_format,
             session_name=session_name,
             max_turns=max_turns,
+            proxy=proxy,
         )
-        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        run_kwargs: dict[str, Any] = dict(cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        if env is not None:
+            run_kwargs["env"] = env
+        proc = subprocess.run(cmd, **run_kwargs)
         return self.parse(proc.stdout, proc.stderr, proc.returncode)
 
 
@@ -110,7 +125,7 @@ class ClaudeCodeRunner(AgentRunner):
     name = "claude-code"
 
     def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
-                       output_format, session_name, max_turns) -> list[str]:
+                       output_format, session_name, max_turns, proxy: ProxyConfig | None = None) -> list[str]:
         cmd = ["claude", "-p", prompt, "--name", session_name]
         if model:
             cmd += ["--model", model]
@@ -128,8 +143,10 @@ class CursorCliRunner(AgentRunner):
     name = "cursor-cli"
 
     def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
-                       output_format, session_name, max_turns) -> list[str]:
+                       output_format, session_name, max_turns, proxy: ProxyConfig | None = None) -> list[str]:
         # cursor-agent -p <prompt> --output-format json --model <m> [--plan] [-f] [--resume <id>]
+        # proxy is intentionally unused here — cursor-cli has no verified
+        # base-url/headers override mechanism (see config.ProxyConfig, _coerce_proxy).
         cmd = ["cursor-agent", "-p", prompt]
         if model:
             cmd += ["--model", model]
@@ -151,7 +168,7 @@ class CodexRunner(AgentRunner):
     name = "codex-cli"
 
     def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
-                       output_format, session_name, max_turns) -> list[str]:
+                       output_format, session_name, max_turns, proxy: ProxyConfig | None = None) -> list[str]:
         # codex exec [resume <id>] --json -m <model> [--dangerously-bypass-approvals-and-sandbox] <prompt>
         if session_id:
             cmd = ["codex", "exec", "resume", session_id]
@@ -162,10 +179,33 @@ class CodexRunner(AgentRunner):
             cmd += ["-m", model]
         if skip_permissions:
             cmd += ["--dangerously-bypass-approvals-and-sandbox"]
+        cmd += self._proxy_config_args(proxy)
         # codex has no dedicated plan-mode flag or --max-turns/--name; let the
         # prompt drive planning, same approach ClaudeCodeRunner uses.
         cmd += [prompt]
         return cmd
+
+    def _proxy_config_args(self, proxy: ProxyConfig | None) -> list[str]:
+        """Per-invocation `-c` overrides for a proxy/gateway — project-local
+        .codex/config.toml ignores [model_providers]/[model_provider] keys,
+        so these can't be set via a config file; the dotted -c CLI flag is
+        the only mechanism that reaches codex per-invocation. All overrides
+        use CODEX_PROXY_PROVIDER_ID consistently so the `model_provider`
+        selector below actually points at the provider entry these -c flags
+        just defined."""
+        if proxy is None or not (proxy.base_url or proxy.api_key_env or proxy.headers):
+            return []
+        pid = CODEX_PROXY_PROVIDER_ID
+        args: list[str] = []
+        if proxy.base_url:
+            args += ["-c", f"model_providers.{pid}.base_url={proxy.base_url}"]
+        if proxy.api_key_env:
+            args += ["-c", f"model_providers.{pid}.env_key={proxy.api_key_env}"]
+        for key, value in proxy.headers.items():
+            args += ["-c", f"model_providers.{pid}.http_headers.{key}={value}"]
+        if proxy.base_url or proxy.api_key_env:
+            args += ["-c", f"model_provider={pid}"]
+        return args
 
     def run(
         self,
@@ -180,13 +220,18 @@ class CodexRunner(AgentRunner):
         session_name: str = "gantry",
         max_turns: int = 60,
         timeout: int = 900,
+        env: dict | None = None,
+        proxy: ProxyConfig | None = None,
     ) -> RunnerResult:
         cmd = self.build_command(
             prompt=prompt, model=model, session_id=session_id, plan_mode=plan_mode,
             skip_permissions=skip_permissions, output_format=output_format,
-            session_name=session_name, max_turns=max_turns,
+            session_name=session_name, max_turns=max_turns, proxy=proxy,
         )
-        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        run_kwargs: dict[str, Any] = dict(cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        if env is not None:
+            run_kwargs["env"] = env
+        proc = subprocess.run(cmd, **run_kwargs)
         return self._parse_jsonl(proc.stdout, proc.stderr, proc.returncode)
 
     def _parse_jsonl(self, stdout: str, stderr: str, exit_code: int) -> RunnerResult:
@@ -253,3 +298,48 @@ def get_runner(name: str) -> AgentRunner:
     if name not in _RUNNERS:
         raise ValueError(f"Unknown agent runner: {name!r}. Available: {sorted(_RUNNERS)}")
     return _RUNNERS[name]()
+
+
+def resolve_proxy_env(runner_name: str, proxy: ProxyConfig | None) -> dict | None:
+    """Build the subprocess env for a runner given its ProxyConfig (or None
+    if unconfigured). Returns None when there's nothing to override, so
+    callers can pass it straight through to AgentRunner.run(env=...) and get
+    today's exact behavior (ambient env, untouched) when no [proxy.<runner>]
+    section exists.
+
+    - claude-code: sets ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN. `headers`
+      has no verified passthrough for this CLI — configuring it only logs a
+      warning, nothing is set for it.
+    - codex-cli: sets no env var for base_url/headers (those go through
+      CodexRunner._proxy_config_args' per-invocation `-c` flags instead);
+      only the api_key_env-named var is read from the current process env
+      here, matching this org's own env_key convention (see docker.py's
+      _codex_env_args) — codex reads whatever env var name model_providers.
+      <id>.env_key points at, which the `-c` override above already sets to
+      proxy.api_key_env, so nothing further is needed in `env` for codex
+      beyond inheriting the ambient environment (which already contains it).
+    """
+    import os
+    if proxy is None or not (proxy.base_url or proxy.api_key_env or proxy.headers):
+        return None
+    env = os.environ.copy()
+    if runner_name == "claude-code":
+        if proxy.base_url:
+            env["ANTHROPIC_BASE_URL"] = proxy.base_url
+        if proxy.api_key_env:
+            token = os.environ.get(proxy.api_key_env)
+            if token:
+                env["ANTHROPIC_AUTH_TOKEN"] = token
+            else:
+                logger.warning("proxy.claude-code.api_key_env=%r is set but that env var is "
+                               "not present in the current environment — ANTHROPIC_AUTH_TOKEN "
+                               "will not be overridden.", proxy.api_key_env)
+        if proxy.headers:
+            logger.warning("proxy.claude-code.headers is configured but Claude Code's CLI has "
+                           "no verified custom-headers mechanism — headers will NOT be sent.")
+    elif runner_name == "codex-cli":
+        # base_url/api_key_env/headers are all applied via CodexRunner's own
+        # `-c model_providers.<id>.*` command-line overrides (see
+        # _proxy_config_args) rather than env vars — nothing to add here.
+        pass
+    return env

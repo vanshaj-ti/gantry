@@ -9,10 +9,13 @@ from here (or the documented defaults below).
 """
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -23,9 +26,11 @@ CONFIG_FILENAME = "gantry.toml"
 
 # The ordered pipeline used when no gantry.toml [stages] is set (or no config
 # file exists at all — see load_config's bare-repo fallback). spec/design are
-# NOT included: they have no CLI execution verb yet (see Engine.create_run's
-# guard) and would leave a fresh run stuck at awaiting_spec forever. Add them
-# back to this default once `gantry stage spec/design` exists.
+# NOT included by default: adding them to an existing project's pipeline is a
+# behavior change (a fresh run now stops at awaiting_spec first), so it's
+# opt-in via gantry.toml's [stages] list, not silently applied to configs that
+# predate the spec/design execution path (see templates/prompts/spec.md and
+# design.md, and templates/gantry.toml's [stages] comment for how to opt in).
 DEFAULT_STAGES = ["plan", "build", "evidence", "review"]
 
 DOC_STAGES = {"spec", "design"}          # human-authored/agent-drafted, human-gated
@@ -295,6 +300,13 @@ class GitConfig:
                                             # gate, where the independent LLM review stage is
                                             # the approval step. Has no effect if auto_ship is
                                             # False (there's no PR yet to merge).
+    auto_approve_docs: bool = False        # if True, advance_run auto-approves spec_complete
+                                            # and design_complete itself (same effect as a human
+                                            # calling `gantry approve --stage spec/design`) — for
+                                            # a fully hands-off spec-to-PR run with no doc-gate
+                                            # pause. Opt-in, same reasoning as auto_ship: the
+                                            # agent's own spec/design output ships without a
+                                            # human ever reading it first.
 
 
 @dataclass
@@ -371,6 +383,25 @@ class MCPConfig:
 
 
 @dataclass
+class ProxyConfig:
+    """Per-runner proxy/gateway override — an org-internal LLM gateway sitting
+    in front of the vendor API, keyed by runner name under `[proxy.<runner>]`
+    (e.g. `[proxy.claude-code]`, `[proxy.codex-cli]`). Independent of and
+    additive to docker.py's own TFY_API_KEY container mechanism (see
+    _codex_env_args) — this works bare-metal too, not just inside Docker.
+
+    Only claude-code and codex-cli are supported (cursor-cli has no verified
+    base-url/headers override mechanism); a `[proxy.cursor-cli]` table is
+    ignored with a logged warning. `headers` has no verified passthrough for
+    claude-code (the CLI exposes no arbitrary-header mechanism) — configuring
+    it there logs a one-line warning instead of silently dropping or crashing.
+    """
+    base_url: str = ""
+    api_key_env: str = ""   # name of the env var (NOT the literal secret) holding the API key/token
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class GantryConfig:
     project_id: str = "project"
     stages: list[str] = field(default_factory=lambda: list(DEFAULT_STAGES))
@@ -388,6 +419,7 @@ class GantryConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     herdr: HerdrConfig = field(default_factory=HerdrConfig)
+    proxy: dict[str, ProxyConfig] = field(default_factory=dict)  # runner name -> ProxyConfig
     # prompts dir: where stage prompt templates live (relative to config, or absolute)
     prompts_dir: str = ".gantry/prompts"
 
@@ -419,6 +451,27 @@ def _coerce_models(raw: dict[str, Any]) -> dict[str, StageModel]:
                 runner=spec.get("runner", ""),
                 timeout=int(spec.get("timeout", 900)),
             )
+    return out
+
+
+def _coerce_proxy(raw: dict[str, Any]) -> dict[str, ProxyConfig]:
+    """Mirrors _coerce_models's shape: [proxy.<runner>] tables keyed by
+    runner name. cursor-cli has no verified proxy mechanism — a
+    [proxy.cursor-cli] table is ignored with a logged warning rather than
+    silently accepted and silently unused."""
+    out: dict[str, ProxyConfig] = {}
+    for runner, spec in (raw or {}).items():
+        if runner == "cursor-cli":
+            logger.warning("[proxy.cursor-cli] is configured but proxy overrides are not "
+                           "supported for cursor-cli — ignoring this section.")
+            continue
+        if not isinstance(spec, dict):
+            continue
+        out[runner] = ProxyConfig(
+            base_url=spec.get("base_url", ""),
+            api_key_env=spec.get("api_key_env", ""),
+            headers=dict(spec.get("headers", {})),
+        )
     return out
 
 
@@ -515,7 +568,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
         g = raw["git"]
         cfg.git = GitConfig(base_branch=g.get("base_branch", "main"),
                             auto_ship=bool(g.get("auto_ship", False)),
-                            auto_merge=bool(g.get("auto_merge", False)))
+                            auto_merge=bool(g.get("auto_merge", False)),
+                            auto_approve_docs=bool(g.get("auto_approve_docs", False)))
     if "notify" in raw:
         n = raw["notify"]
         cfg.notify = NotifyConfig(backend=n.get("backend", "none"), webhook_url=n.get("webhook_url", ""))
@@ -541,4 +595,5 @@ def load_config(target_workspace: Path) -> GantryConfig:
         h = raw["herdr"]
         cfg.herdr = HerdrConfig(enabled=bool(h.get("enabled", True)),
                                 report_state=bool(h.get("report_state", True)))
+    cfg.proxy = _coerce_proxy(raw.get("proxy", {}))
     return cfg

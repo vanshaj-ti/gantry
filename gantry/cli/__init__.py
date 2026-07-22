@@ -2,6 +2,7 @@
 
 Verbs:
   gantry init                        scaffold gantry.toml + .gantry/prompts in the repo
+  gantry setup                       one-command bring-up: init + docker build + docker up
   gantry run --title T --request R   create a run and start the pipeline
   gantry stage <stage> --run ID      run one agent stage (plan/build/evidence)
   gantry retry <stage> --run ID       re-run a stage fresh (new session, no resume/feedback)
@@ -40,7 +41,9 @@ from .run_commands import (
     cmd_loop, cmd_mark_merged, cmd_mark_shipped, cmd_resume_hold, cmd_retry, cmd_review,
     cmd_revise, cmd_run, cmd_ship, cmd_stage, cmd_status,
 )
-from .system import cmd_cockpit, cmd_daemon, cmd_daemon_tick, cmd_docker, cmd_mcp, cmd_update
+from .system import (
+    cmd_cockpit, cmd_daemon, cmd_daemon_tick, cmd_docker, cmd_mcp, cmd_setup, cmd_update,
+)
 from .watch import cmd_listen, cmd_watch
 
 
@@ -54,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--with-skills", action="store_true",
                    help="also install enabled skills (e.g. superpowers) for the active runner")
     s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("setup", help="one-command bring-up: scaffold gantry.toml + prompts, "
+                                      "build the Docker image (claude + codex both installed), "
+                                      "and start this project's container")
+    s.add_argument("--force", action="store_true", help="overwrite an existing gantry.toml")
+    s.add_argument("--interval", type=int, default=60,
+                   help="seconds between ticks inside the container (default 60)")
+    s.set_defaults(func=cmd_setup)
 
     s = sub.add_parser("run", help="create a run and start the pipeline")
     s.add_argument("--title", required=True)
@@ -162,6 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_loop)
 
     s = sub.add_parser("doctor", help="check environment")
+    s.add_argument("--fix", action="store_true",
+                   help="detect a PATH-available runner not registered in gantry.toml and "
+                        "offer to configure it as [agent].runner")
+    s.add_argument("--yes", action="store_true",
+                   help="with --fix, apply the fix without an interactive y/n confirmation")
     s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("listen", help="poll Telegram replies, act on the pending run")
