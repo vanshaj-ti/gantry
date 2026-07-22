@@ -211,6 +211,22 @@ class ChecksConfig:
                                  # up for real (resolve_escalated) — a genuine
                                  # backstop so a broken resolver can't loop
                                  # forever either, same shape as retry_checks.
+    flaky_retry_attempts: int = 0  # 0 = disabled (today's exact behavior: a
+                                 # failing check command fails immediately,
+                                 # zero retry attempts). When >0, a failing
+                                 # command is re-run bare (no code changes, no
+                                 # agent call) up to this many additional
+                                 # times BEFORE falling into the existing
+                                 # agent-involved retry-with-feedback loop
+                                 # (advance.py's `blocked` handling). If any
+                                 # re-run passes, the check is treated as
+                                 # flaky rather than a real failure — recorded
+                                 # in the target repo's flake log, not
+                                 # escalated to the agent. Opt-in, same
+                                 # reasoning as auto_resolve: not every check
+                                 # command is safe to blindly re-run (side
+                                 # effects, non-idempotent commands), so a
+                                 # project must deliberately turn this on.
 
 
 @dataclass
@@ -580,7 +596,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
                                   max_parallel=int(c.get("max_parallel", 4)),
                                   retry_checks=int(c.get("retry_checks", 3)),
                                   auto_resolve=bool(c.get("auto_resolve", False)),
-                                  resolve_attempts=int(c.get("resolve_attempts", 2)))
+                                  resolve_attempts=int(c.get("resolve_attempts", 2)),
+                                  flaky_retry_attempts=int(c.get("flaky_retry_attempts", 0)))
     if "e2e" in raw:
         e = raw["e2e"]
         # apps values are each either a bare string or a

@@ -449,5 +449,76 @@ class TestRunRepoChecks(unittest.TestCase):
         self.assertEqual(result["results"], [])
 
 
+class TestFlakyRetry(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self._tmp.name)
+        self._target_tmp = tempfile.TemporaryDirectory()
+        self.store = RunStore(Path(self._target_tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        self._target_tmp.cleanup()
+
+    def test_flaky_retry_attempts_zero_is_byte_identical_to_today(self):
+        # A failing command still fails immediately with zero retry attempts
+        # (the default) — no marker keys, no flake log entry.
+        cfg = ChecksConfig(commands=["false"], flaky_retry_attempts=0)
+        result = run_repo_checks(cfg, self.cwd, store=self.store, run_id="run-1")
+        self.assertFalse(result["pass"])
+        self.assertFalse(result["results"][0]["pass"])
+        self.assertNotIn("flaky", result["results"][0])
+        self.assertEqual(self.store.read_flake_log(), [])
+
+    def test_command_that_fails_once_then_passes_on_bare_retry_is_treated_as_passed(self):
+        marker = self.cwd / "attempt-marker"
+        # Fails on the very first invocation, passes every time after —
+        # simulates a command that fails once then passes on retry.
+        cmd = (
+            f'if [ -f "{marker}" ]; then exit 0; else touch "{marker}"; exit 1; fi'
+        )
+        cfg = ChecksConfig(commands=[cmd], flaky_retry_attempts=2)
+        result = run_repo_checks(cfg, self.cwd, store=self.store, run_id="run-2")
+        self.assertTrue(result["pass"])
+        self.assertTrue(result["results"][0]["pass"])
+        self.assertTrue(result["results"][0]["flaky"])
+        self.assertEqual(result["results"][0]["attempts_before_pass"], 1)
+        flake_log = self.store.read_flake_log()
+        self.assertEqual(len(flake_log), 1)
+        self.assertEqual(flake_log[0]["command"], cmd)
+        self.assertEqual(flake_log[0]["run_id"], "run-2")
+        self.assertEqual(flake_log[0]["attempts_before_pass"], 1)
+
+    def test_command_that_fails_every_retry_still_escalates_like_today(self):
+        cfg = ChecksConfig(commands=["false"], flaky_retry_attempts=3)
+        result = run_repo_checks(cfg, self.cwd, store=self.store, run_id="run-3")
+        self.assertFalse(result["pass"])
+        self.assertFalse(result["results"][0]["pass"])
+        self.assertNotIn("flaky", result["results"][0])
+        # A fully-failing command must NOT be silently marked passed, and
+        # must not write a flake record either (it never actually flaked).
+        self.assertEqual(self.store.read_flake_log(), [])
+
+    def test_flake_log_accumulates_and_respects_cap(self):
+        for i in range(RunStore.FLAKE_LOG_MAX_ENTRIES + 10):
+            self.store.record_flake(f"cmd-{i}", f"run-{i}", 1)
+        log = self.store.read_flake_log()
+        self.assertEqual(len(log), RunStore.FLAKE_LOG_MAX_ENTRIES)
+        # Oldest entries are pruned first, newest kept.
+        self.assertEqual(log[-1]["command"], f"cmd-{RunStore.FLAKE_LOG_MAX_ENTRIES + 9}")
+
+    def test_flake_log_prunes_entries_older_than_30_days(self):
+        from datetime import datetime, timedelta, timezone
+
+        path = self.store._flake_log_path()
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+        self.store._write(path, [{"command": "old", "run_id": "run-old",
+                                  "timestamp": old_ts, "attempts_before_pass": 1}])
+        self.store.record_flake("new", "run-new", 1)
+        log = self.store.read_flake_log()
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["command"], "new")
+
+
 if __name__ == "__main__":
     unittest.main()

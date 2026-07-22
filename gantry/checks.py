@@ -280,7 +280,37 @@ def _run_one_check(cmd: CheckCommand, default_timeout: int, cwd: Path) -> dict[s
     }
 
 
-def run_repo_checks(cfg: ChecksConfig, cwd: Path) -> dict[str, Any]:
+def _run_one_check_with_flaky_retry(cmd: CheckCommand, default_timeout: int, cwd: Path,
+                                    flaky_retry_attempts: int, store: "RunStore | None",
+                                    run_id: str | None) -> dict[str, Any]:
+    """Wraps `_run_one_check`: if the first attempt fails and
+    `flaky_retry_attempts > 0`, re-run the SAME command (bare, no code
+    changes, no agent call) up to `flaky_retry_attempts` additional times,
+    respecting the command's own configured/default timeout each time. If any
+    re-run passes, the returned result is overwritten to report a pass (with
+    a `flaky` marker + attempt count) and a flake-occurrence record is
+    appended to the target repo's flake log via `store.record_flake` (when a
+    store/run_id were supplied). If every re-run also fails, the ORIGINAL
+    failing result is returned unchanged — identical behavior to today, so
+    this function is a no-op passthrough when `flaky_retry_attempts == 0`
+    (the default) or the first attempt already passes."""
+    result = _run_one_check(cmd, default_timeout, cwd)
+    if result["pass"] or flaky_retry_attempts <= 0:
+        return result
+    for attempt in range(1, flaky_retry_attempts + 1):
+        retry_result = _run_one_check(cmd, default_timeout, cwd)
+        if retry_result["pass"]:
+            retry_result["flaky"] = True
+            retry_result["attempts_before_pass"] = attempt
+            if store is not None and run_id is not None:
+                store.record_flake(cmd.command, run_id, attempt)
+            return retry_result
+    # every re-run failed too — treat as a genuine failure, same as today
+    return result
+
+
+def run_repo_checks(cfg: ChecksConfig, cwd: Path, store: "RunStore | None" = None,
+                    run_id: str | None = None) -> dict[str, Any]:
     """Runs cfg.commands in the order the caller listed them, but a
     `parallel=true` command is bounded-concurrent with the OTHER
     parallel=true commands via a thread pool (subprocess.run releases the
@@ -291,6 +321,12 @@ def run_repo_checks(cfg: ChecksConfig, cwd: Path) -> dict[str, Any]:
     behavior. Output shape ({"pass": bool, "results": [...]}) is unchanged
     regardless of how commands were split, so run_all_checks/advance.py need
     no changes.
+
+    `cfg.flaky_retry_attempts` (default 0 = disabled) is threaded through to
+    each command via `_run_one_check_with_flaky_retry` — see that function's
+    docstring. `store`/`run_id` are only needed when flaky_retry_attempts > 0
+    (to record flake occurrences); omit them for the flag-off path or in
+    tests exercising `run_repo_checks` directly with no RunStore at hand.
 
     SECURITY: `cfg` here is always the ChecksConfig resolved from the TARGET
     repo's gantry.toml (via Engine.__init__ -> config.load_config(self.target)),
@@ -311,12 +347,14 @@ def run_repo_checks(cfg: ChecksConfig, cwd: Path) -> dict[str, Any]:
 
     if parallel_indices:
         with ThreadPoolExecutor(max_workers=max(1, cfg.max_parallel)) as pool:
-            futures = {pool.submit(_run_one_check, commands[i], cfg.timeout, cwd): i
+            futures = {pool.submit(_run_one_check_with_flaky_retry, commands[i], cfg.timeout, cwd,
+                                   cfg.flaky_retry_attempts, store, run_id): i
                       for i in parallel_indices}
             for future in futures:
                 results[futures[future]] = future.result()
     for i in serial_indices:
-        results[i] = _run_one_check(commands[i], cfg.timeout, cwd)
+        results[i] = _run_one_check_with_flaky_retry(commands[i], cfg.timeout, cwd,
+                                                      cfg.flaky_retry_attempts, store, run_id)
 
     all_pass = all(r["pass"] for r in results)
     return {"pass": all_pass, "results": results}
@@ -325,7 +363,7 @@ def run_repo_checks(cfg: ChecksConfig, cwd: Path) -> dict[str, Any]:
 def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
                    checks_cfg: ChecksConfig, cwd: Path, base: str) -> dict[str, Any]:
     scope = run_scope_guard(store, run_id, scope_cfg, cwd, base)
-    checks = run_repo_checks(checks_cfg, cwd)
+    checks = run_repo_checks(checks_cfg, cwd, store=store, run_id=run_id)
     out = {"pass": scope["pass"] and checks["pass"], "scope": scope, "checks": checks}
     store.write_result(run_id, "checks.json", out)
     if out["pass"]:

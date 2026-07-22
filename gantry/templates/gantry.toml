@@ -151,6 +151,13 @@ retry_checks = 3                # auto-resume build with failure feedback this m
 auto_resolve = false
 resolve_attempts = 2             # cap on resolver-agent attempts before giving up
                                   # for real (resolve_escalated)
+# 0 = disabled (default; today's exact behavior — a failing check fails
+# immediately). When >0, a failing check command is re-run bare (no code
+# changes, no agent call) up to this many additional times before falling
+# into the agent-involved retry-with-feedback loop above. Any passing re-run
+# marks the check as flaky (recorded, not escalated) instead of a real
+# failure. Opt-in: not every check command is safe to blindly re-run.
+flaky_retry_attempts = 0
 
 [notify]
 backend = "none"              # "none" | "telegram" | "webhook"

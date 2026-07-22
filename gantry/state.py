@@ -144,6 +144,36 @@ class RunStore:
         entry = data.get(str(message_id))
         return entry.get("run_id") if entry else None
 
+    # --- flake log (target-repo-scoped, not per-run) ---
+    # Mirrors the telegram-message-map pattern above: one flat file, sibling to
+    # the per-run .agent-runs/<run_id>/ directories (not inside run_dir, since
+    # flakiness needs to accumulate ACROSS every run in this repo, not reset
+    # per run). Bounded the same two ways as that map — age cutoff (30 days)
+    # AND a hard cap on entry count (200) — so a repo with a genuinely flaky
+    # command hammering checks daily still can't grow this file unbounded
+    # between prunes.
+    FLAKE_LOG_MAX_ENTRIES = 200
+
+    def _flake_log_path(self) -> Path:
+        return self.runs / "flake-log.json"
+
+    def record_flake(self, command: str, run_id: str, attempts_before_pass: int) -> None:
+        path = self._flake_log_path()
+        entries = self._load(path, []) or []
+        entries.append({
+            "command": command,
+            "run_id": run_id,
+            "timestamp": now_iso(),
+            "attempts_before_pass": attempts_before_pass,
+        })
+        cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
+        entries = [e for e in entries if _iso_to_ts(e.get("timestamp")) >= cutoff]
+        entries = entries[-self.FLAKE_LOG_MAX_ENTRIES:]
+        self._write(path, entries)
+
+    def read_flake_log(self) -> list[dict[str, Any]]:
+        return self._load(self._flake_log_path(), []) or []
+
     def list_runs(self) -> list[dict[str, Any]]:
         if not self.runs.exists():
             return []

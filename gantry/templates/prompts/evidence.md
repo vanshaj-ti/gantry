@@ -26,6 +26,24 @@ If `acceptance-criteria.json` is present, read it and explicitly address EVERY
 not-confirmed / partial, with your reasoning, instead of pure free-form
 prose. Don't skip an id and don't invent ids that aren't in the file.
 
+Additionally, tag EVERY AC-N verdict with its evidence type, one of:
+- `test-verified` — an actual test was run and its pass/fail was observed.
+- `manual-verified` — a real command/API call was executed and its output
+  inspected.
+- `inspection-only` — code was read and judged correct, but nothing was
+  actually executed.
+Never present a lab/static-analysis judgment as if it were a measured/field
+result: if you only read the code, the tag must be `inspection-only`, even if
+you are confident the code is correct.
+
+If `acceptance-criteria.json` also declares a `verifiable_by` field for a
+criterion (`"test"` | `"manual"` | `"inspection"`), cross-reference your
+evidence-type tag against it. When your tag falls short of what the spec
+required (e.g. spec declared `verifiable_by: "test"` but you could only tag
+that AC's verdict `inspection-only`), call this out as an explicit mismatch
+line in your report so review's attention is drawn to it, e.g.:
+"⚠ AC-3 required test verification per spec but was only inspection-verified."
+
 Do not silently patch large implementation issues. If evidence shows the build is
 wrong, write that clearly and FAIL the evidence report.
 
