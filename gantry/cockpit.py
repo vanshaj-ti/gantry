@@ -24,7 +24,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-STATUS_BAR_HEIGHT = 3
+STATUS_BAR_HEIGHT = 15
 CLAUDE_PANE_PERCENT = 60  # right pane (claude session) gets the larger share
 STATUS_PANE_HISTORY_LIMIT = 1000  # small scrollback cap for the status pane only
 

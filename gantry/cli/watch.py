@@ -113,7 +113,8 @@ def cmd_watch(args) -> int:
         return f"${cost:.2f}" if cost is not None else ""
 
     def render() -> None:
-        cols = shutil.get_terminal_size().columns
+        term = shutil.get_terminal_size()
+        cols = term.columns
         # list_runs() returns newest-first (mtime desc); reverse so the most
         # recently updated run sits at the bottom, nearest the cursor/prompt
         # in a live-scrolling terminal instead of scrolled off the top.
@@ -121,7 +122,20 @@ def cmd_watch(args) -> int:
         tag_filter = getattr(args, "tag", None)
         if tag_filter:
             runs = [r for r in runs if r.get("tag") == tag_filter]
-        lines = [f"GANTRY — {len(runs)} run(s)" + (f" (tag={tag_filter})" if tag_filter else ""), ""]
+        total_runs = len(runs)
+        # Frame overhead: title, blank, header, separator, (+ trailing blank
+        # and footer when --live) — anything beyond that must fit the pane's
+        # actual line count or the frame overflows, tmux scrolls it, and the
+        # next 2s repaint's `\033[H` (cursor-home, no erase) lands mid-scroll
+        # — the last frame's tail and the new frame's head interleave into
+        # duplicate-looking header/footer lines.
+        overhead = 4 + (2 if args.live else 0)
+        max_rows = max(1, term.lines - overhead)
+        hidden = 0
+        if total_runs > max_rows:
+            hidden = total_runs - (max_rows - 1)  # reserve a row for the "+N more" marker
+            runs = runs[-(max_rows - 1):] if max_rows > 1 else []
+        lines = [f"GANTRY — {total_runs} run(s)" + (f" (tag={tag_filter})" if tag_filter else ""), ""]
 
         status_w, agent_w, model_w, session_w, cost_w, detail_w, updated_w = 20, 12, 16, 10, 8, 20, 10
         fixed = status_w + agent_w + model_w + session_w + cost_w + detail_w + updated_w
@@ -145,6 +159,9 @@ def cmd_watch(args) -> int:
                 (title, status_text, runner, model, sid, cost_text, detail_text, age(r["mtime"])), widths))
             lines.append(paint(row, r["status"]))
 
+        if hidden:
+            lines.append(f"… {hidden} older run(s) hidden (resize pane or drop --tag to see fewer at once)")
+
         if args.live:
             lines.append("\n(Ctrl+C to exit — refreshing every 2s)")
 
@@ -164,7 +181,11 @@ def cmd_watch(args) -> int:
         # Ghostty, see ghostty-org/ghostty#10251 and #10269) have leaked
         # memory in under sustained full-frame redraw + scrollback churn.
         # Alt-screen dashboards (top, htop) don't hit that path at all.
-        clear = "\033[H" if args.live else ""
+        # \033[J (erase cursor-to-end) after cursor-home: without it, a frame
+        # shorter than the previous one (run count dropped, or the pane got
+        # resized) leaves the previous frame's trailing lines on screen below
+        # the new content.
+        clear = "\033[H\033[J" if args.live else ""
         sys.stdout.write(clear + "\n".join(lines) + "\n")
         sys.stdout.flush()
 
