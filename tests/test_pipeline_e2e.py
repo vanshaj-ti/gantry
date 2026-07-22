@@ -208,6 +208,12 @@ class TestFullPipelineE2E(unittest.TestCase):
         """A build that initially fails checks should retry with feedback and
         recover once the fix lands — not skip straight to escalation."""
         self.cfg.stages = ["plan", "build"]
+        # With no "evidence" stage configured, build_complete's checks-pass
+        # path falls through to review directly (review.enabled defaults
+        # True regardless of `stages`) — irrelevant to what this test is
+        # actually exercising (the checks-retry loop), so disable it rather
+        # than needing a second scripted runner for a real `claude` call.
+        self.cfg.review.enabled = False
         run_id = self.eng.create_run("t", "r")
         self.run_id = run_id
         store = self.eng.store
