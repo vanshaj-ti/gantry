@@ -23,7 +23,7 @@ from typing import Any
 from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
-from .runners import get_runner
+from .runners import get_runner, resolve_proxy_env
 from .state import RunStore, now_iso
 
 logger = logging.getLogger(__name__)
@@ -356,6 +356,7 @@ class Engine:
         stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
             try:
+                proxy = self.cfg.proxy.get(runner.name)
                 result = runner.run(
                     cwd=work_dir,
                     prompt=prompt,
@@ -367,6 +368,8 @@ class Engine:
                     session_name=f"{run_id}-{stage}",
                     max_turns=sm.max_turns,
                     timeout=sm.timeout,
+                    env=resolve_proxy_env(runner.name, proxy),
+                    proxy=proxy,
                 )
             except _subprocess.TimeoutExpired:
                 # Without this, a killed/timed-out agent subprocess leaves state.json
@@ -389,7 +392,8 @@ class Engine:
         self.store.save_session(run_id, stage, session_id=result.session_id,
                                 model=sm.model, runner=runner.name)
         from .cost import accumulate as _accumulate_cost
-        _accumulate_cost(self.store, run_id, stage, result.usage)
+        _accumulate_cost(self.store, run_id, stage, result.usage,
+                         runner=runner.name, session_id=result.session_id)
         status = f"{stage}_complete" if result.ok else f"{stage}_failed"
         self._set_status(run_id, status)
         return {"stage": stage, "ok": result.ok, "session_id": result.session_id}
@@ -463,11 +467,13 @@ class Engine:
         self._set_status(run_id, "resolve_running", current_stage="build", heartbeat_at=now_iso())
         stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
+            proxy = self.cfg.proxy.get(runner.name)
             result = runner.run(
                 cwd=wt, prompt=prompt, model=sm.model,
                 session_id=None, plan_mode=False, skip_permissions=self.cfg.agent.skip_permissions,
                 output_format=self.cfg.agent.output_format, session_name=f"{run_id}-resolve",
                 max_turns=sm.max_turns * 2, timeout=sm.timeout,
+                env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
             )
         finally:
             _stop_heartbeat(stop_hb, hb_thread)
@@ -475,7 +481,8 @@ class Engine:
         self.store.write_log(run_id, "resolve.stderr", result.stderr)
         self.store.write_result(run_id, "resolve-result.json", result.raw)
         from .cost import accumulate as _accumulate_cost
-        _accumulate_cost(self.store, run_id, "resolve", result.usage)
+        _accumulate_cost(self.store, run_id, "resolve", result.usage,
+                         runner=runner.name, session_id=result.session_id)
 
         # Never trust the agent's own report — re-run real checks ourselves.
         verify = self.run_checks(run_id)
