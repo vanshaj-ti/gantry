@@ -118,15 +118,37 @@ class ReviewConfig:
                             # needs far fewer turns than build/evidence. Previously
                             # silently inherited StageModel's generic default (60)
                             # because "review" is rarely declared in [models].
-    checklist: list[str] = field(default_factory=list)  # project-specific items appended
-                                                          # to the review prompt that the
-                                                          # reviewer must explicitly address
-                                                          # (e.g. "confirm no secrets committed")
+    checklist: list[str] = field(default_factory=list)  # project-specific items the Spec
+                                                          # axis must explicitly address
+                                                          # (e.g. "confirm no secrets committed").
+                                                          # Scoped to Spec axis only (two_axis=True)
+                                                          # because spec conformance is where project-
+                                                          # specific acceptance rules belong; applies
+                                                          # to the single-axis review when two_axis=False.
+    standards_checklist: list[str] = field(default_factory=list)  # project-specific items the
+                                                                    # Standards axis must explicitly
+                                                                    # address (two_axis=True only).
+                                                                    # e.g. ["all public functions have
+                                                                    # docstrings", "no print() in prod code"]
     keyword_mode: str = "anywhere"  # "anywhere" (default, current behavior) | "line_start" —
                                      # "line_start" requires the verdict keyword
                                      # (APPROVE/REQUEST_CHANGES/ESCALATE) to be the first
                                      # token of a line, eliminating false ESCALATE matches
                                      # from prose that merely mentions the word.
+    two_axis: bool = True  # When True (default), runs two independent review axes in parallel:
+                            #   - Axis A (Spec): does the diff satisfy every acceptance criterion,
+                            #     match the architecture, stay within scope, do evidence claims hold?
+                            #   - Axis B (Standards): does the diff follow this repo's documented
+                            #     conventions and language-agnostic code-quality baselines?
+                            # Each axis gets its own dedicated LLM session (separate session keys
+                            # "review_spec"/"review_standards" in sessions.json — never shared).
+                            # Combined verdict: both APPROVE required for review_approved; either
+                            # REQUEST_CHANGES → review_changes_requested (both axes' findings
+                            # surfaced); either ESCALATE → review_escalated (escalation wins).
+                            # Cost/latency tradeoff: roughly 2x LLM calls compared to single-axis.
+                            # Set two_axis = false to restore the exact legacy single-verdict/
+                            # single-session behavior byte-for-byte (the opt-out path for latency-
+                            # sensitive or cost-sensitive projects).
 
 
 @dataclass
@@ -569,7 +591,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
             escalate_keywords=r.get("escalate_keywords", ["ESCALATE"]),
             max_turns=int(r.get("max_turns", 10)),
             checklist=r.get("checklist", []),
+            standards_checklist=r.get("standards_checklist", []),
             keyword_mode=r.get("keyword_mode", "anywhere"),
+            two_axis=bool(r.get("two_axis", True)),
         )
     if "scope" in raw:
         s = raw["scope"]

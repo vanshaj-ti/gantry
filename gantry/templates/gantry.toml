@@ -88,13 +88,34 @@ escalate_keywords = ["ESCALATE"]
 max_turns = 10
 # Project-specific items appended to the review prompt that the reviewer
 # must explicitly address, e.g. ["confirm no secrets committed"]. Empty =
-# none (default).
+# none (default). Scoped to the SPEC axis only when two_axis = true (spec
+# conformance is where project-specific acceptance rules belong); applies to
+# the single combined review when two_axis = false.
 checklist = []
+# Same idea as `checklist` above, but for the STANDARDS axis (two_axis = true
+# only) — e.g. ["all public functions have docstrings", "no print() in
+# production code"]. Empty = none (default). Has no effect when
+# two_axis = false.
+standards_checklist = []
 # "line_start" requires the verdict keyword to be the first token of a line
 # (allows markdown emphasis/heading/list prefixes), eliminating false
 # ESCALATE/REQUEST_CHANGES matches from prose that merely mentions the word.
 # Default "anywhere" is today's behavior, unchanged.
 keyword_mode = "anywhere"      # "anywhere" | "line_start"
+# Two-axis review (DEFAULT ON): runs Spec-conformance and Standards/quality as
+# two SEPARATE, INDEPENDENT reviewer sessions in parallel (own prompt, own
+# session key, own findings) instead of one merged verdict — a change can
+# legitimately pass one axis and fail the other, and a single merged verdict
+# hides that. Combined verdict: BOTH axes must APPROVE for review_approved;
+# either REQUEST_CHANGES -> review_changes_requested (both axes' findings
+# surfaced in review-comments.md); either ESCALATE -> review_escalated
+# (escalation always wins). Cost/latency tradeoff: this is roughly 2x the LLM
+# calls of single-axis review (two full agentic investigations instead of
+# one) — deliberate, since this stage is the last human-out-of-the-loop gate
+# before a PR ships. Set to false to restore the EXACT legacy single-verdict,
+# single-session review behavior (uses review.md only, ignores
+# standards_checklist, keeps the single "review" session key).
+two_axis = true
 
 [git]
 base_branch = "main"          # diff base for scope guard + review

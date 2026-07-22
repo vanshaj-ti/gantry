@@ -6,8 +6,9 @@ from unittest.mock import patch
 from gantry.config import GantryConfig
 from gantry.runners import RunnerResult
 from gantry.review import (
-    _build_prompt, _checklist_section, _parse_verdict, _rebuild_diff_context,
-    _structured_evidence_summary, run_review,
+    FAIL_CLOSED_ACTION, _build_prompt, _checklist_section, _combine_axis_verdicts,
+    _findings_verdict, _high_risk_files_for, _parse_findings, _parse_verdict,
+    _rebuild_diff_context, _structured_evidence_summary, run_review,
 )
 from gantry.state import RunStore
 
@@ -82,12 +83,19 @@ class TestParseVerdict(unittest.TestCase):
 
 
 class TestRunReview(unittest.TestCase):
+    """Exercises the LEGACY single-axis review path (cfg.review.two_axis =
+    False) — this is the critical regression guard for the opt-out path: it
+    must remain byte-identical to review.py's behavior before two-axis review
+    existed. See TestRunReviewTwoAxis below for the new default (two_axis=True)
+    behavior."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.target = Path(self._tmp.name)
         _init_scratch_repo(self.target)
         self.store = RunStore(self.target)
         self.cfg = GantryConfig()
+        self.cfg.review.two_axis = False
         self.run_id = self.store.new_run_id("t")
         self.store.create(self.run_id, "t")
 
@@ -266,6 +274,314 @@ class TestBuildPromptIncludesStructuredSummary(unittest.TestCase):
     def test_prompt_omits_summary_section_when_no_json_block(self):
         prompt = _build_prompt(self.store, self.run_id, self.target, "main", "template text")
         self.assertNotIn("structured summary", prompt)
+
+
+class TestParseFindings(unittest.TestCase):
+    def test_none_when_no_json_block(self):
+        self.assertIsNone(_parse_findings("Just prose, APPROVE."))
+
+    def test_empty_findings_list_is_valid(self):
+        text = 'APPROVE\n\n```json\n{"findings": []}\n```\n'
+        self.assertEqual(_parse_findings(text), [])
+
+    def test_parses_valid_finding(self):
+        text = (
+            'REQUEST_CHANGES\n\n```json\n'
+            '{"findings": [{"severity": "Critical", "action": "blocking", '
+            '"location": "a.py:10", "description": "bug", "recommendation": "fix it"}]}\n'
+            '```\n'
+        )
+        findings = _parse_findings(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["action"], "blocking")
+        self.assertEqual(findings[0]["severity"], "Critical")
+
+    def test_missing_action_fails_closed_to_ask_user(self):
+        text = (
+            '```json\n{"findings": [{"severity": "Important", '
+            '"location": "a.py", "description": "x", "recommendation": "y"}]}\n```\n'
+        )
+        findings = _parse_findings(text)
+        self.assertEqual(findings[0]["action"], FAIL_CLOSED_ACTION)
+
+    def test_garbage_action_fails_closed_to_ask_user(self):
+        text = (
+            '```json\n{"findings": [{"severity": "Important", "action": "delete-everything", '
+            '"location": "a.py", "description": "x", "recommendation": "y"}]}\n```\n'
+        )
+        findings = _parse_findings(text)
+        self.assertEqual(findings[0]["action"], FAIL_CLOSED_ACTION)
+
+    def test_empty_string_action_fails_closed_to_ask_user(self):
+        text = (
+            '```json\n{"findings": [{"severity": "Important", "action": "", '
+            '"location": "a.py", "description": "x", "recommendation": "y"}]}\n```\n'
+        )
+        findings = _parse_findings(text)
+        self.assertEqual(findings[0]["action"], FAIL_CLOSED_ACTION)
+
+    def test_malformed_json_returns_none(self):
+        self.assertIsNone(_parse_findings("```json\n{not valid\n```\n"))
+
+    def test_missing_findings_key_returns_none(self):
+        self.assertIsNone(_parse_findings('```json\n{"other": true}\n```\n'))
+
+    def test_uses_last_json_block(self):
+        text = (
+            '```json\n{"findings": [{"action": "no-op", "severity": "s", "location": "l", '
+            '"description": "old", "recommendation": "r"}]}\n```\n\n'
+            'More reasoning.\n\n'
+            '```json\n{"findings": [{"action": "blocking", "severity": "s", "location": "l", '
+            '"description": "new", "recommendation": "r"}]}\n```\n'
+        )
+        findings = _parse_findings(text)
+        self.assertEqual(findings[0]["description"], "new")
+
+
+class TestFindingsVerdict(unittest.TestCase):
+    def test_no_findings_approves(self):
+        self.assertEqual(_findings_verdict([]), "APPROVE")
+
+    def test_only_no_op_approves(self):
+        findings = [{"action": "no-op"}]
+        self.assertEqual(_findings_verdict(findings), "APPROVE")
+
+    def test_only_ask_user_still_approves(self):
+        findings = [{"action": "ask-user"}]
+        self.assertEqual(_findings_verdict(findings), "APPROVE")
+
+    def test_any_blocking_requests_changes(self):
+        findings = [{"action": "ask-user"}, {"action": "blocking"}]
+        self.assertEqual(_findings_verdict(findings), "REQUEST_CHANGES")
+
+
+class TestCombineAxisVerdicts(unittest.TestCase):
+    def test_both_approve_combines_to_approve(self):
+        self.assertEqual(_combine_axis_verdicts("APPROVE", "APPROVE"), "APPROVE")
+
+    def test_either_request_changes_combines_to_request_changes(self):
+        self.assertEqual(_combine_axis_verdicts("REQUEST_CHANGES", "APPROVE"), "REQUEST_CHANGES")
+        self.assertEqual(_combine_axis_verdicts("APPROVE", "REQUEST_CHANGES"), "REQUEST_CHANGES")
+
+    def test_either_escalate_wins_over_everything(self):
+        self.assertEqual(_combine_axis_verdicts("ESCALATE", "APPROVE"), "ESCALATE")
+        self.assertEqual(_combine_axis_verdicts("REQUEST_CHANGES", "ESCALATE"), "ESCALATE")
+        self.assertEqual(_combine_axis_verdicts("ESCALATE", "ESCALATE"), "ESCALATE")
+
+
+class TestHighRiskFilesFor(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        self.store = RunStore(self.target)
+        self.run_id = self.store.new_run_id("t")
+        self.store.create(self.run_id, "t")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_when_no_checks_json(self):
+        self.assertEqual(_high_risk_files_for(self.store, self.run_id), [])
+
+    def test_empty_when_no_high_risk_files_key(self):
+        self.store.write_result(self.run_id, "checks.json", {"scope": {}})
+        self.assertEqual(_high_risk_files_for(self.store, self.run_id), [])
+
+    def test_returns_declared_high_risk_files(self):
+        self.store.write_result(self.run_id, "checks.json",
+                                {"scope": {"high_risk_files": ["auth/login.py"]}})
+        self.assertEqual(_high_risk_files_for(self.store, self.run_id), ["auth/login.py"])
+
+
+def _findings_json_block(action: str, description: str = "finding") -> str:
+    return (
+        f'```json\n{{"findings": [{{"severity": "Important", "action": "{action}", '
+        f'"location": "a.py:1", "description": "{description}", '
+        f'"recommendation": "fix"}}]}}\n```\n'
+    )
+
+
+class TestRunReviewTwoAxis(unittest.TestCase):
+    """Exercises the DEFAULT (two_axis=True) parallel-axis review path."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.store = RunStore(self.target)
+        self.cfg = GantryConfig()
+        self.assertTrue(self.cfg.review.two_axis, "two_axis must default to True")
+        self.run_id = self.store.new_run_id("t")
+        self.store.create(self.run_id, "t")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _runner_for(self, axis_verdicts: dict[str, str], axis_findings: dict[str, str] | None = None):
+        """Returns a fake runner whose response depends on which axis is
+        calling (identified via session_name, e.g. "<run_id>-review-spec")."""
+        axis_findings = axis_findings or {}
+
+        class _AxisAwareRunner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                session_name = kwargs.get("session_name", "")
+                axis = "spec" if session_name.endswith("-review-spec") else "standards"
+                verdict = axis_verdicts[axis]
+                findings_block = axis_findings.get(axis, "")
+                text = f"{verdict}\n\nVerification Story: I ran the tests.\n\n{findings_block}"
+                return RunnerResult(ok=True, session_id=f"sess-{axis}", exit_code=0,
+                                    raw={"result": text}, stdout=text, stderr="")
+        return _AxisAwareRunner()
+
+    def test_both_axes_approve_combines_to_review_approved(self):
+        runner = self._runner_for({"spec": "APPROVE", "standards": "APPROVE"})
+        with patch("gantry.review.get_runner", return_value=runner):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(out["verdict"], "APPROVE")
+        self.assertEqual(out["combined_verdict"], "APPROVE")
+        self.assertTrue(out["two_axis"])
+        self.assertEqual(self.store.state(self.run_id)["status"], "review_approved")
+
+    def test_one_axis_request_changes_combines_and_surfaces_both_findings(self):
+        findings = {
+            "spec": _findings_json_block("blocking", "missing AC-2 coverage"),
+            "standards": _findings_json_block("no-op", "minor style nit"),
+        }
+        runner = self._runner_for({"spec": "REQUEST_CHANGES", "standards": "APPROVE"}, findings)
+        with patch("gantry.review.get_runner", return_value=runner):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(out["combined_verdict"], "REQUEST_CHANGES")
+        self.assertEqual(self.store.state(self.run_id)["status"], "review_changes_requested")
+        comments = self.store.read_artifact(self.run_id, "review-comments.md")
+        self.assertIn("Spec axis", comments)
+        self.assertIn("Standards axis", comments)
+        self.assertIn("missing AC-2 coverage", comments)
+
+    def test_one_axis_escalate_wins(self):
+        runner = self._runner_for({"spec": "ESCALATE", "standards": "APPROVE"})
+        with patch("gantry.review.get_runner", return_value=runner):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(out["combined_verdict"], "ESCALATE")
+        self.assertEqual(self.store.state(self.run_id)["status"], "review_escalated")
+
+    def test_finding_with_missing_action_fails_closed_not_dropped(self):
+        bad_block = (
+            '```json\n{"findings": [{"severity": "Important", '
+            '"location": "a.py", "description": "weird case", "recommendation": "check"}]}\n```\n'
+        )
+        findings = {"spec": bad_block, "standards": _findings_json_block("no-op")}
+        runner = self._runner_for({"spec": "APPROVE", "standards": "APPROVE"}, findings)
+        with patch("gantry.review.get_runner", return_value=runner):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+        spec_findings = out["spec"]["findings"]
+        self.assertEqual(len(spec_findings), 1)
+        self.assertEqual(spec_findings[0]["action"], FAIL_CLOSED_ACTION)
+        self.assertIn("weird case", spec_findings[0]["description"])
+
+    def test_each_axis_resumes_its_own_session_on_re_review(self):
+        runner = self._runner_for({"spec": "APPROVE", "standards": "APPROVE"})
+        with patch("gantry.review.get_runner", return_value=runner):
+            run_review(self.store, self.run_id, self.cfg, self.target)
+        spec_session = self.store.get_session_id(self.run_id, "review_spec")
+        standards_session = self.store.get_session_id(self.run_id, "review_standards")
+        self.assertEqual(spec_session, "sess-spec")
+        self.assertEqual(standards_session, "sess-standards")
+        self.assertNotEqual(spec_session, standards_session)
+
+        # Simulated re-review (e.g. after REQUEST_CHANGES -> rebuild -> evidence
+        # -> review again): each axis must resume ITS OWN prior session id, not
+        # the other axis's.
+        captured_session_ids = {}
+
+        class _CapturingRunner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                session_name = kwargs.get("session_name", "")
+                axis = "spec" if session_name.endswith("-review-spec") else "standards"
+                captured_session_ids[axis] = kwargs.get("session_id")
+                text = "APPROVE\n\nVerification Story: re-checked.\n\n" + _findings_json_block("no-op")
+                return RunnerResult(ok=True, session_id=f"sess-{axis}-2", exit_code=0,
+                                    raw={"result": text}, stdout=text, stderr="")
+
+        with patch("gantry.review.get_runner", return_value=_CapturingRunner()):
+            run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(captured_session_ids["spec"], "sess-spec")
+        self.assertEqual(captured_session_ids["standards"], "sess-standards")
+
+    def test_high_risk_files_trigger_extra_scrutiny_instruction_in_both_prompts(self):
+        self.store.write_result(self.run_id, "checks.json",
+                                {"scope": {"high_risk_files": ["auth/login.py"]}})
+        runner = self._runner_for({"spec": "APPROVE", "standards": "APPROVE"})
+        with patch("gantry.review.get_runner", return_value=runner):
+            run_review(self.store, self.run_id, self.cfg, self.target)
+        spec_prompt = self.store.read_artifact(self.run_id, "logs/review-spec-prompt.md")
+        standards_prompt = self.store.read_artifact(self.run_id, "logs/review-standards-prompt.md")
+        self.assertIn("auth/login.py", spec_prompt)
+        self.assertIn("extra scrutiny", spec_prompt.lower())
+        self.assertIn("auth/login.py", standards_prompt)
+        self.assertIn("extra scrutiny", standards_prompt.lower())
+
+    def test_spec_checklist_only_appears_in_spec_prompt(self):
+        self.cfg.review.checklist = ["confirm AC coverage"]
+        self.cfg.review.standards_checklist = ["confirm docstrings present"]
+        runner = self._runner_for({"spec": "APPROVE", "standards": "APPROVE"})
+        with patch("gantry.review.get_runner", return_value=runner):
+            run_review(self.store, self.run_id, self.cfg, self.target)
+        spec_prompt = self.store.read_artifact(self.run_id, "logs/review-spec-prompt.md")
+        standards_prompt = self.store.read_artifact(self.run_id, "logs/review-standards-prompt.md")
+        self.assertIn("confirm AC coverage", spec_prompt)
+        self.assertNotIn("confirm AC coverage", standards_prompt)
+        self.assertIn("confirm docstrings present", standards_prompt)
+        self.assertNotIn("confirm docstrings present", spec_prompt)
+
+    def test_runner_failure_on_one_axis_escalates_that_axis(self):
+        class _MixedRunner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                session_name = kwargs.get("session_name", "")
+                if session_name.endswith("-review-spec"):
+                    return RunnerResult(ok=False, session_id=None, exit_code=1,
+                                        raw={"result": ""}, stdout="", stderr="boom")
+                text = "APPROVE\n\nVerification Story: checked.\n\n" + _findings_json_block("no-op")
+                return RunnerResult(ok=True, session_id="sess-standards", exit_code=0,
+                                    raw={"result": text}, stdout=text, stderr="")
+
+        with patch("gantry.review.get_runner", return_value=_MixedRunner()):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(out["spec"]["verdict"], "ESCALATE")
+        self.assertEqual(out["combined_verdict"], "ESCALATE")
+
+    def test_two_axis_false_matches_legacy_single_verdict_shape(self):
+        """The critical regression guard: two_axis=False must produce the
+        EXACT same review-result.json shape and behavior as the original
+        (pre-two-axis) review.py — a flat {verdict, ok, model, session_id,
+        result} dict, single "review" session key, single review-prompt.md."""
+        self.cfg.review.two_axis = False
+
+        class _SingleRunner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                return RunnerResult(ok=True, session_id="sess-legacy", exit_code=0,
+                                    raw={"result": "Looks good. APPROVE"},
+                                    stdout="Looks good. APPROVE", stderr="")
+
+        with patch("gantry.review.get_runner", return_value=_SingleRunner()):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+
+        self.assertEqual(set(out.keys()), {"verdict", "ok", "model", "session_id", "result"})
+        self.assertEqual(out["verdict"], "APPROVE")
+        self.assertEqual(out["session_id"], "sess-legacy")
+        self.assertEqual(self.store.get_session_id(self.run_id, "review"), "sess-legacy")
+        self.assertIsNone(self.store.get_session_id(self.run_id, "review_spec"))
+        self.assertIsNone(self.store.get_session_id(self.run_id, "review_standards"))
+        prompt_log = self.store.read_artifact(self.run_id, "logs/review-prompt.md")
+        self.assertIsNotNone(prompt_log)
+        self.assertIsNone(self.store.read_artifact(self.run_id, "logs/review-spec-prompt.md"))
 
 
 if __name__ == "__main__":

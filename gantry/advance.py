@@ -265,6 +265,39 @@ def _e2e_failure_detail(store: Any, run_id: str) -> str:
     return "E2e tests failed."
 
 
+def _review_findings_detail(review_result: dict[str, Any] | None) -> str:
+    """Summarise the review-result.json into a concise Telegram/notify body
+    section that a phone-only reader can act on. Handles both shapes:
+      - Legacy flat (two_axis=False): {"verdict":..., "result": "..."}
+      - Two-axis (two_axis=True): {"two_axis": True, "spec": {...}, "standards": {...}}
+    For two-axis results, surfaces EACH axis's blocking/ask-user findings, so
+    a human reading review_escalated or review_changes_requested sees BOTH
+    axes' concerns, not just the combined verdict word."""
+    if not review_result:
+        return "No review result found."
+
+    if review_result.get("two_axis"):
+        parts = []
+        for axis_name in ("spec", "standards"):
+            axis = review_result.get(axis_name) or {}
+            verdict = axis.get("verdict", "?")
+            findings = axis.get("findings") or []
+            # Surface only blocking/ask-user findings to keep notification readable;
+            # no-op findings are noise on a phone screen.
+            notable = [f for f in findings if f.get("action") in ("blocking", "ask-user")]
+            parts.append(f"*{axis_name.capitalize()} axis*: {verdict}")
+            if notable:
+                for f in notable[:5]:
+                    parts.append(f"  • [{f.get('action','?')}] {_escape_md(f.get('description', '')[:120])}")
+                if len(notable) > 5:
+                    parts.append(f"  … and {len(notable) - 5} more (see review-result.json)")
+        return "\n".join(parts)
+
+    # Legacy single-axis shape: surface the first 400 chars of the prose result.
+    note = (review_result.get("result") or "")[:400]
+    return _escape_md(note) if note else "See review-result.json for details."
+
+
 def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] | None = None) -> str:
     """Build a self-contained, Markdown-formatted Telegram body: what happened,
     why, and how to respond. Written for a phone-only reader replying via
@@ -369,12 +402,25 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                 f"*Reply 2* to leave it — you'll check the logs yourself later.")
 
     if status == "review_escalated":
-        verdict = result.get("verdict") or store.read_result(run_id, "review.json")
-        note = verdict.get("note", "") if isinstance(verdict, dict) else ""
+        # advance_all's per-tick action dict only carries {"verdict": ...},
+        # not the full findings — always read the real persisted
+        # review-result.json (written by run_review regardless of caller)
+        # rather than trusting whatever partial `result` this call happened
+        # to receive.
+        review_result = store.read_result(run_id, "review-result.json")
+        detail = _review_findings_detail(review_result)
         return (f"{header}\n\n"
-                f"{_escape_md(note[:800])}\n\n"
+                f"{detail}\n\n"
                 f"*Reply 1* to approve as-is.\n"
                 f"*Reply 2* with guidance to send back for changes.")
+
+    if status == "review_changes_requested":
+        review_result = store.read_result(run_id, "review-result.json")
+        detail = _review_findings_detail(review_result)
+        return (f"{header}\n\n"
+                f"{detail}\n\n"
+                f"Sent back for a rebuild automatically with both axes' feedback in "
+                f"review-comments.md — no reply needed unless you want to intervene.")
 
     if status == "held":
         held_from = store.state(run_id).get("held_from_status", "")
