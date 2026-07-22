@@ -249,7 +249,16 @@ def run_repo_checks(cfg: ChecksConfig, cwd: Path) -> dict[str, Any]:
     project with no [checks] commands using {parallel=true} sees byte-identical
     behavior. Output shape ({"pass": bool, "results": [...]}) is unchanged
     regardless of how commands were split, so run_all_checks/advance.py need
-    no changes."""
+    no changes.
+
+    SECURITY: `cfg` here is always the ChecksConfig resolved from the TARGET
+    repo's gantry.toml (via Engine.__init__ -> config.load_config(self.target)),
+    never re-read from the worktree `cwd` these commands actually execute in.
+    `cwd` is only ever used as the subprocess working directory — an
+    agent-produced branch editing its own worktree's gantry.toml cannot change
+    which commands get shelled out here, since this function is never handed a
+    ChecksConfig loaded from that worktree. See config.load_config's docstring
+    for the full invariant this depends on."""
     commands = [_coerce_check_command(c) for c in cfg.commands]
     # Index-keyed, not command-string-keyed: two entries can legitimately
     # share the same command string (e.g. the same lint command listed twice

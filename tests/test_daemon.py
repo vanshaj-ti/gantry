@@ -158,6 +158,111 @@ class TestRunTickPerTargetTimeout(unittest.TestCase):
         self.assertTrue(result_b["ok"])
 
 
+class TestTickLock(unittest.TestCase):
+    """_tick_lock_acquire/_tick_lock_release now use a real OS-level advisory
+    lock (fcntl.flock) instead of a PID-liveness/staleness heuristic. Verify
+    the actual kernel-enforced mutual exclusion, not a simulation of it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self._config_dir_patch = mock.patch.object(daemon, "_CONFIG_DIR", base)
+        self._lock_patch = mock.patch.object(daemon, "_TICK_LOCK", base / "tick.lock")
+        self._config_dir_patch.start()
+        self._lock_patch.start()
+
+    def tearDown(self):
+        self._config_dir_patch.stop()
+        self._lock_patch.stop()
+        self._tmp.cleanup()
+
+    def test_first_acquire_succeeds(self):
+        lock_fh = daemon._tick_lock_acquire()
+        self.assertIsNotNone(lock_fh)
+        daemon._tick_lock_release(lock_fh)
+
+    def test_second_acquire_fails_while_first_still_held(self):
+        """Two real, concurrent attempts to acquire the tick lock: the first
+        succeeds and holds an open fd on the lock file; the second — a
+        genuinely separate file descriptor on the same file, opened while the
+        first is still open — must be rejected by the kernel, not by any
+        Python-level bookkeeping."""
+        first = daemon._tick_lock_acquire()
+        self.assertIsNotNone(first)
+        try:
+            second = daemon._tick_lock_acquire()
+            self.assertIsNone(second, "a second concurrent acquire must fail "
+                                       "while the first lock is still held")
+        finally:
+            daemon._tick_lock_release(first)
+
+    def test_acquire_succeeds_again_after_release(self):
+        first = daemon._tick_lock_acquire()
+        daemon._tick_lock_release(first)
+        second = daemon._tick_lock_acquire()
+        self.assertIsNotNone(second, "lock must be re-acquirable once released")
+        daemon._tick_lock_release(second)
+
+    def test_lock_released_even_when_holder_process_is_killed(self):
+        """The whole point of a real flock over a PID-staleness heuristic:
+        the kernel releases the lock on ANY death of the holding process,
+        including SIGKILL — no staleness window, no liveness probe needed."""
+        import os
+        import signal
+        import time as time_mod
+
+        lock_path = daemon._TICK_LOCK
+        pid = os.fork()
+        if pid == 0:  # child: acquire the lock and then hang until killed
+            fh = open(lock_path, "w")
+            fcntl_mod = __import__("fcntl")
+            fcntl_mod.flock(fh.fileno(), fcntl_mod.LOCK_EX | fcntl_mod.LOCK_NB)
+            time_mod.sleep(30)
+            os._exit(0)
+
+        try:
+            # Give the child a moment to acquire the lock.
+            for _ in range(50):
+                time_mod.sleep(0.02)
+                probe = daemon._tick_lock_acquire()
+                if probe is None:
+                    break
+                daemon._tick_lock_release(probe)
+            else:
+                self.fail("child never appeared to acquire the lock")
+
+            # Confirm it's genuinely held right now.
+            self.assertIsNone(daemon._tick_lock_acquire())
+
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+            # Kernel must have released the lock the instant the process died.
+            reacquired = daemon._tick_lock_acquire()
+            self.assertIsNotNone(reacquired, "lock must be free immediately "
+                                              "after the holder is SIGKILLed")
+            daemon._tick_lock_release(reacquired)
+        finally:
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except (ProcessLookupError, ChildProcessError):
+                    pass
+
+    def test_run_tick_skips_when_lock_already_held(self):
+        base = daemon._CONFIG_DIR
+        with mock.patch.object(daemon, "_TARGETS_FILE", base / "targets.json"), \
+             mock.patch.object(daemon, "_LAST_TICK_FILE", base / "last-tick.json"):
+            held = daemon._tick_lock_acquire()
+            self.assertIsNotNone(held)
+            try:
+                results = daemon.run_tick(interval_seconds=60)
+            finally:
+                daemon._tick_lock_release(held)
+        self.assertEqual(results, [])
+
+
 class TestNotifyDaemonStale(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

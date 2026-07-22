@@ -17,6 +17,7 @@ execs each tick; it loops the persisted target list and calls
 from __future__ import annotations
 
 import concurrent.futures
+import fcntl
 import json
 import logging
 import platform
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import IO
 
 from .state import _iso_to_ts, now_iso
 
@@ -103,36 +105,54 @@ def remove_target(target: Path) -> list[Path]:
 _TICK_LOCK = _CONFIG_DIR / "daemon-tick.lock"
 
 
-def _tick_lock_acquire() -> bool:
-    """Single-flight guard around the whole tick. launchd's StartInterval
-    fires every interval_seconds regardless of whether the previous
-    invocation finished — a resolve/build/evidence stage routinely runs
-    longer than the 60s default interval, so without this a second tick can
-    start advancing the same runs concurrently with the first, racing on
-    each run's state.json (the per-run .advance.lock only protects a single
-    run — an in-flight resolve/evidence call on run A doesn't stop a second
-    tick from processing run B, or worse, catching run A mid-write)."""
-    import os
-    if _TICK_LOCK.exists():
-        try:
-            held_pid = int(_TICK_LOCK.read_text().strip())
-        except (OSError, ValueError):
-            held_pid = None
-        if held_pid is not None:
-            try:
-                os.kill(held_pid, 0)
-                return False  # still alive — previous tick not done yet
-            except ProcessLookupError:
-                pass  # holder is dead — safe to reclaim
-            except PermissionError:
-                return False
+def _tick_lock_acquire() -> IO | None:
+    """Single-flight guard around the whole tick, via a real OS-level
+    advisory lock (`fcntl.flock`, POSIX — safe on both macOS and Linux, the
+    only two platforms the daemon supports; Windows daemon support is
+    explicitly out of scope). launchd's StartInterval fires every
+    interval_seconds regardless of whether the previous invocation finished
+    — a resolve/build/evidence stage routinely runs longer than the 60s
+    default interval, so without this a second tick can start advancing the
+    same runs concurrently with the first, racing on each run's state.json
+    (the per-run .advance.lock only protects a single run — an in-flight
+    resolve/evidence call on run A doesn't stop a second tick from
+    processing run B, or worse, catching run A mid-write).
+
+    This REPLACES a prior PID-liveness/staleness heuristic (write a PID to
+    the lock file, check `os.kill(pid, 0)`, fall back to a time-based
+    staleness window when that's inconclusive). `flock(LOCK_EX | LOCK_NB)`
+    is categorically more correct: the kernel releases the lock on ANY
+    process death, including SIGKILL, so a held lock always means a live
+    holder — there is no "how stale is too stale" judgment call left to make.
+
+    Returns the open file handle (which must be kept alive and passed to
+    `_tick_lock_release`) if the lock was acquired, or None if another
+    process already holds it. Non-blocking: never waits for the lock, since
+    `run_tick` should skip-and-report rather than block a whole tick on a
+    previous one still running."""
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    _TICK_LOCK.write_text(str(os.getpid()))
-    return True
+    fh = open(_TICK_LOCK, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
 
 
-def _tick_lock_release() -> None:
-    _TICK_LOCK.unlink(missing_ok=True)
+def _tick_lock_release(lock_fh: IO | None) -> None:
+    """Release the flock and close its file handle. The kernel would release
+    the lock on process exit regardless, but closing explicitly (in
+    run_tick's finally) lets a same-process next tick re-acquire it
+    immediately rather than waiting on GC. No-op if acquisition failed
+    (lock_fh is None) — mirrors the prior release's unlink(missing_ok=True)
+    tolerance for "nothing to release"."""
+    if lock_fh is None:
+        return
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_fh.close()
 
 
 def _record_tick_completed() -> None:
@@ -239,7 +259,8 @@ def run_tick(interval_seconds: int = 60) -> list[dict]:
     if heartbeat["stale"]:
         _notify_daemon_stale(heartbeat)
 
-    if not _tick_lock_acquire():
+    lock_fh = _tick_lock_acquire()
+    if lock_fh is None:
         print("skipped — previous tick still running")
         return []
     try:
@@ -258,7 +279,7 @@ def run_tick(interval_seconds: int = 60) -> list[dict]:
         _record_tick_completed()
         return results
     finally:
-        _tick_lock_release()
+        _tick_lock_release(lock_fh)
 
 
 def _advance_target_with_timeout(target: Path, timeout_seconds: int) -> dict:

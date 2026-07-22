@@ -12,6 +12,7 @@ from typing import Any
 
 from .engine import Engine
 from .git import branch_name, commit_all, create_pr, merge_pr, push
+from .redact import proxy_secrets, redact_secrets
 from .shipmeta import draft_ship_meta
 
 
@@ -27,21 +28,29 @@ def ship_run(engine: Engine, run_id: str) -> dict[str, Any]:
     # review.py. Without this, diagnosing WHY a ship failed (real git error?
     # network blip? gh not authenticated?) required re-running the exact
     # same commit/push/PR sequence by hand and hoping to reproduce it.
+    # gh/git subprocess output (commit_res/push_res/pr_res's "output" fields)
+    # can in principle echo GH_TOKEN or a proxy secret back (e.g. in an error
+    # message) — redact before persisting to ship.stderr, never after.
+    secrets = proxy_secrets(engine.cfg)
+
     commit_res = commit_all(wt, title)
     if not commit_res["ok"]:
-        engine.store.write_log(run_id, "ship.stderr", f"commit failed: {commit_res}")
+        engine.store.write_log(run_id, "ship.stderr",
+                               redact_secrets(f"commit failed: {commit_res}", extra_secrets=secrets))
         engine.store.update_state(run_id, status="ship_failed")
         return {"ok": False, "stage": "commit", **commit_res}
 
     push_res = push(wt, branch, remote_branch=remote_branch)
     if not push_res["ok"]:
-        engine.store.write_log(run_id, "ship.stderr", f"push failed: {push_res}")
+        engine.store.write_log(run_id, "ship.stderr",
+                               redact_secrets(f"push failed: {push_res}", extra_secrets=secrets))
         engine.store.update_state(run_id, status="ship_failed")
         return {"ok": False, "stage": "push", **push_res}
 
     pr_res = create_pr(wt, remote_branch, engine.cfg.git.base_branch, title, body)
     if not pr_res["ok"]:
-        engine.store.write_log(run_id, "ship.stderr", f"create_pr failed: {pr_res}")
+        engine.store.write_log(run_id, "ship.stderr",
+                               redact_secrets(f"create_pr failed: {pr_res}", extra_secrets=secrets))
         engine.store.update_state(run_id, status="ship_failed", pr_url=None)
         return {"ok": False, "commit": commit_res, "push": push_res, "pr": pr_res,
                 "branch": remote_branch, "title": title}

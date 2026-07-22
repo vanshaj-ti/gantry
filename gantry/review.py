@@ -23,6 +23,7 @@ from typing import Any
 
 from . import herdr as _herdr
 from .config import GantryConfig
+from .redact import proxy_secrets, redact_secrets
 from .runners import get_runner, resolve_proxy_env
 from .state import RunStore
 
@@ -228,8 +229,12 @@ def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> di
     # failed review (result.ok=False, empty result text) left literally no
     # diagnostic trail beyond review-result.json's bare {"ok": false,
     # "verdict": "ESCALATE"}, no way to tell WHY the runner call failed.
-    store.write_log(run_id, "review.stdout", result.stdout)
-    store.write_log(run_id, "review.stderr", result.stderr)
+    # Redact known-sensitive values (GH_TOKEN/TFY_API_KEY, this config's proxy
+    # api_key_env/headers values) before persisting subprocess output to disk
+    # — see redact.py's module docstring for the leak vector this closes.
+    secrets = proxy_secrets(cfg)
+    store.write_log(run_id, "review.stdout", redact_secrets(result.stdout, extra_secrets=secrets))
+    store.write_log(run_id, "review.stderr", redact_secrets(result.stderr, extra_secrets=secrets))
     store.save_session(run_id, "review", session_id=result.session_id,
                        model=cfg.review.model, runner=runner.name)
     from .cost import accumulate as _accumulate_cost

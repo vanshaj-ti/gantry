@@ -491,7 +491,24 @@ def _coerce_proxy(raw: dict[str, Any]) -> dict[str, ProxyConfig]:
 
 def load_config(target_workspace: Path) -> GantryConfig:
     """Load gantry.toml from the target workspace. Missing file -> all defaults
-    (so Gantry still runs on a fresh repo, just with empty models/checks)."""
+    (so Gantry still runs on a fresh repo, just with empty models/checks).
+
+    SECURITY INVARIANT: every call site in this codebase passes the TARGET
+    repo's own root (self.target in Engine, `_target()`/GANTRY_TARGET in the
+    CLI) — never a run's worktree path (see git.ensure_worktree/Engine.work_dir).
+    This matters because [checks].commands and [agent]/[models.*].runner are
+    code-executing fields: checks.py's run_repo_checks shells them out with
+    gantry's own ambient privileges (GH_TOKEN, proxy secrets, etc). If an
+    agent-produced branch (plan/build stage) could edit gantry.toml INSIDE its
+    own worktree and have that edit picked up, a later `gantry checks --run ID`
+    would execute whatever commands that branch just wrote. Engine loads its
+    config exactly once, from the target repo, at construction time
+    (`Engine.__init__` -> `self.cfg`) and reuses that same GantryConfig for
+    every stage/check/review call on a run — a worktree-local gantry.toml
+    mutation is therefore inert by construction; it's never re-read. Do not
+    add a call site that resolves gantry.toml from `Engine.work_dir(run_id)`
+    or any other worktree path — that would reopen exactly this hole.
+    """
     path = target_workspace / CONFIG_FILENAME
     if not path.exists():
         return GantryConfig()

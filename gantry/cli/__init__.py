@@ -269,7 +269,13 @@ def main(argv=None) -> int:
     try:
         return args.func(args)
     except Exception as exc:  # surface a clean error, non-zero exit
-        print(json.dumps({"ok": False, "error": str(exc)}, indent=2), file=sys.stderr)
+        # An exception message can in principle quote a secret value (e.g. a
+        # failed auth header, a subprocess error echoing its own args) — redact
+        # known-sensitive env values (GH_TOKEN/TFY_API_KEY; per-target proxy
+        # secrets aren't resolvable here without a target config, so only the
+        # always-sensitive env vars are covered) before this ever reaches stderr.
+        from ..redact import redact_secrets
+        print(json.dumps({"ok": False, "error": redact_secrets(str(exc))}, indent=2), file=sys.stderr)
         return 1
 
 

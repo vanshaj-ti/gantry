@@ -23,6 +23,7 @@ from typing import Any
 from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
+from .redact import proxy_secrets, redact_secrets
 from .runners import get_runner, resolve_proxy_env
 from .state import RunStore, now_iso
 
@@ -61,6 +62,13 @@ class Engine:
         self.target = target_workspace.resolve()
         self.cfg = config
         self.store = RunStore(self.target)
+
+    def _redact(self, text: str) -> str:
+        """Redact known-sensitive values (GH_TOKEN/TFY_API_KEY, this config's
+        proxy api_key_env/headers values) before any subprocess output gets
+        persisted to a log file — see redact.py's module docstring for the
+        leak vector this closes. Applied before writing, never after."""
+        return redact_secrets(text, extra_secrets=proxy_secrets(self.cfg))
 
     def work_dir(self, run_id: str) -> Path:
         """The isolated worktree a run's agent stages/checks/review execute in.
@@ -308,7 +316,8 @@ class Engine:
             proc = _subprocess.run(pre_hook, shell=True, cwd=str(work_dir),
                                    capture_output=True, text=True, timeout=900)
             self.store.write_log(run_id, "build-pre-hook.log",
-                                f"$ {pre_hook}\n(exit {proc.returncode})\n\n{proc.stdout}{proc.stderr}")
+                                self._redact(f"$ {pre_hook}\n(exit {proc.returncode})\n\n"
+                                             f"{proc.stdout}{proc.stderr}"))
             if proc.returncode != 0:
                 logger.warning("build pre_hook failed for run %s (exit %s): %s",
                                run_id, proc.returncode, pre_hook)
@@ -380,14 +389,14 @@ class Engine:
                 # "checks_escalated" path) can act on it instead of a human having to
                 # notice a stale lockfile and reset state by hand.
                 self.store.write_log(run_id, f"{stage}.stderr",
-                                     f"Agent subprocess timed out after {sm.timeout}s")
+                                     self._redact(f"Agent subprocess timed out after {sm.timeout}s"))
                 self._set_status(run_id, f"{stage}_failed")
                 return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
         finally:
             _stop_heartbeat(stop_hb, hb_thread)
         suffix = ".resume" if resume else ""
-        self.store.write_log(run_id, f"{stage}{suffix}.stdout", result.stdout)
-        self.store.write_log(run_id, f"{stage}{suffix}.stderr", result.stderr)
+        self.store.write_log(run_id, f"{stage}{suffix}.stdout", self._redact(result.stdout))
+        self.store.write_log(run_id, f"{stage}{suffix}.stderr", self._redact(result.stderr))
         self.store.write_result(run_id, f"{stage}-result.json", result.raw)
         self.store.save_session(run_id, stage, session_id=result.session_id,
                                 model=sm.model, runner=runner.name)
@@ -477,8 +486,8 @@ class Engine:
             )
         finally:
             _stop_heartbeat(stop_hb, hb_thread)
-        self.store.write_log(run_id, "resolve.stdout", result.stdout)
-        self.store.write_log(run_id, "resolve.stderr", result.stderr)
+        self.store.write_log(run_id, "resolve.stdout", self._redact(result.stdout))
+        self.store.write_log(run_id, "resolve.stderr", self._redact(result.stderr))
         self.store.write_result(run_id, "resolve-result.json", result.raw)
         from .cost import accumulate as _accumulate_cost
         _accumulate_cost(self.store, run_id, "resolve", result.usage,

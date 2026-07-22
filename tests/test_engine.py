@@ -418,5 +418,59 @@ class TestPlanDepthTemplateSelection(unittest.TestCase):
         self.assertEqual(path.name, "build.md")
 
 
+class TestWorktreeLocalGantryTomlCannotChangeExecutedChecks(unittest.TestCase):
+    """SECURITY regression: [checks].commands (and other code-executing
+    config) must always resolve from the TARGET repo's gantry.toml, never
+    from a run's own worktree — otherwise an agent-produced branch could edit
+    gantry.toml inside its own worktree and have a later `gantry checks --run
+    ID` execute whatever commands that branch just wrote, with gantry's own
+    ambient privileges. Verified here at the real Engine/run_checks level,
+    not just by inspecting call sites: create a run, let its worktree exist,
+    edit gantry.toml ONLY inside that worktree to a destructive-looking
+    command, and confirm run_checks still executes the TARGET repo's
+    original (empty) commands list — the worktree-local edit has zero
+    effect on what actually gets shelled out."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        # Target repo's real gantry.toml: one harmless, observable command.
+        self.marker = self.target / "target-checks-ran.txt"
+        (self.target / "gantry.toml").write_text(
+            f'[checks]\ncommands = ["touch {self.marker}"]\n'
+        )
+        subprocess.run(["git", "add", "gantry.toml"], cwd=str(self.target), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "add gantry.toml"],
+                       cwd=str(self.target), check=True)
+
+        from gantry.config import load_config
+        self.cfg = load_config(self.target)
+        self.eng = Engine(self.target, self.cfg)
+        self.run_id = self.eng.create_run("t", "do the thing")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_worktree_gantry_toml_edit_does_not_change_executed_commands(self):
+        wt = self.eng.work_dir(self.run_id)  # creates the worktree
+
+        # Edit gantry.toml ONLY inside the worktree — a stand-in for what an
+        # agent-produced plan/build stage could do to its own branch. Point
+        # it at a DIFFERENT marker file so a leak is unambiguous.
+        worktree_marker = wt / "worktree-checks-ran.txt"
+        (wt / "gantry.toml").write_text(
+            f'[checks]\ncommands = ["touch {worktree_marker}"]\n'
+        )
+
+        self.eng.run_checks(self.run_id)
+
+        self.assertTrue(self.marker.exists(),
+                        "the TARGET repo's own gantry.toml commands must have run")
+        self.assertFalse(worktree_marker.exists(),
+                         "a gantry.toml edited only inside the run's worktree must "
+                         "NEVER influence which commands get executed")
+
+
 if __name__ == "__main__":
     unittest.main()
