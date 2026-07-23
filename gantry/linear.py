@@ -376,7 +376,13 @@ def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: st
             checks = store.read_result(run_id, "checks.json") or {}
             high_risk = (checks.get("scope") or {}).get("high_risk_files") or []
             file_list = "\n".join(f"  • `{f}`" for f in high_risk[:8])
-            detail = f"High-risk path(s) touched — needs human sign-off:\n{file_list}" if file_list else "High-risk path(s) touched — needs human sign-off."
+            if file_list:
+                detail = (
+                    "High-risk path(s) touched — needs human sign-off:\n"
+                    f"{file_list}"
+                )
+            else:
+                detail = "High-risk path(s) touched — needs human sign-off."
         else:
             detail = f"{stage.capitalize()} escalated to a human decision — see gantry state/logs for detail."
         framing = f"{stage.replace('_', ' ').capitalize()} escalated — needs your input:"

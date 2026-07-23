@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gantry.config import GantryConfig, MCPConfig, MCPServer, load_config
+from gantry.config import GantryConfig, MCPConfig, MCPServer
 from gantry.mcp import ensure_mcp_for_stage
 
 
@@ -82,8 +82,6 @@ class TestEnsureMcpCodex(unittest.TestCase):
         self.assertEqual(argv[4:], ["--", "my-mcp", "serve", "--flag"])
 
     def test_default_mcp_servers_include_codex_register(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = load_config(Path(tmp))
         # Defaults are merged when servers empty — check the module defaults
         # are loadable onto a fresh MCPConfig via DEFAULT_MCP_SERVERS shape.
         from gantry.config import DEFAULT_MCP_SERVERS
