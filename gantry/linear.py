@@ -286,17 +286,21 @@ def set_issue_state(issue_id: str, state_id: str, api_key: str) -> None:
 
 
 def _maybe_post_stage_doc(run_id: str, store: Any, issue_id: str, status: str, api_key: str) -> None:
-    """Attach a completed doc stage's artifact to the Linear issue, exactly
-    once per stage — a human deciding on a *_complete gate should see the
-    actual report/spec/design content, not just a status change. Dedup via
-    a `linear_docs_posted` list on run state (survives repeated poller
-    ticks hitting the same *_complete status before a human replies)."""
+    """Attach a completed doc stage's artifact to the Linear issue — once
+    per DISTINCT version of that artifact, not once ever per stage name.
+
+    A doc stage can complete more than once for the same run: human sends
+    feedback -> resume -> investigation_complete fires again with a
+    rewritten report. Deduping on stage name alone (the original design)
+    means that second, genuinely different report never gets posted —
+    confirmed live: the issue moved to Blocked with no new comment, the
+    human had nothing to review the second time around. Dedup key is now
+    a content hash, keyed by stage, in `linear_docs_posted` (dict, not
+    list) — re-posts whenever the file's actual content changed since the
+    last post, not just whenever the stage name repeats."""
     if not (status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES):
         return
     stage = status.removesuffix("_complete")
-    posted = store.state(run_id).get("linear_docs_posted") or []
-    if stage in posted:
-        return
     from .config import STAGE_ARTIFACTS
     artifact_name = STAGE_ARTIFACTS.get(stage)
     if not artifact_name:
@@ -304,8 +308,12 @@ def _maybe_post_stage_doc(run_id: str, store: Any, issue_id: str, status: str, a
     artifact_path = store.artifact_path(run_id, artifact_name)
     if not artifact_path.exists():
         return
+    content_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    posted = store.state(run_id).get("linear_docs_posted") or {}
+    if posted.get(stage) == content_hash:
+        return
     post_stage_doc(issue_id, stage, artifact_path, api_key)
-    store.update_state(run_id, linear_docs_posted=posted + [stage])
+    store.update_state(run_id, linear_docs_posted={**posted, stage: content_hash})
 
 
 def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> dict[str, Any]:

@@ -510,12 +510,60 @@ class TestDocStageAttachment(unittest.TestCase):
 
         self.assertEqual(put_calls, ["https://upload.example/put"])
         self.assertEqual(len([q for q in graphql_calls if "fileUpload" in q]), 1)
-        self.assertEqual(store.state(run_id)["linear_docs_posted"], ["investigation"])
+        self.assertIn("investigation", store.state(run_id)["linear_docs_posted"])
         # The completion comment links the uploaded file's assetUrl, not a
         # separate attachmentCreate card.
         self.assertEqual(len(posted_comment_bodies), 1)
         self.assertIn("https://asset.example/file.md", posted_comment_bodies[0])
         self.assertIn("Investigation stage complete", posted_comment_bodies[0])
+
+    def test_investigation_complete_reposts_after_content_changes(self):
+        """A doc stage can complete more than once for the same run — human
+        sends feedback, resume, investigation_complete fires again with a
+        rewritten report. That second, genuinely different report must be
+        re-posted, not silently skipped as an already-seen stage name."""
+        from gantry.linear import sync_issue_status
+
+        run_id = self.eng.create_run("t", "r", tag="bug")
+        store = self.eng.store
+        store.record_linear_issue("issue-2", run_id)
+        store.artifact_path(run_id, "investigation-report.md").write_text("# Investigation\n\nfirst pass.\n")
+        store.update_state(run_id, status="investigation_complete", current_stage="investigation")
+
+        posted_comment_bodies = []
+
+        def fake_graphql(query, variables, api_key):
+            if "fileUpload" in query:
+                return {"fileUpload": {"success": True, "uploadFile": {
+                    "uploadUrl": "https://upload.example/put", "assetUrl": "https://asset.example/file.md",
+                    "headers": []}}}
+            if "commentCreate" in query:
+                posted_comment_bodies.append(variables["body"])
+                return {"commentCreate": {"success": True}}
+            if "team(id" in query and "states" in query:
+                return {"team": {"states": {"nodes": [
+                    {"id": "s-blocked", "name": "Blocked", "type": "started"}]}}}
+            if "team(id" in query and "labels" in query:
+                return {"team": {"labels": {"nodes": []}}}
+            if "issue(id" in query and "labels" in query:
+                return {"issue": {"labels": {"nodes": []}}}
+            if "issueLabelCreate" in query:
+                return {"issueLabelCreate": {"success": True, "issueLabel": {"id": "lbl-1"}}}
+            return {"issueUpdate": {"success": True}}
+
+        class _FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        with patch("gantry.linear._graphql", side_effect=fake_graphql), \
+             patch("gantry.linear.urllib.request.urlopen", return_value=_FakeResp()):
+            sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
+            # Simulate a resume that rewrote the report with different content.
+            store.artifact_path(run_id, "investigation-report.md").write_text(
+                "# Investigation\n\nrewritten after feedback.\n")
+            sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
+
+        self.assertEqual(len(posted_comment_bodies), 2)
 
 
 if __name__ == "__main__":
