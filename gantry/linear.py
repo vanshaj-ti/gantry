@@ -149,6 +149,44 @@ def post_comment(issue_id: str, body: str, api_key: str) -> None:
     )
 
 
+def upload_file_to_linear(content: bytes, filename: str, content_type: str, api_key: str) -> str:
+    """3-step upload per https://linear.app/developers/how-to-upload-a-file-to-linear:
+    request a pre-signed URL via fileUpload, PUT the bytes there, return the
+    resulting assetUrl for use in an attachmentCreate/commentCreate."""
+    data = _graphql(
+        "mutation($contentType: String!, $filename: String!, $size: Int!) { "
+        "fileUpload(contentType: $contentType, filename: $filename, size: $size) { "
+        "success uploadFile { uploadUrl assetUrl headers { key value } } } }",
+        {"contentType": content_type, "filename": filename, "size": len(content)}, api_key,
+    )
+    upload = data["fileUpload"]["uploadFile"]
+    headers = {"Content-Type": content_type}
+    for h in upload["headers"]:
+        headers[h["key"]] = h["value"]
+    req = urllib.request.Request(upload["uploadUrl"], data=content, headers=headers, method="PUT")
+    with urllib.request.urlopen(req, timeout=60):
+        pass
+    return upload["assetUrl"]
+
+
+def attach_doc_to_issue(issue_id: str, title: str, asset_url: str, api_key: str) -> None:
+    _graphql(
+        "mutation($issueId: String!, $title: String!, $url: String!) { "
+        "attachmentCreate(input: {issueId: $issueId, title: $title, url: $url}) { success } }",
+        {"issueId": issue_id, "title": title, "url": asset_url}, api_key,
+    )
+
+
+def post_stage_doc(issue_id: str, stage: str, artifact_path: Path, api_key: str) -> None:
+    """Upload a completed doc stage's artifact (investigation-report.md,
+    product-spec.md, etc) as a Linear file attachment on the issue — the
+    human reviewing a *_complete gate should see the actual content there,
+    not just a status change."""
+    content = artifact_path.read_bytes()
+    asset_url = upload_file_to_linear(content, artifact_path.name, "text/markdown", api_key)
+    attach_doc_to_issue(issue_id, f"{stage}: {artifact_path.name}", asset_url, api_key)
+
+
 # Which gantry run status maps to which Linear workflow category. Checked in
 # order against status via prefix/exact match — first match wins.
 # review_approved is deliberately NOT "done" — the PR isn't even open yet at
@@ -229,6 +267,29 @@ def set_issue_state(issue_id: str, state_id: str, api_key: str) -> None:
     )
 
 
+def _maybe_post_stage_doc(run_id: str, store: Any, issue_id: str, status: str, api_key: str) -> None:
+    """Attach a completed doc stage's artifact to the Linear issue, exactly
+    once per stage — a human deciding on a *_complete gate should see the
+    actual report/spec/design content, not just a status change. Dedup via
+    a `linear_docs_posted` list on run state (survives repeated poller
+    ticks hitting the same *_complete status before a human replies)."""
+    if not (status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES):
+        return
+    stage = status.removesuffix("_complete")
+    posted = store.state(run_id).get("linear_docs_posted") or []
+    if stage in posted:
+        return
+    from .config import STAGE_ARTIFACTS
+    artifact_name = STAGE_ARTIFACTS.get(stage)
+    if not artifact_name:
+        return
+    artifact_path = store.artifact_path(run_id, artifact_name)
+    if not artifact_path.exists():
+        return
+    post_stage_doc(issue_id, stage, artifact_path, api_key)
+    store.update_state(run_id, linear_docs_posted=posted + [stage])
+
+
 def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> dict[str, Any]:
     """Keep a run's tracked Linear issue in sync with its gantry state:
 
@@ -239,6 +300,9 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
        (independent of (1): moving investigation -> plan is still
        "in_progress" category-wise, but the visible stage label must still
        advance so the issue shows where the run actually is right now).
+    3. Doc-stage artifact attachment — the completed doc gets attached as a
+       file the first time its *_complete status is seen (see
+       _maybe_post_stage_doc).
 
     No-op if this run has no tracked Linear issue (e.g. a run created
     outside the Linear intake path)."""
@@ -252,6 +316,8 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
         set_stage_label(issue_id, current_stage, team_id, api_key)
 
     status = run_state.get("status", "")
+    _maybe_post_stage_doc(run_id, store, issue_id, status, api_key)
+
     category = status_to_category(status)
     if not category:
         return {"synced": True, "issue_id": issue_id, "stage": current_stage,

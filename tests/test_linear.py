@@ -415,5 +415,70 @@ class TestCommentReplyPath(unittest.TestCase):
         self.assertIn("retry path", answer_path.read_text())
 
 
+class TestDocStageAttachment(unittest.TestCase):
+    """A completed doc stage's artifact gets attached to the Linear issue as
+    a file exactly once — not re-uploaded on every poller tick that finds
+    the run still sitting at the same *_complete gate."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_investigation_complete_uploads_report_once(self):
+        from gantry.linear import sync_issue_status
+
+        run_id = self.eng.create_run("t", "r", tag="bug")
+        store = self.eng.store
+        store.record_linear_issue("issue-1", run_id)
+        store.artifact_path(run_id, "investigation-report.md").write_text("# Investigation\n\nfound it.\n")
+        store.update_state(run_id, status="investigation_complete", current_stage="investigation")
+
+        graphql_calls = []
+        put_calls = []
+
+        def fake_graphql(query, variables, api_key):
+            graphql_calls.append(query)
+            if "fileUpload" in query:
+                return {"fileUpload": {"success": True, "uploadFile": {
+                    "uploadUrl": "https://upload.example/put", "assetUrl": "https://asset.example/file.md",
+                    "headers": [{"key": "X-Test", "value": "1"}]}}}
+            if "attachmentCreate" in query:
+                return {"attachmentCreate": {"success": True}}
+            if "team(id" in query and "states" in query:
+                return {"team": {"states": {"nodes": [
+                    {"id": "s-blocked", "name": "Blocked", "type": "started"}]}}}
+            if "team(id" in query and "labels" in query:
+                return {"team": {"labels": {"nodes": []}}}
+            if "issue(id" in query and "labels" in query:
+                return {"issue": {"labels": {"nodes": []}}}
+            if "issueLabelCreate" in query:
+                return {"issueLabelCreate": {"success": True, "issueLabel": {"id": "lbl-1"}}}
+            return {"issueUpdate": {"success": True}}
+
+        class _FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=60):
+            put_calls.append(req.full_url)
+            return _FakeResp()
+
+        with patch("gantry.linear._graphql", side_effect=fake_graphql), \
+             patch("gantry.linear.urllib.request.urlopen", side_effect=fake_urlopen):
+            sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
+            # Second tick, same status — must NOT upload again.
+            sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
+
+        self.assertEqual(put_calls, ["https://upload.example/put"])
+        self.assertEqual(len([q for q in graphql_calls if "fileUpload" in q]), 1)
+        self.assertEqual(store.state(run_id)["linear_docs_posted"], ["investigation"])
+
+
 if __name__ == "__main__":
     unittest.main()
