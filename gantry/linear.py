@@ -81,13 +81,18 @@ def _graphql(query: str, variables: dict[str, Any], api_key: str) -> dict[str, A
 
 
 def get_or_create_label(team_id: str, name: str, api_key: str) -> str:
-    """Return the label id for `name` on this team, creating it if absent."""
+    """Return the label id for `name` on this team, creating it if absent.
+
+    Case-insensitive match: Linear enforces case-insensitive uniqueness on
+    label names, so an exact-case comparison here can miss an existing
+    label (e.g. team default "Bug") and then fail to create a
+    differently-cased one ("bug") with a "duplicate label name" error."""
     data = _graphql(
         "query($teamId: String!) { team(id: $teamId) { labels { nodes { id name } } } }",
         {"teamId": team_id}, api_key,
     )
     for lbl in data["team"]["labels"]["nodes"]:
-        if lbl["name"] == name:
+        if lbl["name"].lower() == name.lower():
             return lbl["id"]
     data = _graphql(
         "mutation($teamId: String!, $name: String!) { "
