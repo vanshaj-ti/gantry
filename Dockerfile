@@ -52,6 +52,7 @@ COPY --chown=gantry:gantry gantry/skills/ /home/gantry/.claude/skills/
 RUN claude plugin marketplace add JuliusBrussee/caveman \
     && claude plugin marketplace add mksglu/context-mode \
     && claude plugin marketplace add DietrichGebert/ponytail \
+    && claude plugin marketplace add anthropics/claude-plugins-official \
     && claude plugin install caveman@caveman \
     && claude plugin install context-mode@context-mode \
     && claude plugin install ponytail@ponytail \
