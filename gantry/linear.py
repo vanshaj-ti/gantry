@@ -141,11 +141,22 @@ def set_stage_label(issue_id: str, stage: str, team_id: str, api_key: str) -> No
     )
 
 
+# Every comment gantry itself posts carries this invisible marker. Without
+# it, a real, catastrophic incident: gantry posts a status comment ->
+# Linear delivers that as a Comment webhook event right back to gantry ->
+# handle_comment_created treats it as a human reply and resumes the stage
+# -> which posts another comment -> infinite loop, dozens of comments per
+# second, real API cost, until the container is killed by hand. Confirmed
+# live against a real Linear team (see incident notes in linear.py's git
+# history) — this is not a hypothetical.
+_GANTRY_COMMENT_MARKER = "<!-- gantry:auto -->"
+
+
 def post_comment(issue_id: str, body: str, api_key: str) -> None:
     _graphql(
         "mutation($issueId: String!, $body: String!) { "
         "commentCreate(input: {issueId: $issueId, body: $body}) { success } }",
-        {"issueId": issue_id, "body": body}, api_key,
+        {"issueId": issue_id, "body": f"{body}\n{_GANTRY_COMMENT_MARKER}"}, api_key,
     )
 
 
@@ -402,6 +413,12 @@ def handle_comment_created(payload: dict[str, Any], linear_api_key: str,
     body = comment.get("body", "")
     if not issue_id:
         raise LinearError("comment payload missing issueId")
+    if _GANTRY_COMMENT_MARKER in body:
+        # gantry's own status comment, delivered back as a webhook event —
+        # NOT a human reply. Processing this is what causes the infinite
+        # comment loop (see _GANTRY_COMMENT_MARKER's docstring). Must be
+        # checked before anything else.
+        return {"handled": False, "reason": "comment authored by gantry itself, ignoring"}
 
     cfg = load_config(project_root)
     store = RunStore(project_root)

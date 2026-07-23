@@ -339,6 +339,37 @@ class TestCommentReplyPath(unittest.TestCase):
         result = handle_comment_created(payload, TEST_API_KEY, self.target)
         self.assertFalse(result["handled"])
 
+    def test_gantry_own_comment_is_never_treated_as_a_reply(self):
+        """Real incident this guards against: gantry posts a status comment
+        -> Linear delivers it back as a Comment webhook event -> without
+        this check, handle_comment_created would treat it as a human reply
+        and resume the stage -> which posts another comment -> infinite
+        loop. Confirmed live against a real Linear team."""
+        from gantry.linear import post_comment
+        run_id = self.eng.create_run("t", "r", tag="bug")
+        self.eng.store.record_linear_issue("issue-loop", run_id)
+
+        posted_bodies = []
+
+        def fake_graphql(query, variables, api_key):
+            if "commentCreate" in query:
+                posted_bodies.append(variables["body"])
+                return {"commentCreate": {"success": True}}
+            return {}
+
+        with patch("gantry.linear._graphql", side_effect=fake_graphql):
+            post_comment("issue-loop", "Classified as `bug`. Gantry run created.", TEST_API_KEY)
+
+        self.assertEqual(len(posted_bodies), 1)
+        gantry_comment_body = posted_bodies[0]
+
+        # Simulate Linear delivering that exact comment back as a webhook event.
+        payload = {"type": "Comment", "action": "create",
+                  "data": {"issueId": "issue-loop", "body": gantry_comment_body}}
+        result = handle_comment_created(payload, TEST_API_KEY, self.target)
+        self.assertFalse(result["handled"])
+        self.assertIn("gantry itself", result["reason"])
+
     def test_comment_approve_advances_investigation_stage(self):
         run_id = self.eng.create_run("t", "r", tag="bug")
         store = self.eng.store
