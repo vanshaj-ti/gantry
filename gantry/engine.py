@@ -177,11 +177,11 @@ class Engine:
         )
 
     # Every stage gantry ships its own authored SKILL.md for (baked into the
-    # Docker image at ~/.claude/skills/gantry-stage-<stage>/ — see
-    # Dockerfile and gantry/skills/<stage>/SKILL.md). Distinct from
-    # _skills_directive below: this is gantry's OWN stage discipline, not a
-    # generic third-party methodology library, so it applies to every
-    # stage — not just build/evidence.
+    # Docker image at ~/.claude/skills/ and ~/.codex/skills/ as
+    # gantry-stage-<stage>/ — see Dockerfile and gantry/skills/<stage>/SKILL.md).
+    # Distinct from _skills_directive below: this is gantry's OWN stage
+    # discipline, not a generic third-party methodology library, so it applies
+    # to every stage — not just build/evidence.
     _STAGE_SKILLS = {"spec", "design", "investigation", "research", "plan", "build", "evidence"}
 
     def _stage_skill_directive(self, stage: str) -> str:

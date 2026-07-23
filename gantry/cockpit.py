@@ -2,30 +2,36 @@
 inherently with gantry (no external tool dependency, unlike the optional
 herdr integration — see scripts/gantry-herdr.sh and README's herdr section).
 
-Layout (status bar thin, claude session gets the larger right-hand share):
+Layout (status bar thin, agent session gets the larger right-hand share):
 
     +----------------------------------------------------------+
     |  status bar (gantry watch --live) — full width, thin     |
     +-----------------------+------------------------------------+
     |                       |                                    |
-    |  doc viewer           |  claude session (larger)            |
-    |  gantry docs --nav    |  claude --dangerously-skip-...      |
+    |  doc viewer           |  agent session (larger)            |
+    |  gantry docs --nav    |  claude | codex | cursor-agent     |
     |                       |                                    |
     +-----------------------+------------------------------------+
 
-Mouse mode is enabled for this session only (click-drag pane borders to
-resize, click to switch focus) — doesn't touch the user's global tmux config.
+The agent pane launches whichever runner [agent].runner names (same skip-
+permissions policy as headless stages). Mouse mode is enabled for this
+session only (click-drag pane borders to resize, click to switch focus) —
+doesn't touch the user's global tmux config.
 
 Re-running `gantry cockpit` against the same target reuses the existing tmux
 session (by name) instead of spawning a duplicate.
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
+from .config import load_config
+from .runners import interactive_command
+
 STATUS_BAR_HEIGHT = 15
-CLAUDE_PANE_PERCENT = 60  # right pane (claude session) gets the larger share
+AGENT_PANE_PERCENT = 60  # right pane (agent session) gets the larger share
 STATUS_PANE_HISTORY_LIMIT = 1000  # small scrollback cap for the status pane only
 
 
@@ -55,13 +61,34 @@ def _pane_cmd(target: Path, cmd: str) -> str:
     return f"export GANTRY_TARGET={target}; cd {target}; {cmd}"
 
 
+def _agent_pane_cmd(target: Path) -> tuple[str, str]:
+    """Resolve the interactive agent argv from gantry.toml. Returns
+    (shell_command, runner_name). Falls back to claude-code if config is
+    missing/broken so cockpit still opens something useful."""
+    try:
+        cfg = load_config(target)
+        runner = cfg.agent.runner
+        skip = cfg.agent.skip_permissions
+    except Exception:
+        runner, skip = "claude-code", True
+    try:
+        argv = interactive_command(runner, skip_permissions=skip)
+    except ValueError:
+        runner, skip = "claude-code", True
+        argv = interactive_command(runner, skip_permissions=skip)
+    return " ".join(shlex.quote(a) for a in argv), runner
+
+
 def build_cockpit(target: Path) -> dict:
     """Create (or reuse) the tmux workspace for `target`. Returns
-    {ok, session, reused} — never raises; tmux errors surface in `ok`/`error`."""
+    {ok, session, reused, runner} — never raises; tmux errors surface in
+    `ok`/`error`."""
     name = session_name(target)
 
     if session_exists(name):
         return {"ok": True, "session": name, "reused": True}
+
+    agent_cmd, runner = _agent_pane_cmd(target)
 
     proc = _tmux("new-session", "-d", "-s", name, "-c", str(target))
     if proc.returncode != 0:
@@ -73,7 +100,7 @@ def build_cockpit(target: Path) -> dict:
     # session option does not resize already-created panes. So: set it low
     # right before creating the status-bar pane (the pane that repaints
     # every 2s for the run's whole lifetime, see watch.py's Ghostty-leak
-    # comment), then restore it before creating the doc/claude panes so
+    # comment), then restore it before creating the doc/agent panes so
     # they keep the session's normal scrollback.
     # -A: show the value even if only inherited from the global default
     # (tmux prints it bare, with no session-local override, otherwise) —
@@ -99,11 +126,11 @@ def build_cockpit(target: Path) -> dict:
     else:
         _tmux("set-option", "-t", name, "-u", "history-limit")  # fall back to tmux's global default
 
-    # Split the bottom pane left/right: doc viewer left, claude session right.
+    # Split the bottom pane left/right: doc viewer left, agent session right.
     # `-p N` on the ORIGINAL pane gives the NEW pane N% — the split target
-    # (.1, the doc viewer) is the original, so the new (claude) pane gets
-    # CLAUDE_PANE_PERCENT.
-    proc = _tmux("split-window", "-t", f"{name}.1", "-h", "-p", str(CLAUDE_PANE_PERCENT))
+    # (.1, the doc viewer) is the original, so the new (agent) pane gets
+    # AGENT_PANE_PERCENT.
+    proc = _tmux("split-window", "-t", f"{name}.1", "-h", "-p", str(AGENT_PANE_PERCENT))
     if proc.returncode != 0:
         _tmux("kill-session", "-t", name)
         return {"ok": False, "error": proc.stderr.strip() or "tmux split-window (left/right) failed"}
@@ -117,21 +144,21 @@ def build_cockpit(target: Path) -> dict:
     pane_lines = [ln.split() for ln in panes.stdout.strip().splitlines() if ln.strip()]
     # Identify roles by position, not creation order (tmux pane indices can
     # renumber): smallest top = status bar; of the remaining two, smaller
-    # left = doc viewer, larger left = claude session.
+    # left = doc viewer, larger left = agent session.
     by_top = sorted(pane_lines, key=lambda p: int(p[1]))
     status_pane = by_top[0][0]
     bottom = sorted(by_top[1:], key=lambda p: int(p[2]))
-    docs_pane, claude_pane = bottom[0][0], bottom[1][0]
+    docs_pane, agent_pane = bottom[0][0], bottom[1][0]
 
     _tmux("send-keys", "-t", status_pane,
           _pane_cmd(target, "gantry watch --live"), "Enter")
     _tmux("send-keys", "-t", docs_pane,
           _pane_cmd(target, "gantry docs --nav"), "Enter")
-    _tmux("send-keys", "-t", claude_pane,
-          _pane_cmd(target, "claude --dangerously-skip-permissions"), "Enter")
-    _tmux("select-pane", "-t", claude_pane)
+    _tmux("send-keys", "-t", agent_pane,
+          _pane_cmd(target, agent_cmd), "Enter")
+    _tmux("select-pane", "-t", agent_pane)
 
-    return {"ok": True, "session": name, "reused": False}
+    return {"ok": True, "session": name, "reused": False, "runner": runner}
 
 
 def attach(name: str) -> int:

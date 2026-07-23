@@ -7,9 +7,9 @@
 #   |  info: title/status/updated-at, doesn't need real estate) |
 #   +---------------------------------+--------------------------+
 #   |                                 |  gantry docs --pick       |
-#   |  claude --dangerously-skip-     |  (interactive: choose a   |
-#   |  permissions  (your assistant   |  run, then a doc, Esc to  |
-#   |  driving gantry runs)           |  go back a level)         |
+#   |  agent TUI (claude|codex|       |  (interactive: choose a   |
+#   |  cursor-agent from              |  run, then a doc, Esc to  |
+#   |  [agent].runner)                |  go back a level)         |
 #   +---------------------------------+--------------------------+
 #
 # Reuses the workspace if one for this repo is already open instead of
@@ -35,6 +35,37 @@ LABEL="gantry: $REPO_NAME"
 if [ ! -f "$TARGET/gantry.toml" ]; then
   echo "warning: $TARGET/gantry.toml not found — 'gantry doctor' will show config_present=false" >&2
 fi
+
+# Resolve the interactive agent command from [agent].runner (same policy as
+# gantry cockpit). Falls back to claude with skip-permissions if config/python
+# is unavailable so the pane still opens something useful.
+resolve_agent_cmd() {
+  # Prefer the installed gantry package's runners module (venv first).
+  local py_snippet
+  py_snippet='
+import shlex, sys
+from pathlib import Path
+try:
+    from gantry.config import load_config
+    from gantry.runners import interactive_command
+    cfg = load_config(Path(sys.argv[1]))
+    argv = interactive_command(cfg.agent.runner, skip_permissions=cfg.agent.skip_permissions)
+except Exception:
+    argv = ["claude", "--dangerously-skip-permissions"]
+print(" ".join(shlex.quote(a) for a in argv))
+'
+  if [ -f "$VENV_ACTIVATE" ]; then
+    # shellcheck disable=SC1090
+    source "$VENV_ACTIVATE"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "$py_snippet" "$TARGET" 2>/dev/null && return 0
+  fi
+  printf '%s\n' "claude --dangerously-skip-permissions"
+}
+
+AGENT_CMD="$(resolve_agent_cmd)"
+AGENT_PANE_SHELL="source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && $AGENT_CMD"
 
 # Make sure the herdr server is actually up before we start driving the socket API.
 # NB: use `grep ... >/dev/null` here, not `grep -q` — with `set -o pipefail`,
@@ -71,7 +102,7 @@ if [ -n "$EXISTING_WS" ]; then
   # The three panes we set up earlier may have had their commands exit
   # (crash, Ctrl+C, `exit`, etc.) since this workspace was created — in
   # which case focusing it just shows three bare shells. Detect which of
-  # the three roles (status/claude/docs) are sitting at a bare shell and
+  # the three roles (status/agent/docs) are sitting at a bare shell and
   # re-launch only those, identified by pane geometry (top / bottom-left /
   # bottom-right) rather than assuming pane IDs are stable across runs.
   ROLE_PANES="$(python3 -c "
@@ -98,7 +129,7 @@ top_id = min(rects, key=lambda pid: rects[pid]['y'])
 bottom = [pid for pid in rects if pid != top_id]
 left_id, right_id = sorted(bottom, key=lambda pid: rects[pid]['x'])
 
-for role, pid in (('top', top_id), ('claude', left_id), ('docs', right_id)):
+for role, pid in (('top', top_id), ('agent', left_id), ('docs', right_id)):
     info = json.loads(subprocess.run(['herdr', 'pane', 'process-info', '--pane', pid],
                                       capture_output=True, text=True).stdout)
     fg = info['result']['process_info']['foreground_processes']
@@ -114,9 +145,9 @@ for role, pid in (('top', top_id), ('claude', left_id), ('docs', right_id)):
         echo "Re-launching gantry watch in $PANE_ID (previous process had exited)" >&2
         herdr pane run "$PANE_ID" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry watch --live"
         ;;
-      claude)
-        echo "Re-launching claude in $PANE_ID (previous process had exited)" >&2
-        herdr pane run "$PANE_ID" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && claude --dangerously-skip-permissions"
+      agent)
+        echo "Re-launching agent ($AGENT_CMD) in $PANE_ID (previous process had exited)" >&2
+        herdr pane run "$PANE_ID" "$AGENT_PANE_SHELL"
         ;;
       docs)
         echo "Re-launching gantry docs --pick in $PANE_ID (previous process had exited)" >&2
@@ -136,7 +167,7 @@ else
   # of this script that split --direction right.)
   BOTTOM_PANE="$(herdr pane split "$TOP_PANE" --direction down --ratio 0.12 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
 
-  # Split the bottom region into Claude (left, wider) and the docs viewer
+  # Split the bottom region into agent (left, wider) and the docs viewer
   # (right, narrower) using the same original-pane-keeps-the-ratio rule.
   DOCS_PANE="$(herdr pane split "$BOTTOM_PANE" --direction right --ratio 0.65 --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")"
 
@@ -144,12 +175,12 @@ else
   # status, updated-at), doesn't need a full pane's worth of screen.
   herdr pane run "$TOP_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && gantry watch --live"
 
-  # Bottom-left: live Claude Code session, dropped straight into an
-  # interactive chat cwd'd into the target repo with permissions bypassed —
-  # this IS the assistant driving gantry runs. Venv activated + GANTRY_TARGET
-  # exported first so any `gantry ...` shell-outs Claude runs actually resolve
-  # the binary and default to the right repo.
-  herdr pane run "$BOTTOM_PANE" "source '$VENV_ACTIVATE' && export GANTRY_TARGET='$TARGET' && cd '$TARGET' && claude --dangerously-skip-permissions"
+  # Bottom-left: live agent session for [agent].runner, cwd'd into the target
+  # repo with permissions bypassed per skip_permissions — this IS the
+  # assistant driving gantry runs. Venv activated + GANTRY_TARGET exported
+  # first so any `gantry ...` shell-outs resolve the binary and default to
+  # the right repo.
+  herdr pane run "$BOTTOM_PANE" "$AGENT_PANE_SHELL"
 
   # Bottom-right: interactive docs viewer. --pick lets you fuzzy-choose a run
   # then a doc for it (Esc to go back a level, Esc again to return to the run

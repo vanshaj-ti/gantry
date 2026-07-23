@@ -43,12 +43,20 @@ ENV PATH="/home/gantry/.local/bin:${PATH}"
 # — every deployment gets these with no post-install step, matching the
 # manual `ln -s ~/gantry/claude-skills/... ~/.claude/skills/...` pattern
 # README.md documents for gantry-pipeline itself, just baked at build time.
+# Same skill trees are installed for both claude-code (~/.claude/skills) and
+# codex-cli (~/.codex/skills) so [agent].runner = "codex-cli" gets the same
+# gantry-stage-* discipline the Dockerfile always gave Claude.
 COPY --chown=gantry:gantry gantry/skills/ /home/gantry/.claude/skills/
+COPY --chown=gantry:gantry gantry/skills/ /home/gantry/.codex/skills/
+COPY --chown=gantry:gantry claude-skills/gantry-pipeline/ /home/gantry/.claude/skills/gantry-pipeline/
+COPY --chown=gantry:gantry claude-skills/gantry-pipeline/ /home/gantry/.codex/skills/gantry-pipeline/
 
 # Marketplace skills this org's Claude Code sessions already use locally —
 # baked in so a headless VM agent gets the same toolset, not a bare CLI.
 # Exact slugs/sources confirmed from a live installed_plugins.json /
-# known_marketplaces.json, not guessed.
+# known_marketplaces.json, not guessed. Codex picks up third-party skill
+# libraries via [skills].installers at `gantry init --with-skills` time
+# (npx skills add ... -a codex), not baked here — those are project-opt-in.
 RUN claude plugin marketplace add JuliusBrussee/caveman \
     && claude plugin marketplace add mksglu/context-mode \
     && claude plugin marketplace add DietrichGebert/ponytail \

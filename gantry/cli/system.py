@@ -28,7 +28,7 @@ def cmd_mcp(args) -> int:
 
 def cmd_cockpit(args) -> int:
     """Open (or reuse) a tmux workspace pre-wired for this target repo:
-    status bar on top, doc viewer + live claude session below.
+    status bar on top, doc viewer + live agent session ([agent].runner) below.
     --kill tears down an existing cockpit session instead (fresh start)."""
     from ..cockpit import attach, build_cockpit, kill_cockpit, session_name
     if not shutil.which("tmux"):
@@ -86,10 +86,7 @@ def cmd_daemon_tick(args) -> int:
 
 def _runner_availability() -> dict:
     from ..runners import _RUNNERS
-    return {name: bool(shutil.which(cls().build_command(
-        prompt="x", model="", session_id=None, plan_mode=False, skip_permissions=False,
-        output_format="json", session_name="x", max_turns=1)[0]))
-        for name, cls in _RUNNERS.items()}
+    return {name: bool(shutil.which(cls.binary)) for name, cls in _RUNNERS.items()}
 
 
 def cmd_setup(args) -> int:

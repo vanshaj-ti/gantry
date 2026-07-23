@@ -2,7 +2,10 @@ import os
 import unittest
 
 from gantry.config import ProxyConfig
-from gantry.runners import ClaudeCodeRunner, CursorCliRunner, CodexRunner, get_runner, resolve_proxy_env
+from gantry.runners import (
+    ClaudeCodeRunner, CursorCliRunner, CodexRunner,
+    get_runner, interactive_command, resolve_proxy_env, runner_binary,
+)
 
 
 def _base_kwargs(**overrides):
@@ -38,6 +41,16 @@ class TestClaudeCodeRunner(unittest.TestCase):
         cmd = ClaudeCodeRunner().build_command(**_base_kwargs(skip_permissions=False))
         self.assertNotIn("--dangerously-skip-permissions", cmd)
 
+    def test_interactive_command(self):
+        self.assertEqual(
+            ClaudeCodeRunner().interactive_command(skip_permissions=True),
+            ["claude", "--dangerously-skip-permissions"],
+        )
+        self.assertEqual(
+            ClaudeCodeRunner().interactive_command(skip_permissions=False),
+            ["claude"],
+        )
+
 
 class TestCursorCliRunner(unittest.TestCase):
     def test_plan_mode_adds_flag(self):
@@ -53,6 +66,12 @@ class TestCursorCliRunner(unittest.TestCase):
     def test_skip_permissions_maps_to_force_flag(self):
         cmd = CursorCliRunner().build_command(**_base_kwargs(skip_permissions=True))
         self.assertIn("-f", cmd)
+
+    def test_interactive_command(self):
+        self.assertEqual(
+            CursorCliRunner().interactive_command(skip_permissions=True),
+            ["cursor-agent", "-f"],
+        )
 
 
 class TestCodexRunner(unittest.TestCase):
@@ -72,6 +91,17 @@ class TestCodexRunner(unittest.TestCase):
     def test_skip_permissions_maps_to_bypass_flag(self):
         cmd = CodexRunner().build_command(**_base_kwargs(skip_permissions=True))
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
+
+    def test_interactive_command_is_tui_not_exec(self):
+        # Interactive pane must be bare `codex`, not `codex exec` (headless).
+        cmd = CodexRunner().interactive_command(skip_permissions=True)
+        self.assertEqual(cmd[0], "codex")
+        self.assertNotIn("exec", cmd)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
+        self.assertEqual(
+            CodexRunner().interactive_command(skip_permissions=False),
+            ["codex"],
+        )
 
     def test_parse_jsonl_extracts_session_and_message(self):
         jsonl = "\n".join([
@@ -110,6 +140,18 @@ class TestCodexRunner(unittest.TestCase):
         result = CodexRunner()._parse_jsonl(jsonl, "", 0)
         self.assertTrue(result.ok)
         self.assertEqual(result.raw["result"], "ok")
+
+    def test_parse_jsonl_extracts_usage_tokens(self):
+        jsonl = "\n".join([
+            '{"type": "thread.started", "thread_id": "t1"}',
+            '{"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}',
+            '{"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 7}}',
+        ])
+        result = CodexRunner()._parse_jsonl(jsonl, "", 0)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.usage["input_tokens"], 11)
+        self.assertEqual(result.usage["output_tokens"], 7)
+        self.assertIsNone(result.usage["cost_usd"])
 
 
 class TestCodexProxyConfigArgs(unittest.TestCase):
@@ -174,6 +216,16 @@ class TestGetRunner(unittest.TestCase):
     def test_unknown_runner_raises(self):
         with self.assertRaises(ValueError):
             get_runner("not-a-real-runner")
+
+    def test_runner_binary_and_interactive_helpers(self):
+        self.assertEqual(runner_binary("claude-code"), "claude")
+        self.assertEqual(runner_binary("codex-cli"), "codex")
+        self.assertEqual(runner_binary("cursor-cli"), "cursor-agent")
+        self.assertEqual(
+            interactive_command("codex-cli", skip_permissions=True)[0], "codex"
+        )
+        with self.assertRaises(ValueError):
+            runner_binary("nope")
 
 
 if __name__ == "__main__":

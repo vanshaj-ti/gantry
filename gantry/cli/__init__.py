@@ -233,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_docker)
 
     s = sub.add_parser("cockpit", help="open a tmux workspace pre-wired for this repo "
-                                        "(status bar + doc viewer + live claude session)")
+                                        "(status bar + doc viewer + live agent session)")
     s.add_argument("--kill", action="store_true",
                     help="kill this repo's existing cockpit tmux session instead of opening it")
     s.set_defaults(func=cmd_cockpit)

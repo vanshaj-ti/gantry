@@ -2,7 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gantry.config import DEFAULT_QUEUE_STAGES, GantryConfig, StageModel, load_config
+from gantry.config import (
+    DEFAULT_MCP_SERVERS,
+    DEFAULT_QUEUE_STAGES,
+    DEFAULT_SKILL_INSTALLERS,
+    GantryConfig,
+    StageModel,
+    load_config,
+)
 
 
 class TestBareRepoDefaults(unittest.TestCase):
@@ -229,6 +236,20 @@ enabled = ["superpowers"]
 evidence_directive = "Verify only, do not implement."
 """)
         self.assertEqual(cfg.skills.evidence_directive, "Verify only, do not implement.")
+
+    def test_default_skill_installers_cover_all_runners(self):
+        sp = DEFAULT_SKILL_INSTALLERS["superpowers"]
+        for runner in ("claude-code", "cursor-cli", "codex-cli"):
+            self.assertIn(runner, sp, f"missing superpowers installer for {runner}")
+        self.assertIn("codex", sp["codex-cli"])
+        cfg = GantryConfig()
+        self.assertIn("codex", cfg.skills.install_command("superpowers", "codex-cli") or "")
+
+    def test_default_mcp_register_covers_codex(self):
+        for name in ("codebase-memory", "chrome-devtools"):
+            reg = DEFAULT_MCP_SERVERS[name]["register"]
+            self.assertIn("codex-cli", reg)
+            self.assertTrue(reg["codex-cli"].startswith("codex mcp add"))
 
     def test_e2e_apps_bare_string_and_table_shapes(self):
         cfg = self._load("""

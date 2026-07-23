@@ -23,6 +23,7 @@ from gantry.advance import advance_run
 from gantry.config import GantryConfig
 from gantry.engine import Engine
 from gantry.linear import (
+    classify_ticket,
     handle_comment_created,
     handle_issue_created,
     verify_webhook_signature,
@@ -564,6 +565,45 @@ class TestDocStageAttachment(unittest.TestCase):
             sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
 
         self.assertEqual(len(posted_comment_bodies), 2)
+
+
+class TestClassifyTicketRunner(unittest.TestCase):
+    """Classifier must honor the project's configured runner (not hardcode claude)."""
+
+    def test_uses_explicit_runner_name(self):
+        captured = {}
+
+        class _Runner:
+            name = "codex-cli"
+
+            def run(self, **kwargs):
+                captured.update(kwargs)
+                return _agent_result("bug")
+
+        with patch("gantry.runners.get_runner", return_value=_Runner()) as mock_get:
+            tag = classify_ticket("broken login", "tap does nothing", runner="codex-cli")
+        self.assertEqual(tag, "bug")
+        mock_get.assert_called_once_with("codex-cli")
+        self.assertEqual(captured.get("max_turns"), 1)
+
+    def test_resolves_runner_from_project_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gantry.toml").write_text('[agent]\nrunner = "codex-cli"\n')
+            captured = {}
+
+            class _Runner:
+                name = "codex-cli"
+
+                def run(self, **kwargs):
+                    captured["cwd"] = kwargs.get("cwd")
+                    return _agent_result("chore")
+
+            with patch("gantry.runners.get_runner", return_value=_Runner()) as mock_get:
+                tag = classify_ticket("bump deps", "routine", project_root=root)
+            self.assertEqual(tag, "chore")
+            mock_get.assert_called_once_with("codex-cli")
+            self.assertEqual(captured["cwd"], root)
 
 
 if __name__ == "__main__":

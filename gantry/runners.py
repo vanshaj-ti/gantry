@@ -46,6 +46,8 @@ class AgentRunner:
     """Base interface. Subclasses map the normalized args to their CLI flags."""
 
     name: str = "base"
+    # argv[0] of build_command / interactive_command — used by doctor/availability.
+    binary: str = "base"
 
     def build_command(
         self,
@@ -60,6 +62,10 @@ class AgentRunner:
         max_turns: int,
         proxy: ProxyConfig | None = None,
     ) -> list[str]:
+        raise NotImplementedError
+
+    def interactive_command(self, *, skip_permissions: bool = True) -> list[str]:
+        """argv for a live TUI session (cockpit / herdr assistant pane)."""
         raise NotImplementedError
 
     def parse(self, stdout: str, stderr: str, exit_code: int) -> RunnerResult:
@@ -123,10 +129,11 @@ class AgentRunner:
 
 class ClaudeCodeRunner(AgentRunner):
     name = "claude-code"
+    binary = "claude"
 
     def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
                        output_format, session_name, max_turns, proxy: ProxyConfig | None = None) -> list[str]:
-        cmd = ["claude", "-p", prompt, "--name", session_name]
+        cmd = [self.binary, "-p", prompt, "--name", session_name]
         if model:
             cmd += ["--model", model]
         cmd += ["--output-format", output_format, "--max-turns", str(max_turns)]
@@ -138,16 +145,23 @@ class ClaudeCodeRunner(AgentRunner):
             cmd += ["--resume", session_id]
         return cmd
 
+    def interactive_command(self, *, skip_permissions: bool = True) -> list[str]:
+        cmd = [self.binary]
+        if skip_permissions:
+            cmd += ["--dangerously-skip-permissions"]
+        return cmd
+
 
 class CursorCliRunner(AgentRunner):
     name = "cursor-cli"
+    binary = "cursor-agent"
 
     def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
                        output_format, session_name, max_turns, proxy: ProxyConfig | None = None) -> list[str]:
         # cursor-agent -p <prompt> --output-format json --model <m> [--plan] [-f] [--resume <id>]
         # proxy is intentionally unused here — cursor-cli has no verified
         # base-url/headers override mechanism (see config.ProxyConfig, _coerce_proxy).
-        cmd = ["cursor-agent", "-p", prompt]
+        cmd = [self.binary, "-p", prompt]
         if model:
             cmd += ["--model", model]
         cmd += ["--output-format", output_format]
@@ -160,20 +174,27 @@ class CursorCliRunner(AgentRunner):
         # cursor-agent has no --max-turns / --name; those are no-ops here.
         return cmd
 
+    def interactive_command(self, *, skip_permissions: bool = True) -> list[str]:
+        cmd = [self.binary]
+        if skip_permissions:
+            cmd += ["-f"]
+        return cmd
+
 
 class CodexRunner(AgentRunner):
     """codex CLI (OpenAI, ChatGPT-auth). Unlike the other two runners, `codex
     exec --json` streams JSONL events rather than a single JSON blob, so this
     overrides `run()` with its own parser instead of reusing the base one."""
     name = "codex-cli"
+    binary = "codex"
 
     def build_command(self, *, prompt, model, session_id, plan_mode, skip_permissions,
                        output_format, session_name, max_turns, proxy: ProxyConfig | None = None) -> list[str]:
         # codex exec [resume <id>] --json -m <model> [--dangerously-bypass-approvals-and-sandbox] <prompt>
         if session_id:
-            cmd = ["codex", "exec", "resume", session_id]
+            cmd = [self.binary, "exec", "resume", session_id]
         else:
-            cmd = ["codex", "exec"]
+            cmd = [self.binary, "exec"]
         cmd += ["--json", "--skip-git-repo-check"]
         if model:
             cmd += ["-m", model]
@@ -183,6 +204,14 @@ class CodexRunner(AgentRunner):
         # codex has no dedicated plan-mode flag or --max-turns/--name; let the
         # prompt drive planning, same approach ClaudeCodeRunner uses.
         cmd += [prompt]
+        return cmd
+
+    def interactive_command(self, *, skip_permissions: bool = True) -> list[str]:
+        # Interactive TUI is bare `codex` (not `codex exec`). Sandbox bypass is
+        # the same flag the headless path uses when skip_permissions is on.
+        cmd = [self.binary]
+        if skip_permissions:
+            cmd += ["--dangerously-bypass-approvals-and-sandbox"]
         return cmd
 
     def _proxy_config_args(self, proxy: ProxyConfig | None) -> list[str]:
@@ -298,6 +327,18 @@ def get_runner(name: str) -> AgentRunner:
     if name not in _RUNNERS:
         raise ValueError(f"Unknown agent runner: {name!r}. Available: {sorted(_RUNNERS)}")
     return _RUNNERS[name]()
+
+
+def runner_binary(name: str) -> str:
+    """PATH binary name for a registered runner (e.g. 'claude', 'codex')."""
+    if name not in _RUNNERS:
+        raise ValueError(f"Unknown agent runner: {name!r}. Available: {sorted(_RUNNERS)}")
+    return _RUNNERS[name].binary
+
+
+def interactive_command(name: str, *, skip_permissions: bool = True) -> list[str]:
+    """argv for a live assistant session for the named runner."""
+    return get_runner(name).interactive_command(skip_permissions=skip_permissions)
 
 
 def resolve_proxy_env(runner_name: str, proxy: ProxyConfig | None) -> dict | None:

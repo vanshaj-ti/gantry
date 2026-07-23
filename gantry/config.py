@@ -65,7 +65,7 @@ DEFAULT_QUEUE_STAGES: dict[str, list[str]] = {
 @dataclass
 class AgentConfig:
     """Which agent CLI drives the plan/build/evidence stages."""
-    runner: str = "claude-code"        # "claude-code" | "cursor-cli"
+    runner: str = "claude-code"        # "claude-code" | "cursor-cli" | "codex-cli"
     skip_permissions: bool = True       # pass the runner's auto-approve flag
     output_format: str = "json"
     max_concurrent: int = 0    # cap on concurrently-running agent subprocesses
@@ -82,7 +82,10 @@ class AgentConfig:
 DEFAULT_SKILL_INSTALLERS = {
     "superpowers": {
         "claude-code": "claude plugin install superpowers@claude-plugins-official",
-        "cursor-cli": "npx skills add obra/superpowers -a cursor",
+        "cursor-cli": "npx skills add obra/superpowers -a cursor -y",
+        # skills CLI agent id is "codex" (not "codex-cli"); -g installs into
+        # ~/.codex/skills so headless `codex exec` sessions pick them up.
+        "codex-cli": "npx skills add obra/superpowers -a codex -g -y",
     },
 }
 
@@ -429,6 +432,9 @@ class MCPServer:
 
 
 # Curated defaults: the two vetted servers, with per-runner register commands.
+# codex-cli entries are explicit (same shape as claude-code) so doctor / init
+# surfaces them; mcp.py's _register_codex also falls back to
+# `codex mcp add <name> -- <command> <args...>` when register is empty.
 DEFAULT_MCP_SERVERS = {
     "codebase-memory": {
         "command": "codebase-memory-mcp",
@@ -437,6 +443,7 @@ DEFAULT_MCP_SERVERS = {
         "register": {
             "claude-code": "claude mcp add codebase-memory --scope user codebase-memory-mcp serve",
             "cursor-cli": "",  # cursor reads project .cursor/mcp.json; init writes it
+            "codex-cli": "codex mcp add codebase-memory -- codebase-memory-mcp serve",
         },
     },
     "chrome-devtools": {
@@ -446,6 +453,7 @@ DEFAULT_MCP_SERVERS = {
         "register": {
             "claude-code": "claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest",
             "cursor-cli": "",
+            "codex-cli": "codex mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest",
         },
     },
 }

@@ -179,8 +179,9 @@ gantry docs --run ID [--nav]         # render a run's artifacts; --nav for a ful
 +----------------------------------------------------------+
 |  gantry watch --live — thin status bar, full width        |
 +-----------------------+------------------------------------+
-|  doc viewer            |  live claude session (larger)      |
-|  gantry docs --nav     |  your assistant for driving runs    |
+|  doc viewer            |  live agent session (larger)        |
+|  gantry docs --nav     |  claude / codex / cursor from       |
+|                        |  [agent].runner                     |
 +-----------------------+------------------------------------+
 ```
 
@@ -203,15 +204,19 @@ GANTRY_TARGET=~/some-repo gantry-herdr
 </details>
 
 <details>
-<summary>Claude Code skill: gantry-pipeline</summary>
+<summary>Agent skill: gantry-pipeline</summary>
 
-`claude-skills/gantry-pipeline/` teaches Claude Code the full CLI surface, the worktree isolation model, and how to recover a blocked/stuck run. Install once, globally:
+`claude-skills/gantry-pipeline/` teaches the full CLI surface, the worktree isolation model, and how to recover a blocked/stuck run. Install once, globally, for whichever runner you drive gantry with:
 
 ```bash
+# Claude Code
 ln -s ~/gantry/claude-skills/gantry-pipeline ~/.claude/skills/gantry-pipeline
+
+# Codex (same skill tree; Codex discovers skills under ~/.codex/skills)
+ln -s ~/gantry/claude-skills/gantry-pipeline ~/.codex/skills/gantry-pipeline
 ```
 
-Auto-triggers on Gantry-related requests — no slash command needed.
+The Docker image bakes both installs in automatically. Auto-triggers on Gantry-related requests — no slash command needed.
 
 </details>
 

@@ -26,7 +26,8 @@ prompts_dir = ".gantry/prompts"
 # stages = ["investigation", "plan", "build", "evidence", "review"]
 
 [agent]
-# Which agent CLI drives plan/build/evidence. "claude-code" | "cursor-cli"
+# Which agent CLI drives plan/build/evidence (and cockpit/herdr interactive pane).
+# "claude-code" | "cursor-cli" | "codex-cli"
 runner = "claude-code"
 skip_permissions = true      # pass the runner's headless auto-approve flag
 output_format = "json"
@@ -216,10 +217,12 @@ enabled = []                  # e.g. ["superpowers"]
 evidence_directive = ""
 # Per-runner install commands (clean, inspectable — no piped remote scripts).
 # `gantry init --with-skills` runs the active runner's command; `gantry doctor` lists them.
-# Defaults for "superpowers" are built in; override or add more here:
+# Defaults for "superpowers" are built in for claude-code, cursor-cli, and codex-cli;
+# override or add more here:
 # [skills.installers.superpowers]
 # claude-code = "claude plugin install superpowers@claude-plugins-official"
-# cursor-cli  = "npx skills add obra/superpowers -a cursor"
+# cursor-cli  = "npx skills add obra/superpowers -a cursor -y"
+# codex-cli   = "npx skills add obra/superpowers -a codex -g -y"
 
 [e2e]
 # Deterministic, non-LLM e2e test step run between checks and the evidence

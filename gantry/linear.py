@@ -436,12 +436,23 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
     return {"synced": True, "issue_id": issue_id, "stage": current_stage, "category": category}
 
 
-def classify_ticket(title: str, description: str) -> str:
+def classify_ticket(title: str, description: str, *,
+                    runner: str | None = None, model: str = "",
+                    project_root: Path | None = None) -> str:
     """Classifier agent: one call, forced to pick exactly one queue tag.
 
     Deliberately a single cheap agent turn, not a full gantry stage — this
-    runs before any run exists, so there's nothing to resume/gate here."""
+    runs before any run exists, so there's nothing to resume/gate here.
+
+    Uses [agent].runner (and its default model) when project_root/runner are
+    given, so a codex-only install doesn't hard-depend on `claude` being on
+    PATH. model="" lets the runner pick its own default."""
     from .runners import get_runner
+
+    if runner is None and project_root is not None:
+        runner = load_config(project_root).agent.runner
+    if not runner:
+        runner = "claude-code"
 
     prompt = f"""Classify this Linear ticket into exactly one tag: feature, bug, hotfix, research, chore.
 
@@ -455,8 +466,8 @@ Title: {title}
 Description: {description}
 
 Respond with exactly one word: the tag."""
-    result = get_runner("claude-code").run(
-        cwd=Path.cwd(), prompt=prompt, model="claude-haiku-4-5", max_turns=1,
+    result = get_runner(runner).run(
+        cwd=project_root or Path.cwd(), prompt=prompt, model=model, max_turns=1,
     )
     text = (result.raw.get("result") or "").strip().lower() if result.raw else ""
     for tag in QUEUE_TAGS:
@@ -487,7 +498,9 @@ def handle_issue_created(payload: dict[str, Any], team_id: str, linear_api_key: 
         return {"tag": None, "run_id": existing_run_id, "issue_id": issue_id,
                 "duplicate": True}
 
-    tag = classify_ticket(title, description)
+    # Classify with this project's configured agent runner so a codex-only
+    # (or cursor-only) install doesn't require `claude` on PATH.
+    tag = classify_ticket(title, description, project_root=project_root)
     label_id = get_or_create_label(team_id, tag, linear_api_key)
     tag_issue(issue_id, label_id, linear_api_key)
 
