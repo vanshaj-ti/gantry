@@ -49,7 +49,15 @@ def _changed_files(cwd: Path, base: str) -> list[str]:
                           cwd=str(cwd), capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr or proc.stdout)
-    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    # `.agent-runs` is a gantry-created symlink into every worktree (see
+    # git.py's `commit_all`, which already excludes it from every commit) —
+    # git's directory-only `.agent-runs/` gitignore pattern doesn't match the
+    # symlink form, so it shows up as a "new file" in a raw git diff before
+    # commit_all's `git reset -- .agent-runs` ever runs. Real incident: this
+    # tripped the scope guard on every single run (unexpected_files always
+    # non-empty), since the symlink is never part of any plan's declared
+    # scope. Exclude it here the same way commit_all already does.
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip() and ln.strip() != ".agent-runs"]
 
 
 def _matches_any(path: str, patterns: list[str]) -> bool:
