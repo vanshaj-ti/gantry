@@ -182,22 +182,27 @@ def upload_file_to_linear(content: bytes, filename: str, content_type: str, api_
     return upload["assetUrl"]
 
 
-def attach_doc_to_issue(issue_id: str, title: str, asset_url: str, api_key: str) -> None:
-    _graphql(
-        "mutation($issueId: String!, $title: String!, $url: String!) { "
-        "attachmentCreate(input: {issueId: $issueId, title: $title, url: $url}) { success } }",
-        {"issueId": issue_id, "title": title, "url": asset_url}, api_key,
-    )
-
-
 def post_stage_doc(issue_id: str, stage: str, artifact_path: Path, api_key: str) -> None:
     """Upload a completed doc stage's artifact (investigation-report.md,
-    product-spec.md, etc) as a Linear file attachment on the issue — the
-    human reviewing a *_complete gate should see the actual content there,
-    not just a status change."""
+    product-spec.md, etc) to Linear's storage and post it as a comment link
+    — the human reviewing a *_complete gate should see the actual content
+    there, not just a status change.
+
+    NOT attachmentCreate: that mutation is for external-resource link cards
+    (GitHub PRs, exception trackers) and renders identically as a generic
+    "linked" card regardless of whether the URL is Linear's own storage or
+    someone else's — confirmed live, it does not give an inline file
+    preview. Embedding the assetUrl in a comment's markdown is what Linear
+    actually treats specially for uploaded content (per
+    https://linear.app/developers/how-to-upload-a-file-to-linear)."""
     content = artifact_path.read_bytes()
     asset_url = upload_file_to_linear(content, artifact_path.name, "text/markdown", api_key)
-    attach_doc_to_issue(issue_id, f"{stage}: {artifact_path.name}", asset_url, api_key)
+    post_comment(
+        issue_id,
+        f"{stage.capitalize()} stage complete — [{artifact_path.name}]({asset_url})\n\n"
+        f"Reply `approve` to move on, or reply with feedback to send it back for another pass.",
+        api_key,
+    )
 
 
 # Which gantry run status maps to which Linear workflow category. Checked in

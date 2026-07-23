@@ -472,6 +472,7 @@ class TestDocStageAttachment(unittest.TestCase):
 
         graphql_calls = []
         put_calls = []
+        posted_comment_bodies = []
 
         def fake_graphql(query, variables, api_key):
             graphql_calls.append(query)
@@ -479,8 +480,9 @@ class TestDocStageAttachment(unittest.TestCase):
                 return {"fileUpload": {"success": True, "uploadFile": {
                     "uploadUrl": "https://upload.example/put", "assetUrl": "https://asset.example/file.md",
                     "headers": [{"key": "X-Test", "value": "1"}]}}}
-            if "attachmentCreate" in query:
-                return {"attachmentCreate": {"success": True}}
+            if "commentCreate" in query:
+                posted_comment_bodies.append(variables["body"])
+                return {"commentCreate": {"success": True}}
             if "team(id" in query and "states" in query:
                 return {"team": {"states": {"nodes": [
                     {"id": "s-blocked", "name": "Blocked", "type": "started"}]}}}
@@ -509,6 +511,11 @@ class TestDocStageAttachment(unittest.TestCase):
         self.assertEqual(put_calls, ["https://upload.example/put"])
         self.assertEqual(len([q for q in graphql_calls if "fileUpload" in q]), 1)
         self.assertEqual(store.state(run_id)["linear_docs_posted"], ["investigation"])
+        # The completion comment links the uploaded file's assetUrl, not a
+        # separate attachmentCreate card.
+        self.assertEqual(len(posted_comment_bodies), 1)
+        self.assertIn("https://asset.example/file.md", posted_comment_bodies[0])
+        self.assertIn("Investigation stage complete", posted_comment_bodies[0])
 
 
 if __name__ == "__main__":
