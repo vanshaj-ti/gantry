@@ -7,10 +7,24 @@ __pycache__/
 /dist/
 .venv/
 venv/
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Gantry local state / logs
 *.log
 .agent-runs/
+.worktrees/
+
+# Local agent/tool state (never commit)
+.claude/
+.codex/
+.harness-mem/
+.mcp.json
+.repowise/
 
 # Editor / OS
 .DS_Store
