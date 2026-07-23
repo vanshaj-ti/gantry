@@ -94,16 +94,23 @@ fi
 chown -R 1001:1001 "$TARGET_DIR"
 
 # --- gantry source + image ---
+# CI often leaves gantry-src on a detached FETCH_HEAD after refreshing the
+# deploy script; bare `git pull` fails there. Always hard-sync to origin/main.
+git config --global --add safe.directory "$GANTRY_SRC_DIR"
 if [[ -d "$GANTRY_SRC_DIR/.git" ]]; then
-  git -C "$GANTRY_SRC_DIR" pull
+  git -C "$GANTRY_SRC_DIR" remote set-url origin "$GANTRY_REPO_URL" || true
+  git -C "$GANTRY_SRC_DIR" fetch --depth=1 origin main
+  git -C "$GANTRY_SRC_DIR" checkout -B main FETCH_HEAD
+  git -C "$GANTRY_SRC_DIR" clean -fd
 else
-  git clone "$GANTRY_REPO_URL" "$GANTRY_SRC_DIR"
+  git clone --depth=1 --branch main "$GANTRY_REPO_URL" "$GANTRY_SRC_DIR"
 fi
 # Prune dangling image layers from prior rebuilds before building — small
 # boot disks fill up across repeated deploys otherwise.
 docker container prune -f --filter "until=1h" 2>&1 || true
 docker image prune -a -f --filter "until=1h" 2>&1 || true
 
+echo "==> docker build gantry:latest"
 docker build -t gantry:latest "$GANTRY_SRC_DIR"
 
 # --- start both containers ---
