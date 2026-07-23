@@ -30,7 +30,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .config import DOC_STAGES, load_config
 from .engine import Engine
 from .notify import LinearNotifier
 
@@ -156,14 +156,21 @@ def post_comment(issue_id: str, body: str, api_key: str) -> None:
 # uses for run dependencies). It stays "in_progress" (still being shipped);
 # "done" only fires once status is actually shipped/shipped_manually.
 # "blocked" covers every escalation/failure state — review REQUEST_CHANGES/
-# ESCALATE, checks escalation, ship failures — all read as "needs a human"
-# from Linear's side, matching this team's actual "Blocked" state.
+# ESCALATE, checks escalation, ship failures — plus a doc stage's own
+# *_complete status (spec_complete/investigation_complete/etc): that IS a
+# human gate (approve or reply with feedback) even though gantry's own
+# internal naming calls it "complete" — it reads as "needs a human" from
+# Linear's side, exactly like every other escalation here. Once the human
+# replies (via a Linear comment -> handle_comment_created -> approve/resume)
+# the run moves off *_complete and the next poller tick syncs it back to
+# in_progress normally — no separate un-blocking step needed.
 _STATUS_TO_CATEGORY: list[tuple[str, str]] = [
     ("shipped", "done"), ("cancelled", "done"),
     ("review_escalated", "blocked"), ("review_changes_requested", "blocked"),
     ("checks_escalated", "blocked"), ("checks_high_risk_escalated", "blocked"),
     ("resolve_escalated", "blocked"), ("ship_failed", "blocked"),
     ("ship_checks_failed", "blocked"), ("blocked", "blocked"), ("held", "blocked"),
+    *((f"{stage}_complete", "blocked") for stage in DOC_STAGES),
 ]
 
 # Preferred Linear state names for each category — matched case-insensitively
