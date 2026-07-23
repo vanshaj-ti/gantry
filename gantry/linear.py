@@ -24,7 +24,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import time
 import urllib.request
 from pathlib import Path

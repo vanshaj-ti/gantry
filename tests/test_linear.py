@@ -302,10 +302,10 @@ class TestHotfixQueueSkipsReview(unittest.TestCase):
 
         with patch("gantry.engine.get_runner", return_value=_Runner()), \
              patch("gantry.review.get_runner", return_value=_Runner()):
-            r = advance_run(self.eng, run_id)  # build
+            advance_run(self.eng, run_id)  # build
             self.assertEqual(store.state(run_id)["status"], Status.BUILD_COMPLETE)
 
-            r = advance_run(self.eng, run_id)  # checks pass -> evidence (last stage, no review configured)
+            advance_run(self.eng, run_id)  # checks pass -> evidence (last stage, no review configured)
             self.assertEqual(store.state(run_id)["status"], Status.EVIDENCE_COMPLETE)
 
         # evidence_complete with no further stage in this run's own list —
