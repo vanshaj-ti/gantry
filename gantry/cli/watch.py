@@ -301,8 +301,21 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
     if status.endswith("_failed"):
         stage = status.removesuffix("_failed")
         if lowered.startswith("1") or _is_affirmative_reply(lowered):
-            _notify(store, notifier, run_id, f"Resuming *{run_id}* stage `{stage}`…")
-            eng.run_agent_stage(run_id, stage, resume=True)
+            # A stage that timed out (or crashed before the agent returned
+            # anything) never got a session_id saved — run_agent_stage
+            # raises ValueError if resume=True is attempted with no stored
+            # session. Real incident: this raised, silently swallowed
+            # somewhere upstream, so "Resuming..." posted but nothing ever
+            # actually ran — a human replying "retry" twice just posted the
+            # same dead-end notification twice. Check for a real session
+            # before attempting resume; fall back to a fresh (resume=False)
+            # attempt otherwise, same distinction advance.py's own
+            # stale-heartbeat repair path already makes.
+            has_session = bool(store.get_session_id(run_id, stage))
+            _notify(store, notifier, run_id,
+                   f"{'Resuming' if has_session else 'Retrying (fresh, no prior session to resume)'} "
+                   f"*{run_id}* stage `{stage}`…")
+            eng.run_agent_stage(run_id, stage, resume=has_session)
             new_status = store.state(run_id).get("status", "")
             _notify(store, notifier, run_id, f"*{run_id}* stage `{stage}`: {label(new_status)}")
         else:

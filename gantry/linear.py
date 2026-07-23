@@ -489,11 +489,19 @@ def handle_comment_created(payload: dict[str, Any], linear_api_key: str,
     run's current status and decides plainly (approve / rewrite / retry /
     answer-a-question) based on string matching, no agent call involved in
     the routing itself; only the stage work an approval triggers (e.g.
-    resuming the investigation stage) invokes an agent, same as today."""
+    resuming the investigation stage) invokes an agent, same as today.
+
+    Idempotent per comment id: Linear can and does redeliver the same
+    Comment webhook event (confirmed live — a single "retry" reply produced
+    two "Resuming..." notifications, both hitting run_agent_stage(resume=
+    True) on a stage with no stored session, since a timed-out stage never
+    got a session_id saved). A redelivered comment id is a no-op, same
+    pattern as handle_issue_created's issue_id dedup above."""
     from .cli.watch import _handle_reply
     from .state import RunStore
 
     comment = payload["data"]
+    comment_id = comment.get("id")
     issue_id = comment.get("issueId") or (comment.get("issue") or {}).get("id")
     body = comment.get("body", "")
     if not issue_id:
@@ -513,6 +521,12 @@ def handle_comment_created(payload: dict[str, Any], linear_api_key: str,
         # unrelated issue, or one predating this deployment) — no-op, not
         # an error; every Comment event on the team hits this webhook.
         return {"handled": False, "reason": "no run tracked for this issue"}
+
+    if comment_id:
+        processed = store.state(run_id).get("linear_comments_processed") or []
+        if comment_id in processed:
+            return {"handled": False, "reason": "duplicate comment delivery, already processed"}
+        store.update_state(run_id, linear_comments_processed=processed + [comment_id])
 
     notifier = LinearNotifier(issue_id, linear_api_key)
     _handle_reply(store, cfg, notifier, run_id, body)
