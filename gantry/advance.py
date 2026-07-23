@@ -843,6 +843,13 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
                        | ({"checks_escalated"} if cfg.checks.auto_resolve else set())
                        | ({f"{stage}_complete" for stage in DOC_STAGES} if cfg.git.auto_approve_docs else set()))
     rid = run["id"]
+    # Sync Linear before any early-return below — a human-gated status (e.g.
+    # a doc stage's *_complete) is deliberately NOT in auto_transitions, so
+    # this run never reaches advance_run/its own sync call on a tick where
+    # gantry itself has nothing to do. Without this, "move to Blocked so a
+    # human notices" would never fire for exactly the runs that most need
+    # it — the ones sitting still, waiting on a person.
+    _sync_linear_status_if_configured(engine, rid)
     repaired = _repair_stale_running(engine, run)
     if repaired:
         return repaired
