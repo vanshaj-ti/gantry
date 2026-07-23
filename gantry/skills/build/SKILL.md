@@ -38,4 +38,6 @@ Rules:
 - Follow this repo's own conventions and package manager as declared in
   its context files — do not introduce a different toolchain.
 
-If blocked, ask exactly one concise inline question and stop.
+If blocked, write your question to `.agent-runs/{RUN_ID}/question.md` and
+stop — do NOT put the question only in your final result text (gantry
+checks question.md's existence deterministically, not your prose).

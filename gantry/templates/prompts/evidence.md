@@ -22,4 +22,5 @@ Write `.agent-runs/{RUN_ID}/evidence-report.md`. If the file already exists
 (resumed run after a failed review), DO NOT overwrite it — **append** a new
 `## Pass <N>` section at the bottom.
 
-If blocked, ask exactly one concise inline question in your final result and stop.
+If blocked, write your question to `.agent-runs/{RUN_ID}/question.md` and
+stop — do NOT put the question only in your final result text.

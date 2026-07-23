@@ -155,6 +155,60 @@ class TestRunAgentStage(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(self.eng.store.state(self.run_id)["status"], "investigation_complete")
 
+    def test_agent_question_deterministic_not_a_failure(self):
+        """A genuine blocking question is expected pipeline behavior, not an
+        error — the agent writes question.md (deterministic file check, not
+        a prose/regex guess at result text) and the stage lands on
+        {stage}_question, distinct from {stage}_failed. No report needs to
+        exist for this — a question means the agent stopped before writing
+        anything, by design."""
+        run_id = self.run_id
+        store = self.eng.store
+
+        def write_question(**kwargs):
+            store.artifact_path(run_id, "question.md").write_text(
+                "Which learning-track status field should I check — subscription or catalog level?")
+            return RunnerResult(ok=True, session_id="s1", exit_code=0,
+                               raw={"result": "asked a question"}, stdout="", stderr="")
+
+        class _Runner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                return write_question(**kwargs)
+
+        with patch("gantry.engine.get_runner", return_value=_Runner()):
+            res = self.eng.run_agent_stage(run_id, "investigation")
+        self.assertTrue(res["question"])
+        self.assertEqual(store.state(run_id)["status"], "investigation_question")
+
+    def test_question_md_cleared_before_each_invocation(self):
+        """A stale question.md from a PRIOR invocation must never be
+        misread as belonging to the current one — real risk: stage 1 asks
+        Q1, human replies, resume happens, stage 2 (or the same stage
+        again) writes its real artifact with no new question — that must
+        reach _complete, not incorrectly re-read Q1's leftover file."""
+        run_id = self.run_id
+        store = self.eng.store
+        store.artifact_path(run_id, "question.md").write_text("stale question from a prior run")
+
+        def write_report(**kwargs):
+            store.artifact_path(run_id, "investigation-report.md").write_text("# Investigation\n\nfound it.\n")
+            return RunnerResult(ok=True, session_id="s1", exit_code=0,
+                               raw={"result": "done"}, stdout="", stderr="")
+
+        class _Runner:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                return write_report(**kwargs)
+
+        with patch("gantry.engine.get_runner", return_value=_Runner()):
+            res = self.eng.run_agent_stage(run_id, "investigation")
+        self.assertFalse(res["question"])
+        self.assertEqual(store.state(run_id)["status"], "investigation_complete")
+        self.assertFalse(store.artifact_path(run_id, "question.md").exists())
+
     def test_heartbeat_set_at_stage_start(self):
         fake = _FakeRunner(result=RunnerResult(
             ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr=""))

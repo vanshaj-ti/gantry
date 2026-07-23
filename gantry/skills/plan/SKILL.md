@@ -9,8 +9,11 @@ Produce an implementation plan only. Do NOT modify application/source
 files. The plan must be precise enough for a cheaper build agent to
 execute without making product or architecture decisions.
 
-If you need clarification, ask exactly one concise inline question and
-stop. Do not guess.
+If you need clarification, write your question to
+`.agent-runs/{RUN_ID}/question.md` and stop — do NOT write the plan itself
+in this case, and do NOT put the question only in your final result text
+(gantry checks question.md's existence deterministically, not your
+prose). Do not guess.
 
 Required plan sections:
 1. Goal

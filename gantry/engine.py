@@ -362,6 +362,16 @@ class Engine:
             prompt += self._answer_context(run_id, stage)
         self.store.write_log(run_id, f"{stage}-prompt{'-resume' if resume else ''}.md", prompt)
 
+        # Clear any question.md from a PRIOR invocation before this one runs
+        # — the deterministic question-signal check below must reflect only
+        # what THIS agent call wrote, never a stale leftover from an earlier
+        # round (e.g. this same stage asked Q1, got answered, resumed, and
+        # this new call either asks Q2 or completes cleanly — either way
+        # Q1's file must not still be sitting there being misread as live).
+        question_path = self.store.artifact_path(run_id, "question.md")
+        if question_path.exists():
+            question_path.unlink()
+
         session_id = self.store.get_session_id(run_id, stage) if resume else None
         if resume and not session_id:
             raise ValueError(f"No stored session for {run_id}/{stage}; cannot resume")
@@ -427,33 +437,48 @@ class Engine:
         _accumulate_cost(self.store, run_id, stage, result.usage,
                          runner=runner.name, session_id=result.session_id)
         ok = result.ok
-        if stage in DOC_STAGES and ok:
-            # Deterministic structural gate — no LLM call — that this doc
-            # stage's required artifact actually exists with real content
-            # before letting the run reach {stage}_complete. Seen for real:
-            # an agent call reporting success (result.ok True) while never
-            # writing its report at all — burned turns/cost, empty result,
-            # and would otherwise have sailed through to a human-review gate
-            # with nothing to review.
-            from .checks import check_doc_artifact_written
-            artifact_name = self.cfg.artifact_for(stage)
-            gate = check_doc_artifact_written(self.store, run_id, artifact_name)
-            if stage == "spec":
-                # spec additionally validates its structured
-                # acceptance-criteria.json companion, not just file presence.
-                from .checks import check_spec_artifacts
-                spec_gate = check_spec_artifacts(self.store, run_id)
-                if gate["pass"] and not spec_gate["pass"]:
-                    gate = spec_gate
-            self.store.write_result(run_id, f"{stage}-gate.json", gate)
-            if not gate["pass"]:
-                ok = False
-                self.store.write_log(
-                    run_id, f"{stage}-gate.stderr",
-                    self._redact(f"{stage} stage structural gate failed: {gate['reason']}"))
-        status = f"{stage}_complete" if ok else f"{stage}_failed"
+        # Deterministic "the agent has a blocking question" signal — a
+        # question.md file, per every stage prompt's instruction, checked
+        # BEFORE the artifact gate. Not a prose/regex guess at the agent's
+        # result text (a "?" heuristic misses questions phrased without one,
+        # and false-positives on any report that happens to contain a "?"):
+        # this is a file the agent either wrote or didn't. When present, the
+        # stage is blocked-on-question, not failed — a genuine clarifying
+        # question asked mid-investigation/spec/etc is expected pipeline
+        # behavior, distinct from the agent actually erroring or silently
+        # skipping its required artifact.
+        question_path = self.store.artifact_path(run_id, "question.md")
+        has_question = question_path.exists() and question_path.read_text().strip()
+        if has_question:
+            status = f"{stage}_question"
+        else:
+            if stage in DOC_STAGES and ok:
+                # Deterministic structural gate — no LLM call — that this doc
+                # stage's required artifact actually exists with real content
+                # before letting the run reach {stage}_complete. Seen for real:
+                # an agent call reporting success (result.ok True) while never
+                # writing its report at all — burned turns/cost, empty result,
+                # and would otherwise have sailed through to a human-review gate
+                # with nothing to review.
+                from .checks import check_doc_artifact_written
+                artifact_name = self.cfg.artifact_for(stage)
+                gate = check_doc_artifact_written(self.store, run_id, artifact_name)
+                if stage == "spec":
+                    # spec additionally validates its structured
+                    # acceptance-criteria.json companion, not just file presence.
+                    from .checks import check_spec_artifacts
+                    spec_gate = check_spec_artifacts(self.store, run_id)
+                    if gate["pass"] and not spec_gate["pass"]:
+                        gate = spec_gate
+                self.store.write_result(run_id, f"{stage}-gate.json", gate)
+                if not gate["pass"]:
+                    ok = False
+                    self.store.write_log(
+                        run_id, f"{stage}-gate.stderr",
+                        self._redact(f"{stage} stage structural gate failed: {gate['reason']}"))
+            status = f"{stage}_complete" if ok else f"{stage}_failed"
         self._set_status(run_id, status)
-        return {"stage": stage, "ok": ok, "session_id": result.session_id}
+        return {"stage": stage, "ok": ok, "session_id": result.session_id, "question": has_question}
 
     def _resolver_checks_prompt(self, run_id: str, wt: Path) -> str:
         """Prompt-building for the ORIGINAL resolver purpose: checks_escalated

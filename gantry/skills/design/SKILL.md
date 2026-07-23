@@ -13,7 +13,10 @@ codebase wherever they fit; do not propose a new abstraction where an
 existing one already covers the need.
 
 If a design decision genuinely can't be made without more product input,
-ask exactly one concise inline question and stop.
+write your question to `.agent-runs/{RUN_ID}/question.md` and stop — do NOT
+write the design itself in this case, and do NOT put the question only in
+your final result text (gantry checks question.md's existence
+deterministically, not your prose).
 
 Required design sections:
 1. Approach — the chosen architecture, in prose

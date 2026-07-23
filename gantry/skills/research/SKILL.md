@@ -11,8 +11,11 @@ code; it does not involve writing or changing application code. Do NOT
 propose an implementation plan or file changes — this queue never reaches
 a build stage.
 
-If the request is ambiguous about scope or depth, ask exactly one concise
-inline question and stop. Do not guess at what's wanted.
+If the request is ambiguous about scope or depth, write your question to
+`.agent-runs/{RUN_ID}/question.md` and stop — do NOT write the deliverable
+in this case, and do NOT put the question only in your final result text
+(gantry checks question.md's existence deterministically, not your
+prose). Do not guess at what's wanted.
 
 Required report sections:
 1. Question — what was asked, restated precisely

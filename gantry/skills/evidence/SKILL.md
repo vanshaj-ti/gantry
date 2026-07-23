@@ -35,3 +35,9 @@ build is wrong, write that clearly and FAIL the evidence report.
 Required report sections: Acceptance criteria mapped to proof,
 commands/tests run with outcomes, real interface evidence, real resulting
 state, recommendation (PASS/FAIL/BLOCKED).
+
+If blocked by a genuine question (not something evidence itself should
+answer — e.g. missing environment access), write it to
+`.agent-runs/{RUN_ID}/question.md` and stop instead of guessing — do NOT
+put the question only in your final result text (gantry checks
+question.md's existence deterministically, not your prose).

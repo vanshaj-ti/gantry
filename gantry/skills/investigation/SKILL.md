@@ -36,6 +36,13 @@ guess at root cause without a reproduction.
 Stop-the-line: do not fold in unrelated fixes or refactors while
 investigating — report exactly what's broken and why, nothing else.
 
+If you genuinely cannot build a feedback loop, or hit a real blocking
+question you can't resolve yourself, write it to
+`.agent-runs/{RUN_ID}/question.md` and stop — do NOT write the
+investigation report in this case, and do NOT put the question only in
+your final result text (gantry checks question.md's existence
+deterministically, not your prose).
+
 Required report sections: Symptom, Reproduction (loop command + output +
 minimized repro), Layer, Hypotheses considered (ranked, with predictions
 and results), Root cause, Affected scope, Fix direction, Open questions.

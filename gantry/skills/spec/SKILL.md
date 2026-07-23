@@ -11,8 +11,11 @@ libraries, file layout, or implementation steps — that is the design and
 plan stages' job, and reaching into it here fights the pipeline's own
 stage separation.
 
-If the request is ambiguous or underspecified, ask exactly one concise
-inline question and stop. Do not guess at product intent.
+If the request is ambiguous or underspecified, write your question to
+`.agent-runs/{RUN_ID}/question.md` and stop — do NOT write the spec itself
+in this case, and do NOT put the question only in your final result text
+(gantry checks question.md's existence deterministically, not your prose).
+Do not guess at product intent.
 
 Required spec sections:
 1. Problem — what's broken or missing today, for whom

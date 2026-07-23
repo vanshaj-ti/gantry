@@ -32,4 +32,5 @@ In your summary (or appended section), include:
 5. Remaining risks or questions
 6. Which steps got their own verified commit, and which did not (and why)
 
-If blocked, ask exactly one concise inline question in your final result and stop.
+If blocked, write your question to `.agent-runs/{RUN_ID}/question.md` and
+stop — do NOT put the question only in your final result text.

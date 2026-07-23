@@ -252,6 +252,13 @@ def status_to_category(status: str) -> str | None:
             return category
     if status.startswith("awaiting_") or status.endswith("_running") or status == "review_approved":
         return "in_progress"
+    if status.endswith("_failed") or status.endswith("_question"):
+        # Both need a human: _failed is a genuine error (real bug, timeout,
+        # missing artifact); _question is the agent legitimately pausing to
+        # ask something (see engine.py's question.md check) — a distinct,
+        # expected state, not an error, but still something only a human
+        # reply can move forward.
+        return "blocked"
     return None
 
 
@@ -315,6 +322,46 @@ def _maybe_post_stage_doc(run_id: str, store: Any, issue_id: str, status: str, a
     store.update_state(run_id, linear_docs_posted={**posted, stage: content_hash})
 
 
+def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: str, api_key: str) -> None:
+    """Post why a stage stopped — either a genuine question (deterministic:
+    the agent wrote question.md, see engine.py) or a real failure — as a
+    comment, dedup'd once per distinct occurrence (a retry that asks a
+    DIFFERENT question, or fails for a different reason, gets its own
+    comment).
+
+    Question and failure are deliberately distinct, not folded into one
+    "something went wrong" message: a question is expected pipeline
+    behavior (the agent correctly paused instead of guessing), a failure
+    is an actual error. Both need a human, so both map to the Blocked
+    category (see status_to_category), but the comment text says which
+    one this is."""
+    if status.endswith("_question"):
+        stage = status.removesuffix("_question")
+        detail = store.read_artifact(run_id, "question.md") or "(question.md was empty)"
+        detail = detail.strip()
+        framing = f"{stage.capitalize()} stage has a question — needs your input:"
+        dedup_field = "linear_questions_posted"
+    elif status.endswith("_failed"):
+        stage = status.removesuffix("_failed")
+        gate = store.read_result(run_id, f"{stage}-gate.json")
+        reason = (gate or {}).get("reason", "") if isinstance(gate, dict) else ""
+        detail = reason or "(no failure detail captured)"
+        framing = f"{stage.capitalize()} stage failed:"
+        dedup_field = "linear_failures_posted"
+    else:
+        return
+    dedup_key = hashlib.sha256(f"{stage}:{detail}".encode()).hexdigest()
+    posted = store.state(run_id).get(dedup_field) or {}
+    if posted.get(stage) == dedup_key:
+        return
+    post_comment(
+        issue_id,
+        f"{framing}\n\n{detail}\n\nReply with an answer/clarification to resume this stage.",
+        api_key,
+    )
+    store.update_state(run_id, **{dedup_field: {**posted, stage: dedup_key}})
+
+
 def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> dict[str, Any]:
     """Keep a run's tracked Linear issue in sync with its gantry state:
 
@@ -342,6 +389,7 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
 
     status = run_state.get("status", "")
     _maybe_post_stage_doc(run_id, store, issue_id, status, api_key)
+    _maybe_post_stage_failure(run_id, store, issue_id, status, api_key)
 
     category = status_to_category(status)
     if not category:
