@@ -247,9 +247,13 @@ class Engine:
 
         `tag` is purely a filtering label (e.g. a feature/ticket/component
         name) for `gantry watch --tag`/`gantry advance --all --tag` — it has
-        no effect on the run's own execution, only on which runs a filtered
-        command touches."""
-        first = self.cfg.stages[0] if self.cfg.stages else "plan"
+        no effect on the run's own execution UNLESS `[queues.<tag>]` in
+        gantry.toml overrides the stage list for that tag (see
+        GantryConfig.stages_for) — in which case it also picks this run's
+        pipeline (e.g. tag="bug" -> investigation/plan/build/evidence/review
+        instead of the project's default stages)."""
+        stages = self.cfg.stages_for(tag)
+        first = stages[0] if stages else "plan"
         rid = self.store.new_run_id(title, run_id)
         self.store.create(rid, title)
         self.store.artifact_path(rid, "intake.md").write_text(f"# Intake\n\n{request.strip() or title}\n")
@@ -258,6 +262,7 @@ class Engine:
             if not self.store.exists(dep):
                 raise ValueError(f"depends_on references unknown run: {dep}")
         extra = {"tag": tag} if tag else {}
+        extra["stages"] = stages
         if deps:
             self.store.update_state(rid, status=Status.QUEUED, current_stage=first,
                                     title=title, depends_on=deps, **extra)
@@ -285,13 +290,14 @@ class Engine:
         deps = self.store.state(run_id).get("depends_on") or []
         if not deps:
             return True
-        last_stage = self.cfg.stages[-1] if self.cfg.stages else None
-        terminal_incomplete_ok = f"{last_stage}_complete" if last_stage else None
         for dep in deps:
             dep_state = self.store.state(dep)
             dep_status = dep_state.get("status", "")
             if dep_status in ("shipped", "shipped_manually") and dep_state.get("merged") is True:
                 continue
+            dep_stages = self.stages_for_run(dep)
+            dep_last_stage = dep_stages[-1] if dep_stages else None
+            terminal_incomplete_ok = f"{dep_last_stage}_complete" if dep_last_stage else None
             if not self.cfg.review.enabled and dep_status == terminal_incomplete_ok:
                 continue
             return False
@@ -636,10 +642,16 @@ class Engine:
         out["base_branch_merge"] = merge_result
         return out
 
+    def stages_for_run(self, run_id: str) -> list[str]:
+        """This run's own stage list — pinned at create_run time (per its tag's
+        [queues.<tag>] override, if any) — falling back to cfg.stages for runs
+        created before this field existed."""
+        return self.store.state(run_id).get("stages") or self.cfg.stages
+
     # --- gates ---
     def approve(self, run_id: str, stage: str) -> str:
         """Pass a human-review gate: mark stage approved and advance to the next."""
-        nxt = self._next_stage(stage)
+        nxt = self._next_stage(run_id, stage)
         status = f"awaiting_{nxt}" if nxt else f"{stage}_approved"
         self.store.update_state(run_id, status=status, current_stage=nxt or stage,
                                 last_approved_stage=stage)
@@ -651,8 +663,8 @@ class Engine:
             f"# Revision requested: {stage}\n\n{comments}\n")
         self.store.update_state(run_id, status=f"{stage}_changes_requested", current_stage=stage)
 
-    def _next_stage(self, stage: str) -> str | None:
-        stages = self.cfg.stages
+    def _next_stage(self, run_id: str, stage: str) -> str | None:
+        stages = self.stages_for_run(run_id)
         if stage not in stages:
             return None
         i = stages.index(stage)

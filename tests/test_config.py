@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gantry.config import GantryConfig, StageModel, load_config
+from gantry.config import DEFAULT_QUEUE_STAGES, GantryConfig, StageModel, load_config
 
 
 class TestBareRepoDefaults(unittest.TestCase):
@@ -114,6 +114,58 @@ base_branch = "staging"
             path.write_text(tmpl.read_text())
             cfg = load_config(Path(tmp))
         self.assertEqual(cfg.git.ship_retry_attempts, 2)
+
+
+class TestQueueDefaults(unittest.TestCase):
+    """The 5 fixed generic queues (feature/bug/hotfix/research/chore) ship
+    built into gantry — no gantry.toml [queues.*] required to get them."""
+
+    def test_bare_config_carries_all_5_built_in_queues(self):
+        cfg = GantryConfig()
+        self.assertEqual(cfg.queues, DEFAULT_QUEUE_STAGES)
+
+    def test_missing_gantry_toml_still_carries_built_in_queues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.queues, DEFAULT_QUEUE_STAGES)
+
+    def test_stages_for_bug_uses_investigation_led_pipeline(self):
+        cfg = GantryConfig()
+        self.assertEqual(cfg.stages_for("bug"),
+                         ["investigation", "plan", "build", "evidence", "review"])
+
+    def test_stages_for_hotfix_skips_review(self):
+        cfg = GantryConfig()
+        self.assertEqual(cfg.stages_for("hotfix"), ["build", "evidence"])
+
+    def test_stages_for_none_or_unknown_tag_falls_back_to_project_stages(self):
+        cfg = GantryConfig()
+        cfg.stages = ["plan", "build"]
+        self.assertEqual(cfg.stages_for(None), ["plan", "build"])
+        self.assertEqual(cfg.stages_for("not_a_real_tag"), ["plan", "build"])
+
+    def test_toml_queues_override_merges_not_replaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text("""
+[queues.bug]
+stages = ["investigation", "plan", "build"]
+""")
+            cfg = load_config(Path(tmp))
+        # overridden tag reflects the project's own list
+        self.assertEqual(cfg.stages_for("bug"), ["investigation", "plan", "build"])
+        # every other tag keeps its built-in default, untouched
+        for tag in ("feature", "hotfix", "research", "chore"):
+            self.assertEqual(cfg.stages_for(tag), DEFAULT_QUEUE_STAGES[tag])
+
+    def test_template_gantry_toml_parses_with_built_in_queues_intact(self):
+        from gantry.cli._shared import TEMPLATE_DIR
+        tmpl = TEMPLATE_DIR / "gantry.toml"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text(tmpl.read_text())
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.queues, DEFAULT_QUEUE_STAGES)
 
 
 class TestNewConfigSectionsFromToml(unittest.TestCase):

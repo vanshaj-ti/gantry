@@ -33,17 +33,32 @@ CONFIG_FILENAME = "gantry.toml"
 # design.md, and templates/gantry.toml's [stages] comment for how to opt in).
 DEFAULT_STAGES = ["plan", "build", "evidence", "review"]
 
-DOC_STAGES = {"spec", "design"}          # human-authored/agent-drafted, human-gated
+DOC_STAGES = {"spec", "design", "investigation", "research"}  # human-authored/agent-drafted, human-gated
 AGENT_STAGES = {"plan", "build", "evidence"}  # invoke the agent runner
 REVIEW_STAGE = "review"                    # independent LLM review
 
 STAGE_ARTIFACTS = {
     "spec": "product-spec.md",
     "design": "architecture-design.md",
+    "investigation": "investigation-report.md",
+    "research": "research-report.md",
     "plan": "implementation-plan.md",
     "build": "build-summary.md",
     "evidence": "evidence-report.md",
     "review": "review-result.json",
+}
+
+# The 5 fixed, generic queues gantry ships with (see gantry/linear.py's
+# QUEUE_TAGS) — every project gets these stage lists for free with no
+# gantry.toml [queues.*] config required. A project's own [queues.<tag>]
+# section overrides just that tag, same merge-on-top pattern as
+# DEFAULT_MCP_SERVERS below (see load_config).
+DEFAULT_QUEUE_STAGES: dict[str, list[str]] = {
+    "feature": ["spec", "design", "plan", "build", "evidence", "review"],
+    "bug": ["investigation", "plan", "build", "evidence", "review"],
+    "hotfix": ["build", "evidence"],  # no review — ships direct to staging, tested there
+    "research": ["research"],
+    "chore": ["plan", "build", "evidence", "review"],
 }
 
 
@@ -494,6 +509,15 @@ class GantryConfig:
     proxy: dict[str, ProxyConfig] = field(default_factory=dict)  # runner name -> ProxyConfig
     # prompts dir: where stage prompt templates live (relative to config, or absolute)
     prompts_dir: str = ".gantry/prompts"
+    # tag -> stage list, seeded with the 5 built-in queues (DEFAULT_QUEUE_STAGES)
+    # so a bare GantryConfig() carries them with no toml at all; a project's
+    # [queues.<tag>] in gantry.toml overrides just that tag (see load_config).
+    queues: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_QUEUE_STAGES))
+
+    def stages_for(self, tag: str | None) -> list[str]:
+        if tag and tag in self.queues:
+            return self.queues[tag]
+        return self.stages
 
     def model_for(self, stage: str) -> StageModel:
         if stage in self.models:
@@ -576,6 +600,7 @@ def load_config(target_workspace: Path) -> GantryConfig:
     cfg.project_id = raw.get("project_id", cfg.project_id)
     cfg.stages = raw.get("stages", cfg.stages)
     cfg.prompts_dir = raw.get("prompts_dir", cfg.prompts_dir)
+    cfg.queues.update({tag: q["stages"] for tag, q in raw.get("queues", {}).items() if "stages" in q})
 
     if "agent" in raw:
         a = raw["agent"]

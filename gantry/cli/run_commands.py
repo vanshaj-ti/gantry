@@ -66,7 +66,8 @@ def cmd_run(args) -> int:
                              depends_on=depends_on, tag=tag)
     except ValueError as e:
         return _out({"ok": False, "error": str(e)})
-    out = {"ok": True, "run_id": rid, "first_stage": eng.cfg.stages[0]}
+    run_stages = eng.stages_for_run(rid)
+    out = {"ok": True, "run_id": rid, "first_stage": run_stages[0] if run_stages else "plan"}
     if depends_on:
         out["queued_behind"] = depends_on
     if tag:

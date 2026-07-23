@@ -4,6 +4,7 @@ Decoupled from the old Telegram-only path. Backends:
   - none     : no-op (default; strangers need nothing configured)
   - telegram : direct Bot API using GANTRY_TELEGRAM_BOT_TOKEN / _CHAT_ID env
   - webhook  : POST JSON to a configured URL (Slack/Discord/custom)
+  - linear   : post as a comment on a specific Linear issue (see LinearNotifier)
 """
 from __future__ import annotations
 
@@ -63,6 +64,27 @@ class WebhookNotifier(Notifier):
                 return {"sent": True, "backend": "webhook", "status": resp.status}
         except Exception as exc:
             return {"sent": False, "backend": "webhook", "error": str(exc)}
+
+
+class LinearNotifier(Notifier):
+    """Posts a status/question message as a comment on a specific Linear
+    issue. Unlike TelegramNotifier/WebhookNotifier (one fixed destination per
+    target repo), a Linear issue id is per-run, so this is constructed
+    per-reply by gantry/linear.py's handle_comment_created rather than
+    resolved once via get_notifier — the issue id isn't known until an
+    inbound webhook event names it."""
+
+    def __init__(self, issue_id: str, api_key: str):
+        self.issue_id = issue_id
+        self.api_key = api_key
+
+    def send(self, text: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        from .linear import post_comment, LinearError
+        try:
+            post_comment(self.issue_id, text, self.api_key)
+            return {"sent": True, "backend": "linear"}
+        except LinearError as exc:
+            return {"sent": False, "backend": "linear", "error": str(exc)}
 
 
 def get_notifier(cfg: NotifyConfig) -> Notifier:

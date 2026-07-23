@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 
-from ..config import load_config
+from ..config import DOC_STAGES, load_config
 from ..notify import fetch_telegram_replies, get_notifier
 from ..state import RunStore
 from ._shared import NEEDS_INPUT_STATUSES, _notify, _target
@@ -251,7 +251,7 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
     eng = Engine(store.target, cfg)
     lowered = text.lower().strip()
 
-    if status in ("spec_complete", "design_complete"):
+    if status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES:
         stage = status.removesuffix("_complete")
         if lowered.startswith("1") or lowered in ("approve", "yes", "y"):
             nxt = eng.approve(run_id, stage)

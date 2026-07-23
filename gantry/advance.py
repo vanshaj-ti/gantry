@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .checks import _matches_any
-from .config import AGENT_STAGES, GantryConfig
+from .config import AGENT_STAGES, DOC_STAGES, GantryConfig
 from .e2e import run_e2e_tests
 from .engine import HEARTBEAT_INTERVAL, Engine
 from .retry import RetryPolicy
@@ -374,7 +374,7 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
                 f"Once merged, run `gantry mark-merged --run {_escape_md(run_id)}` so any "
                 f"dependent runs can start.")
 
-    if status in ("spec_complete", "design_complete"):
+    if status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES:
         stage = status.removesuffix("_complete")
         agent_text = ""
         if isinstance(result.get("raw"), dict):
@@ -509,8 +509,9 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
                     or engine.store.state(d).get("merged") is not True]
             return {"advanced": False, "from": status, "action": "waiting_on_prereqs",
                     "unmet_depends_on": unmet}
+        run_stages = engine.stages_for_run(run_id)
         first = engine.store.state(run_id).get("current_stage") or (
-            engine.cfg.stages[0] if engine.cfg.stages else "plan")
+            run_stages[0] if run_stages else "plan")
         engine.store.update_state(run_id, status=f"awaiting_{first}")
         return {"advanced": True, "from": status, "action": "prereqs_met->awaiting_" + first}
 
@@ -521,7 +522,8 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
             return {"advanced": True, "from": status, "action": f"start_{stage}"}
         return {"advanced": False, "from": status, "action": "no_auto_transition"}
 
-    if status in ("spec_complete", "design_complete") and engine.cfg.git.auto_approve_docs:
+    if (status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES
+            and engine.cfg.git.auto_approve_docs):
         stage = status.removesuffix("_complete")
         nxt = engine.approve(run_id, stage)
         return {"advanced": True, "from": status, "action": f"auto_approved_{stage}->{nxt}"}
@@ -557,7 +559,7 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
             engine.store.update_state(run_id, status=Status.BLOCKED, blocked_on=BlockedReason.E2E,
                                       checks="pass")
             return {"advanced": False, "from": status, "action": "e2e_failed"}
-        if "evidence" not in engine.cfg.stages:
+        if "evidence" not in engine.stages_for_run(run_id):
             # Project's cfg.stages skips the evidence stage entirely — jump
             # straight to whatever comes after it (review, if enabled) rather
             # than unconditionally invoking an agent stage the project never
@@ -804,7 +806,7 @@ def _advance_one_run(engine: Engine, run: dict, cfg: GantryConfig) -> dict[str, 
     auto_transitions = (AUTO_TRANSITIONS
                        | ({"review_approved", "ship_failed"} if cfg.git.auto_ship else set())
                        | ({"checks_escalated"} if cfg.checks.auto_resolve else set())
-                       | ({"spec_complete", "design_complete"} if cfg.git.auto_approve_docs else set()))
+                       | ({f"{stage}_complete" for stage in DOC_STAGES} if cfg.git.auto_approve_docs else set()))
     rid = run["id"]
     repaired = _repair_stale_running(engine, run)
     if repaired:

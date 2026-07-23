@@ -8,6 +8,7 @@ Input files for this stage live in `.agent-runs/{RUN_ID}/`:
 - `intake.md`
 - `product-spec.md` if present
 - `architecture-design.md` if present
+- `investigation-report.md` if present
 - optional `answers/plan.md` if this is a resumed run
 
 Your job: produce an implementation plan only. Do NOT modify application/source files.

@@ -18,6 +18,7 @@ Verbs:
   gantry status [--run ID]           show run(s) status
   gantry doctor                      check the environment (runners, git, config)
   gantry listen                      poll Telegram replies, act on the pending run
+  gantry linear-serve                 serve Linear issue webhooks: classify + create runs
   gantry cost [--run ID]               repo-wide cost total, or one run's per-stage breakdown
   gantry docs --run ID                render a run's spec/design/plan/evidence/review docs
   gantry cockpit                      open a tmux workspace pre-wired for this repo
@@ -36,6 +37,7 @@ from pathlib import Path
 from .. import __version__
 from .cost import cmd_cost
 from .docs import cmd_doctor, cmd_docs
+from .linear import cmd_linear_serve
 from .run_commands import (
     cmd_advance, cmd_approve, cmd_cancel, cmd_checks, cmd_cleanup, cmd_hold, cmd_init,
     cmd_loop, cmd_mark_merged, cmd_mark_shipped, cmd_resume_hold, cmd_retry, cmd_review,
@@ -183,6 +185,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("listen", help="poll Telegram replies, act on the pending run")
     s.add_argument("--run", help="always apply replies to this run (default: the most recent needs-input run)")
     s.set_defaults(func=cmd_listen)
+
+    s = sub.add_parser("linear-serve", help="serve Linear issue webhooks: classify + create runs")
+    s.add_argument("--port", type=int, default=8080)
+    s.set_defaults(func=cmd_linear_serve)
 
     s = sub.add_parser("docs", help="render a run's spec/design/plan/evidence/review docs (via glow if installed)")
     s.add_argument("--run", help="default: the most recently touched run")

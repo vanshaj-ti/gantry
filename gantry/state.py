@@ -161,6 +161,30 @@ class RunStore:
         entry = data.get(str(message_id))
         return entry.get("run_id") if entry else None
 
+    # --- Linear issue -> run map ---
+    # Same shape as the telegram-message map above: a Comment webhook event
+    # only carries the issue id, not the run id, so this resolves which run a
+    # human's reply on a Linear issue belongs to. Recorded once at run
+    # creation (gantry/linear.py's handle_issue_created); read on every
+    # inbound Comment event (handle_comment_created). No age-based pruning —
+    # unlike Telegram replies, a Linear issue can legitimately need a reply
+    # long after the run started (a stuck investigation stage awaiting
+    # clarification), so entries are only removed once their run reaches a
+    # terminal state, not on a fixed calendar cutoff.
+    def _linear_issue_map_path(self) -> Path:
+        return self.runs / "linear-issue-map.json"
+
+    def record_linear_issue(self, issue_id: str, run_id: str) -> None:
+        path = self._linear_issue_map_path()
+        data = self._load(path, {}) or {}
+        data[issue_id] = {"run_id": run_id, "recorded_at": now_iso()}
+        self._write(path, data)
+
+    def run_for_linear_issue(self, issue_id: str) -> str | None:
+        data = self._load(self._linear_issue_map_path(), {}) or {}
+        entry = data.get(issue_id)
+        return entry.get("run_id") if entry else None
+
     # --- flake log (target-repo-scoped, not per-run) ---
     # Mirrors the telegram-message-map pattern above: one flat file, sibling to
     # the per-run .agent-runs/<run_id>/ directories (not inside run_dir, since
