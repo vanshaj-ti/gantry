@@ -62,6 +62,17 @@ if [[ -d "$GANTRY_SRC_DIR/.git" ]]; then
 else
   git clone "$GANTRY_REPO_URL" "$GANTRY_SRC_DIR"
 fi
+# Prune the PREVIOUS build's now-dangling image layers before building the
+# new one — a rebuild leaves the prior gantry:latest layers unreferenced
+# (docker retags, doesn't delete), and this VM's small boot disk fills up
+# fast across repeated deploys (hit ENOSPC mid-build once already). Old
+# stopped containers too, in case a prior `docker rm -f` step ever fails
+# partway. Never touches the currently-running containers (`docker ps -a`
+# without -a would still be enough, but --filter status=exited is explicit
+# about intent).
+docker container prune -f --filter "until=1h" 2>&1 || true
+docker image prune -a -f --filter "until=1h" 2>&1 || true
+
 docker build -t gantry:latest "$GANTRY_SRC_DIR"
 
 # --- start both containers ---
