@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 from .. import __version__
+from ..config import AGENT_STAGES, DOC_STAGES
 from .cost import cmd_cost
 from .docs import cmd_doctor, cmd_docs
 from .linear import cmd_linear_serve
@@ -82,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
                                               "--tag; has no effect on the run's own execution")
     s.set_defaults(func=cmd_run)
 
-    s = sub.add_parser("stage", help="run one stage (spec/design/plan/build/evidence)")
-    s.add_argument("stage", choices=["spec", "design", "plan", "build", "evidence"])
+    s = sub.add_parser("stage", help="run one stage (any DOC_STAGES or AGENT_STAGES stage)")
+    s.add_argument("stage", choices=sorted(DOC_STAGES | AGENT_STAGES))
     s.add_argument("--run", required=True)
     s.add_argument("--resume", action="store_true")
     s.set_defaults(func=cmd_stage)

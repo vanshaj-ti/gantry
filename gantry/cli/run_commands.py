@@ -26,7 +26,7 @@ def scaffold(tgt, force: bool = False, with_skills: bool = False) -> dict:
     cfg_path.write_text(tmpl.read_text() if tmpl.exists() else "project_id = \"project\"\n")
     prompts = tgt / ".gantry" / "prompts"
     prompts.mkdir(parents=True, exist_ok=True)
-    for stage in ["spec", "design", "plan", "build", "evidence", "review"]:
+    for stage in sorted(DOC_STAGES | AGENT_STAGES | {"review"}):
         src = TEMPLATE_DIR / "prompts" / f"{stage}.md"
         dst = prompts / f"{stage}.md"
         if src.exists() and not dst.exists():
