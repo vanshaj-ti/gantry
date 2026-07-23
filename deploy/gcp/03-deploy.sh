@@ -28,16 +28,33 @@ fi
 # --- fetch secrets from Secret Manager into a 0600 env file ---
 # Optional secrets (gateway URL / auth token) are included only when present
 # so a plain Anthropic ANTHROPIC_API_KEY deploy still works.
+#
+# Use `versions access` directly (not `secrets describe`): the VM SA is
+# typically granted roles/secretmanager.secretAccessor, which can read
+# versions but cannot describe secrets. describe-first treated every secret
+# as missing even when access would succeed.
 SECRETS_FILE="/run/gantry-secrets.env"
 : > "$SECRETS_FILE"
 chmod 600 "$SECRETS_FILE"
 
+PROJECT_ID="${PROJECT_ID:-$(curl -sf -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/project/project-id 2>/dev/null || true)}"
+GCLOUD_PROJ_ARGS=()
+if [[ -n "${PROJECT_ID:-}" ]]; then
+  GCLOUD_PROJ_ARGS=(--project="$PROJECT_ID")
+  gcloud config set project "$PROJECT_ID" >/dev/null 2>&1 || true
+fi
+
 append_secret() {
   local env_name="$1" secret_name="$2" required="${3:-0}"
-  if gcloud secrets describe "$secret_name" &>/dev/null; then
-    echo "${env_name}=$(gcloud secrets versions access latest --secret=${secret_name})" >> "$SECRETS_FILE"
+  local value
+  if value="$(gcloud secrets versions access latest --secret="$secret_name" \
+      "${GCLOUD_PROJ_ARGS[@]}" 2>/dev/null)" && [[ -n "$value" ]]; then
+    # Avoid echoing secrets into the deploy log; only write the env file.
+    printf '%s=%s\n' "$env_name" "$value" >> "$SECRETS_FILE"
   elif [[ "$required" == "1" ]]; then
-    echo "missing required secret: $secret_name" >&2
+    echo "missing required secret: $secret_name (project=${PROJECT_ID:-unset})" >&2
+    echo "hint: grant the VM SA roles/secretmanager.secretAccessor on this secret" >&2
     exit 1
   fi
 }
@@ -50,10 +67,7 @@ append_secret OPENAI_API_KEY gantry-openai-api-key 0
 append_secret GANTRY_LINEAR_API_KEY gantry-linear-api-key 1
 append_secret GANTRY_LINEAR_TEAM_ID gantry-linear-team-id 1
 append_secret GANTRY_LINEAR_WEBHOOK_SECRET gantry-linear-webhook-secret 1
-# Optional Claude Code flag some gateways need; ignore if unset.
-if gcloud secrets describe gantry-claude-code-disable-experimental-betas &>/dev/null; then
-  echo "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=$(gcloud secrets versions access latest --secret=gantry-claude-code-disable-experimental-betas)" >> "$SECRETS_FILE"
-fi
+append_secret CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS gantry-claude-code-disable-experimental-betas 0
 
 GH_TOKEN="$(grep ^GH_TOKEN= "$SECRETS_FILE" | cut -d= -f2-)"
 
