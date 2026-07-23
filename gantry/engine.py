@@ -104,8 +104,8 @@ class Engine:
                     f"and write your output to .agent-runs/{run_id}/{artifact}.\n")
         else:
             base = template_path.read_text().replace("{RUN_ID}", run_id)
-        return (self._plan_context_directive(stage) + base + self._skills_directive(stage)
-                + self._evidence_output_directive(stage))
+        return (self._plan_context_directive(stage) + base + self._stage_skill_directive(stage)
+                + self._skills_directive(stage) + self._evidence_output_directive(stage))
 
     def _prompt_template_path(self, stage: str) -> Path:
         """Which prompt template file to use for this stage.
@@ -174,6 +174,22 @@ class Engine:
             "`scope_summary` (one-sentence string). This is read by the review stage "
             "as a pre-digested summary — keep it accurate to the prose above it, don't "
             "pad or guess a number you didn't actually verify.\n"
+        )
+
+    # Every stage gantry ships its own authored SKILL.md for (baked into the
+    # Docker image at ~/.claude/skills/gantry-stage-<stage>/ — see
+    # Dockerfile and gantry/skills/<stage>/SKILL.md). Distinct from
+    # _skills_directive below: this is gantry's OWN stage discipline, not a
+    # generic third-party methodology library, so it applies to every
+    # stage — not just build/evidence.
+    _STAGE_SKILLS = {"spec", "design", "investigation", "research", "plan", "build", "evidence"}
+
+    def _stage_skill_directive(self, stage: str) -> str:
+        if stage not in self._STAGE_SKILLS:
+            return ""
+        return (
+            f"\n\n---\nInvoke the `gantry-stage-{stage}` skill now for this stage's "
+            f"required discipline and output format before doing any other work.\n"
         )
 
     def _skills_directive(self, stage: str) -> str:

@@ -147,6 +147,8 @@ class TestBugQueueEndToEnd(unittest.TestCase):
                 return {"issueLabelCreate": {"success": True, "issueLabel": {"id": "label-bug"}}}
             if "team(id" in query:
                 return {"team": {"labels": {"nodes": []}}}  # no existing labels -> create one
+            if "issue(id" in query and "labels" in query:
+                return {"issue": {"labels": {"nodes": []}}}  # no prior labels on the issue
             return {"issueUpdate": {"success": True}} if "issueUpdate" in query else \
                    {"commentCreate": {"success": True}}
 

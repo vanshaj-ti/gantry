@@ -39,4 +39,22 @@ ENV HOME=/home/gantry
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/home/gantry/.local/bin:${PATH}"
 
+# gantry's own per-stage discipline, authored in this repo (gantry/skills/)
+# — every deployment gets these with no post-install step, matching the
+# manual `ln -s ~/gantry/claude-skills/... ~/.claude/skills/...` pattern
+# README.md documents for gantry-pipeline itself, just baked at build time.
+COPY --chown=gantry:gantry gantry/skills/ /home/gantry/.claude/skills/
+
+# Marketplace skills this org's Claude Code sessions already use locally —
+# baked in so a headless VM agent gets the same toolset, not a bare CLI.
+# Exact slugs/sources confirmed from a live installed_plugins.json /
+# known_marketplaces.json, not guessed.
+RUN claude plugin marketplace add JuliusBrussee/caveman \
+    && claude plugin marketplace add mksglu/context-mode \
+    && claude plugin marketplace add DietrichGebert/ponytail \
+    && claude plugin install caveman@caveman \
+    && claude plugin install context-mode@context-mode \
+    && claude plugin install ponytail@ponytail \
+    && claude plugin install playwright@claude-plugins-official
+
 ENTRYPOINT ["/opt/gantry/docker-entrypoint.sh"]

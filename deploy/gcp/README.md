@@ -23,8 +23,12 @@ running.
 
 - A fine-grained GitHub PAT scoped to the edupaid repo only
   (contents: read/write, pull requests: read/write).
-- An Anthropic API key (`ANTHROPIC_API_KEY`) for headless Claude Code auth —
-  no interactive `/login` on a VM.
+- This org routes Claude Code through TrueFoundry's gateway (Maat), not raw
+  Anthropic — you need `ANTHROPIC_BASE_URL` (the gateway URL, e.g.
+  `https://tfy.promptlens.trilogy.com`) and `ANTHROPIC_AUTH_TOKEN` (your
+  personal TrueFoundry API key from Maat → Profile → User key → Reveal), not
+  a plain `ANTHROPIC_API_KEY`. Both get passed into the container so
+  headless Claude Code auth works with no interactive `/login` on the VM.
 - edupaid's Linear team id (`GANTRY_LINEAR_TEAM_ID`) and a Linear personal
   API key or OAuth token with issue read/write + comment + label scopes
   (`GANTRY_LINEAR_API_KEY`).

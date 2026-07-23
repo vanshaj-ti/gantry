@@ -3,14 +3,22 @@
 It inspects a run's status and fires the next stage automatically, for the
 transitions that don't require a human gate:
 
-  plan_complete            -> run build
-  build_complete           -> run checks; if pass -> run evidence
-  evidence_complete        -> run review
-  review_changes_requested -> resume build (with review-comments.md)
+  awaiting_<stage>          -> run that stage's agent (doc stage or not)
+  plan_complete             -> run build
+  build_complete            -> run checks; if pass -> run evidence
+  evidence_complete         -> run review
+  review_changes_requested  -> resume build (with review-comments.md)
 
-Human-gated transitions (awaiting_spec, awaiting_design, review_escalated,
-checks_high_risk_escalated, blocked) are intentionally NOT auto-advanced —
-they wait for `gantry approve`.
+Only the human GATE stays manual: a doc stage's *_complete status (e.g.
+spec_complete, investigation_complete) does not auto-advance to the next
+stage unless [git].auto_approve_docs is set — a human (or a Linear comment
+reply, via gantry/linear.py's handle_comment_created) must `gantry approve`
+it. Writing the doc itself, though, is auto-fired the same as any agent
+stage — a run doesn't sit idle at awaiting_investigation waiting for someone
+to manually type `gantry stage investigation`.
+
+review_escalated / checks_high_risk_escalated / blocked are intentionally
+NOT auto-advanced — they wait for `gantry approve`/`gantry revise`.
 
 `advance_run` runs synchronously (used by `gantry advance --run ID`).
 `advance_all` ticks every run once (used by the poller cron).
@@ -36,14 +44,16 @@ from .status import BlockedReason, FailureKind, Status
 logger = logging.getLogger(__name__)
 
 # Transitions the poller drives automatically (no human gate).
-# awaiting_plan / awaiting_build / awaiting_evidence are NOT human-gated (only
-# awaiting_spec / awaiting_design are — see config.DOC_STAGES) — they just mean
-# "approved to start, hasn't been kicked off yet", so the poller should fire
-# the stage itself rather than waiting for a manual `gantry stage <name>`.
+# Every awaiting_<stage> (doc stage or agent stage) just means "approved to
+# start, hasn't been kicked off yet" — the poller fires the stage itself
+# rather than waiting for a manual `gantry stage <name>`. The actual human
+# gate for a doc stage is its *_complete status (see the module docstring
+# and the auto_approve_docs check below), not awaiting_<stage>.
 AUTO_TRANSITIONS = {
     "plan_complete", "build_complete", "evidence_complete", "review_changes_requested",
     "blocked", "queued",
     *(f"awaiting_{stage}" for stage in AGENT_STAGES),
+    *(f"awaiting_{stage}" for stage in DOC_STAGES),
 }
 
 # Human-friendly status labels for notifications.
@@ -497,8 +507,33 @@ def notify_message(store: Any, run_id: str, status: str, result: dict[str, Any] 
 
 
 def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
-    """Fire the appropriate next stage for a single run based on its status.
-    Returns {advanced: bool, from, action, ...}. No-op for gated/terminal states."""
+    """Fire the appropriate next stage for a single run based on its status,
+    then (if this target has Linear intake configured — GANTRY_LINEAR_*
+    env vars present) sync the run's tracked Linear issue to match its
+    resulting status: In Progress from creation through review_approved
+    (the PR isn't shipped yet), Blocked on any escalation/failure, Done
+    once actually shipped. Returns
+    {advanced: bool, from, action, ...}. No-op for gated/terminal states."""
+    result = _advance_run_inner(engine, run_id)
+    _sync_linear_status_if_configured(engine, run_id)
+    return result
+
+
+def _sync_linear_status_if_configured(engine: Engine, run_id: str) -> None:
+    api_key = os.environ.get("GANTRY_LINEAR_API_KEY")
+    team_id = os.environ.get("GANTRY_LINEAR_TEAM_ID")
+    if not api_key or not team_id:
+        return
+    from .linear import sync_issue_status
+    try:
+        sync_issue_status(run_id, engine.store, team_id, api_key)
+    except Exception:
+        # Best-effort: a Linear API hiccup must never fail the actual
+        # pipeline advance that already happened above.
+        logger.warning("Linear status sync failed for run %s", run_id, exc_info=True)
+
+
+def _advance_run_inner(engine: Engine, run_id: str) -> dict[str, Any]:
     status = engine.store.state(run_id).get("status", "")
 
     if status == "queued":
@@ -517,7 +552,7 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
 
     if status.startswith("awaiting_"):
         stage = status.removeprefix("awaiting_")
-        if stage in AGENT_STAGES:
+        if stage in AGENT_STAGES or stage in DOC_STAGES:
             engine.run_agent_stage(run_id, stage)
             return {"advanced": True, "from": status, "action": f"start_{stage}"}
         return {"advanced": False, "from": status, "action": "no_auto_transition"}

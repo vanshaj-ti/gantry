@@ -608,12 +608,15 @@ class TestIsLoopTerminal(unittest.TestCase):
         self.assertFalse(_is_loop_terminal("awaiting_build"))
         self.assertFalse(_is_loop_terminal("awaiting_evidence"))
 
-    def test_awaiting_doc_stage_still_terminal(self):
-        """awaiting_spec/awaiting_design are real human gates (DOC_STAGES) —
-        loop must still stop there for `gantry approve` to be meaningful."""
+    def test_awaiting_doc_stage_auto_fires_not_terminal(self):
+        """awaiting_spec/awaiting_design/awaiting_investigation now auto-fire
+        the agent to WRITE the doc — the human gate is the resulting
+        *_complete status, not awaiting_<stage> itself (a run must not sit
+        idle waiting for a manual `gantry stage <name>`)."""
         from gantry.cli.run_commands import _is_loop_terminal
-        self.assertTrue(_is_loop_terminal("awaiting_spec"))
-        self.assertTrue(_is_loop_terminal("awaiting_design"))
+        self.assertFalse(_is_loop_terminal("awaiting_spec"))
+        self.assertFalse(_is_loop_terminal("awaiting_design"))
+        self.assertFalse(_is_loop_terminal("awaiting_investigation"))
 
 
 class TestCmdLoopAutoShip(unittest.TestCase):

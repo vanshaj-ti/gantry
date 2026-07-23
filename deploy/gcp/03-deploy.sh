@@ -19,7 +19,11 @@ read -p "Proceed? [y/N] " confirm
 SECRETS_FILE="/run/gantry-secrets.env"
 {
   echo "GH_TOKEN=$(gcloud secrets versions access latest --secret=gantry-github-token)"
-  echo "ANTHROPIC_API_KEY=$(gcloud secrets versions access latest --secret=gantry-anthropic-api-key)"
+  # This org routes Claude Code through TrueFoundry's gateway (see Maat) —
+  # ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, not a raw ANTHROPIC_API_KEY.
+  echo "ANTHROPIC_BASE_URL=$(gcloud secrets versions access latest --secret=gantry-anthropic-base-url)"
+  echo "ANTHROPIC_AUTH_TOKEN=$(gcloud secrets versions access latest --secret=gantry-anthropic-auth-token)"
+  echo "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
   echo "GANTRY_LINEAR_API_KEY=$(gcloud secrets versions access latest --secret=gantry-linear-api-key)"
   echo "GANTRY_LINEAR_TEAM_ID=$(gcloud secrets versions access latest --secret=gantry-linear-team-id)"
   echo "GANTRY_LINEAR_WEBHOOK_SECRET=$(gcloud secrets versions access latest --secret=gantry-linear-webhook-secret)"
@@ -38,6 +42,12 @@ else
   git clone "$AUTH_URL" "$TARGET_DIR"
   git -C "$TARGET_DIR" checkout staging
 fi
+# The container runs as its own unprivileged "gantry" user (uid 1001, see
+# Dockerfile) — a clone/checkout done here (as root, since this script runs
+# under sudo) leaves the worktree root-owned, and the container then can't
+# write .agent-runs/ into the bind-mounted target. Match ownership so
+# create_run's mkdir succeeds.
+chown -R 1001:1001 "$TARGET_DIR"
 
 # --- gantry source + image ---
 if [[ -d "$GANTRY_SRC_DIR/.git" ]]; then

@@ -185,6 +185,16 @@ class RunStore:
         entry = data.get(issue_id)
         return entry.get("run_id") if entry else None
 
+    def linear_issue_for_run(self, run_id: str) -> str | None:
+        """Reverse lookup of record_linear_issue — used by advance.py to sync
+        a run's Linear issue status as the run moves through its pipeline
+        (In Progress on stage start, In Review at review/ship, etc)."""
+        data = self._load(self._linear_issue_map_path(), {}) or {}
+        for issue_id, entry in data.items():
+            if entry.get("run_id") == run_id:
+                return issue_id
+        return None
+
     # --- flake log (target-repo-scoped, not per-run) ---
     # Mirrors the telegram-message-map pattern above: one flat file, sibling to
     # the per-run .agent-runs/<run_id>/ directories (not inside run_dir, since

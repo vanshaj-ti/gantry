@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 
-from ..config import AGENT_STAGES, CONFIG_FILENAME, load_config
+from ..config import AGENT_STAGES, CONFIG_FILENAME, DOC_STAGES, load_config
 from ..engine import Engine
 from ..git import remove_worktree
 from ..notify import get_notifier
@@ -339,14 +339,16 @@ def _is_loop_terminal(status: str, cfg=None) -> bool:
     gets a chance to act under `loop`, exactly the bug auto_ship exists to
     avoid under `advance --all`.
 
-    awaiting_spec/awaiting_design are real human gates (DOC_STAGES) and stop
-    the loop; awaiting_plan/awaiting_build/awaiting_evidence (AGENT_STAGES)
-    are not — they just mean "approved to start, not yet kicked off" (see
-    advance.py's AUTO_TRANSITIONS comment), so the loop must fire the stage
-    itself instead of treating a freshly-created run as already terminal."""
+    Every awaiting_<stage> — doc stage or agent stage — just means "approved
+    to start, not yet kicked off" (see advance.py's AUTO_TRANSITIONS
+    comment): the loop fires the stage itself instead of treating a
+    freshly-created run as already terminal. The real human gate for a doc
+    stage is its *_complete status (spec_complete/investigation_complete/
+    etc), which DOES stop the loop unless auto_approve_docs is set — same
+    as advance_all."""
     if status.startswith("awaiting_"):
         stage = status.removeprefix("awaiting_")
-        return stage not in AGENT_STAGES
+        return stage not in AGENT_STAGES and stage not in DOC_STAGES
     if cfg is not None:
         if status == "review_approved" and cfg.git.auto_ship:
             return False

@@ -103,11 +103,41 @@ def get_or_create_label(team_id: str, name: str, api_key: str) -> str:
     return data["issueLabelCreate"]["issueLabel"]["id"]
 
 
+def get_issue_labels(issue_id: str, api_key: str) -> list[dict[str, str]]:
+    data = _graphql(
+        "query($issueId: String!) { issue(id: $issueId) { labels { nodes { id name } } } }",
+        {"issueId": issue_id}, api_key,
+    )
+    return data["issue"]["labels"]["nodes"]
+
+
 def tag_issue(issue_id: str, label_id: str, api_key: str) -> None:
+    """Add the queue-tag label, preserving whatever labels the issue already
+    has (e.g. a human-added priority label before gantry classified it) —
+    an unconditional overwrite here would silently drop them."""
+    current_ids = [lbl["id"] for lbl in get_issue_labels(issue_id, api_key)]
     _graphql(
         "mutation($issueId: String!, $labelIds: [String!]!) { "
         "issueUpdate(id: $issueId, input: {labelIds: $labelIds}) { success } }",
-        {"issueId": issue_id, "labelIds": [label_id]}, api_key,
+        {"issueId": issue_id, "labelIds": list(set(current_ids + [label_id]))}, api_key,
+    )
+
+
+_STAGE_LABEL_PREFIX = "stage:"
+
+
+def set_stage_label(issue_id: str, stage: str, team_id: str, api_key: str) -> None:
+    """Swap the issue's stage:<x> label to stage:<stage> — every other
+    label (the queue tag, any human-added labels) is preserved; only a
+    prior stage:* label is dropped, per the "swap, don't accumulate"
+    design (only the current stage should be visible on the issue)."""
+    current = get_issue_labels(issue_id, api_key)
+    keep_ids = [lbl["id"] for lbl in current if not lbl["name"].startswith(_STAGE_LABEL_PREFIX)]
+    new_label_id = get_or_create_label(team_id, f"{_STAGE_LABEL_PREFIX}{stage}", api_key)
+    _graphql(
+        "mutation($issueId: String!, $labelIds: [String!]!) { "
+        "issueUpdate(id: $issueId, input: {labelIds: $labelIds}) { success } }",
+        {"issueId": issue_id, "labelIds": keep_ids + [new_label_id]}, api_key,
     )
 
 
@@ -117,6 +147,114 @@ def post_comment(issue_id: str, body: str, api_key: str) -> None:
         "commentCreate(input: {issueId: $issueId, body: $body}) { success } }",
         {"issueId": issue_id, "body": body}, api_key,
     )
+
+
+# Which gantry run status maps to which Linear workflow category. Checked in
+# order against status via prefix/exact match — first match wins.
+# review_approved is deliberately NOT "done" — the PR isn't even open yet at
+# that point, let alone merged (same reasoning Engine._prereqs_met already
+# uses for run dependencies). It stays "in_progress" (still being shipped);
+# "done" only fires once status is actually shipped/shipped_manually.
+# "blocked" covers every escalation/failure state — review REQUEST_CHANGES/
+# ESCALATE, checks escalation, ship failures — all read as "needs a human"
+# from Linear's side, matching this team's actual "Blocked" state.
+_STATUS_TO_CATEGORY: list[tuple[str, str]] = [
+    ("shipped", "done"), ("cancelled", "done"),
+    ("review_escalated", "blocked"), ("review_changes_requested", "blocked"),
+    ("checks_escalated", "blocked"), ("checks_high_risk_escalated", "blocked"),
+    ("resolve_escalated", "blocked"), ("ship_failed", "blocked"),
+    ("ship_checks_failed", "blocked"), ("blocked", "blocked"), ("held", "blocked"),
+]
+
+# Preferred Linear state names for each category — matched case-insensitively
+# as a substring against the team's actual states first (so a team with a
+# custom-named state uses it exactly). Falls back to Linear's built-in state
+# `type` for teams with no dedicated "Blocked" state of their own.
+_CATEGORY_NAME_HINTS = {
+    "in_progress": ["in progress"],
+    "blocked": ["blocked"],
+    "done": ["done"],
+}
+_CATEGORY_TYPE_FALLBACK = {
+    "in_progress": "started", "blocked": "started", "done": "completed",
+}
+
+
+def status_to_category(status: str) -> str | None:
+    """Map a gantry run status to a Linear workflow category, or None if this
+    status shouldn't move the issue (e.g. mid-doc-stage awaiting_* — the
+    issue is already "In Progress" from run creation, no need to churn it on
+    every intermediate awaiting_/*_running tick)."""
+    for prefix, category in _STATUS_TO_CATEGORY:
+        if status == prefix or status.startswith(prefix):
+            return category
+    if status.startswith("awaiting_") or status.endswith("_running") or status == "review_approved":
+        return "in_progress"
+    return None
+
+
+def get_team_states(team_id: str, api_key: str) -> list[dict[str, str]]:
+    data = _graphql(
+        "query($teamId: String!) { team(id: $teamId) { states { nodes { id name type } } } }",
+        {"teamId": team_id}, api_key,
+    )
+    return data["team"]["states"]["nodes"]
+
+
+def resolve_state_id(team_id: str, category: str, api_key: str) -> str | None:
+    states = get_team_states(team_id, api_key)
+    for hint in _CATEGORY_NAME_HINTS.get(category, []):
+        for st in states:
+            if hint in st["name"].lower():
+                return st["id"]
+    fallback_type = _CATEGORY_TYPE_FALLBACK.get(category)
+    for st in states:
+        if st["type"] == fallback_type:
+            return st["id"]
+    return None
+
+
+def set_issue_state(issue_id: str, state_id: str, api_key: str) -> None:
+    _graphql(
+        "mutation($issueId: String!, $stateId: String!) { "
+        "issueUpdate(id: $issueId, input: {stateId: $stateId}) { success } }",
+        {"issueId": issue_id, "stateId": state_id}, api_key,
+    )
+
+
+def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> dict[str, Any]:
+    """Keep a run's tracked Linear issue in sync with its gantry state:
+
+    1. Workflow state — In Progress from creation through review_approved
+       (still being shipped, PR may not even be open yet), Blocked on any
+       escalation/failure, Done once actually shipped.
+    2. stage:<stage> label — swapped to match current_stage on every call
+       (independent of (1): moving investigation -> plan is still
+       "in_progress" category-wise, but the visible stage label must still
+       advance so the issue shows where the run actually is right now).
+
+    No-op if this run has no tracked Linear issue (e.g. a run created
+    outside the Linear intake path)."""
+    issue_id = store.linear_issue_for_run(run_id)
+    if not issue_id:
+        return {"synced": False, "reason": "no linear issue tracked for this run"}
+
+    run_state = store.state(run_id)
+    current_stage = run_state.get("current_stage")
+    if current_stage:
+        set_stage_label(issue_id, current_stage, team_id, api_key)
+
+    status = run_state.get("status", "")
+    category = status_to_category(status)
+    if not category:
+        return {"synced": True, "issue_id": issue_id, "stage": current_stage,
+                "state_reason": f"status {status!r} has no mapped category"}
+    state_id = resolve_state_id(team_id, category, api_key)
+    if not state_id:
+        return {"synced": True, "issue_id": issue_id, "stage": current_stage,
+                "state_reason": f"no Linear state found for category {category!r}"}
+    set_issue_state(issue_id, state_id, api_key)
+    return {"synced": True, "issue_id": issue_id, "stage": current_stage, "category": category}
 
 
 def classify_ticket(title: str, description: str) -> str:
