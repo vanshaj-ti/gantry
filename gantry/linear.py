@@ -357,6 +357,30 @@ def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: st
         detail = reason or stderr or "(no failure detail captured)"
         framing = f"{stage.capitalize()} stage failed:"
         dedup_field = "linear_failures_posted"
+    elif status.endswith("_escalated"):
+        # Real gap: status_to_category already maps every *_escalated status
+        # to "blocked" (moves the Linear issue state), but nothing ever
+        # explained WHY on the issue itself — a human saw "Blocked" with no
+        # comment, same class of gap _failed had before stderr fallback was
+        # added. review_escalated is the common case (both review axes
+        # disagree or one errors out); checks_high_risk_escalated and
+        # resolve_escalated get a best-effort generic detail since they're
+        # rarer and don't have a dedicated detail-builder like advance.py's
+        # Telegram path does for review.
+        stage = status.removesuffix("_escalated")
+        if stage == "review":
+            from .advance import _review_findings_detail
+            review_result = store.read_result(run_id, "review-result.json")
+            detail = _review_findings_detail(review_result)
+        elif stage == "checks_high_risk":
+            checks = store.read_result(run_id, "checks.json") or {}
+            high_risk = (checks.get("scope") or {}).get("high_risk_files") or []
+            file_list = "\n".join(f"  • `{f}`" for f in high_risk[:8])
+            detail = f"High-risk path(s) touched — needs human sign-off:\n{file_list}" if file_list else "High-risk path(s) touched — needs human sign-off."
+        else:
+            detail = f"{stage.capitalize()} escalated to a human decision — see gantry state/logs for detail."
+        framing = f"{stage.replace('_', ' ').capitalize()} escalated — needs your input:"
+        dedup_field = "linear_failures_posted"
     else:
         return
     dedup_key = hashlib.sha256(f"{stage}:{detail}".encode()).hexdigest()
