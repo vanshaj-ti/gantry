@@ -154,6 +154,18 @@ def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
     if proc.returncode != 0:
         raise RuntimeError(f"git worktree add failed for {run_id}: {proc.stderr or proc.stdout}")
 
+    # `commit_all` (ship.py) runs `git commit` directly with no author identity
+    # of its own — every prior run happened to work only because the build
+    # agent's own commits (inside its coding session) had incidentally already
+    # set local git config for this worktree along the way. A run whose agent
+    # never itself ran a bare `git config`/`git commit` first (or a container
+    # restart that reset ambient config) hits ship.py's commit_all with no
+    # identity at all: "Author identity unknown", ship_failed, no auto-retry
+    # (real incident this fixes). Set it explicitly so ship never depends on
+    # incidental agent behavior.
+    _run(["git", "config", "user.email", "gantry@anthropic.com"], wt, timeout=30)
+    _run(["git", "config", "user.name", "Gantry Agent"], wt, timeout=30)
+
     # Stage prompts reference `.agent-runs/<run_id>/...` relative to the agent's
     # cwd. State/artifacts live in the main repo (RunStore), so symlink the whole
     # directory into the worktree the agent actually runs in. git ignores it
