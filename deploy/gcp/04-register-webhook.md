@@ -15,7 +15,7 @@ mutation {
   webhookCreate(
     input: {
       url: "https://<your-public-endpoint>/webhook"
-      teamId: "<edupaid's Linear team id>"
+      teamId: "<your Linear team id>"
       resourceTypes: ["Issue", "Comment"]
     }
   ) {

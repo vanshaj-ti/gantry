@@ -658,7 +658,7 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     # failed review (result.ok=False, empty result text) left literally no
     # diagnostic trail beyond review-result.json's bare {"ok": false,
     # "verdict": "ESCALATE"}, no way to tell WHY the runner call failed.
-    # Redact known-sensitive values (GH_TOKEN/TFY_API_KEY, this config's proxy
+    # Redact known-sensitive values (auth env vars, this config's proxy
     # api_key_env/headers values) before persisting subprocess output to disk
     # — see redact.py's module docstring for the leak vector this closes.
     secrets = proxy_secrets(cfg)

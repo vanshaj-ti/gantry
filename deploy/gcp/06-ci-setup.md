@@ -1,12 +1,14 @@
 # One-time: wire GitHub Actions to auto-deploy via Workload Identity Federation
 
-Already run for this repo (project `aristotle-436708`) — documented here so
-it's reproducible, not because it needs running again.
+Fill in your GCP project and GitHub repo, then run once. Values below are
+placeholders — nothing project-specific is baked into the workflow.
 
 ```bash
-PROJECT_ID=aristotle-436708
-PROJECT_NUMBER=1065787674750
-REPO=vanshaj-ti/gantry
+PROJECT_ID=<your-gcp-project-id>
+PROJECT_NUMBER=<your-gcp-project-number>
+REPO=<github-org-or-user>/gantry   # the gantry source repo, not the target app
+ZONE=${ZONE:-us-central1-a}
+VM_NAME=${VM_NAME:-gantry-vm}
 
 gcloud services enable iamcredentials.googleapis.com sts.googleapis.com \
   --project=$PROJECT_ID
@@ -43,7 +45,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 # attached service account — gantry-vm was created with a custom SA
 # (gantry-runner@...), NOT the project's default compute SA, so this binds
 # to that specific one. Confirm the actual attached SA first if this ever
-# needs redoing: gcloud compute instances describe gantry-vm --zone=... \
+# needs redoing: gcloud compute instances describe $VM_NAME --zone=$ZONE \
 #   --format="value(serviceAccounts[].email)"
 gcloud iam service-accounts add-iam-policy-binding \
   gantry-runner@$PROJECT_ID.iam.gserviceaccount.com \
@@ -60,7 +62,7 @@ gcloud iam service-accounts add-iam-policy-binding \
 
 # gcloud compute ssh (used by the deploy workflow) needs OS Login enabled
 # on the target VM.
-gcloud compute instances add-metadata gantry-vm --zone=us-central1-a \
+gcloud compute instances add-metadata $VM_NAME --zone=$ZONE \
   --project=$PROJECT_ID --metadata enable-oslogin=TRUE
 ```
 
@@ -69,8 +71,12 @@ gcloud compute instances add-metadata gantry-vm --zone=us-central1-a \
 Not secrets — these are non-sensitive identifiers, safe as plain repo
 variables (`vars.*`), not `secrets.*`:
 
-- `GCP_WIF_PROVIDER` = `projects/1065787674750/locations/global/workloadIdentityPools/gantry-ci-pool/providers/gantry-ci-github`
-- `GCP_CI_SERVICE_ACCOUNT` = `gantry-ci-deployer@aristotle-436708.iam.gserviceaccount.com`
+- `GCP_WIF_PROVIDER` = `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/gantry-ci-pool/providers/gantry-ci-github`
+- `GCP_CI_SERVICE_ACCOUNT` = `gantry-ci-deployer@<PROJECT_ID>.iam.gserviceaccount.com`
+- `GANTRY_TARGET_REPO_URL` = HTTPS git URL of the **app** repo gantry builds
+- `GANTRY_REPO_URL` = HTTPS git URL of this gantry source repo
+- `GANTRY_BASE_BRANCH` (optional, default `staging`) = branch checked out on the VM
+- `GCP_ZONE` / `GCP_VM_NAME` (optional) = override deploy SSH target
 
 No JSON key, no long-lived credential stored anywhere in GitHub — WIF
 exchanges GitHub's own OIDC token for short-lived GCP credentials at
@@ -78,10 +84,5 @@ workflow-run time.
 
 ## What this buys
 
-Every push to `main` that passes `ci.yml` (tests + lint) auto-triggers
-`.github/workflows/deploy.yml`, which SSHes into `gantry-vm` via IAP tunnel
-and re-runs `deploy/gcp/03-deploy.sh` (the same script already cloned onto
-the VM at `/opt/gantry-src/deploy/gcp/03-deploy.sh` by that script's own
-prior run) — auto-prunes stale Docker layers, rebuilds the image, recreates
-both containers. Manual `03-deploy.sh` invocation (per `README.md`'s
-existing instructions) remains available as a fallback/debugging path.
+Every green `main` push re-runs `03-deploy.sh` on the VM with the target and
+gantry URLs from repo variables — no project name lives in the workflow YAML.

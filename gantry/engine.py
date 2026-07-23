@@ -65,7 +65,7 @@ class Engine:
         self.store = RunStore(self.target)
 
     def _redact(self, text: str) -> str:
-        """Redact known-sensitive values (GH_TOKEN/TFY_API_KEY, this config's
+        """Redact known-sensitive values (auth env vars, this config's
         proxy api_key_env/headers values) before any subprocess output gets
         persisted to a log file — see redact.py's module docstring for the
         leak vector this closes. Applied before writing, never after."""

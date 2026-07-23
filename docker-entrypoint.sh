@@ -9,13 +9,13 @@ set -e
 
 INTERVAL="${GANTRY_TICK_INTERVAL:-60}"
 # How often (in ticks) to sweep shipped/cancelled runs' worktrees + state —
-# without this, worktrees (each a full checkout, e.g. a real node_modules
-# for edupaid) accumulate forever and fill the disk. Confirmed live: hit a
-# real ENOSPC mid-tick from exactly this. Every 30 ticks at the default
-# 60s interval is ~30 minutes — frequent enough that a small boot disk
-# doesn't have to survive hours of accumulation between deploys (which is
-# the only other time cleanup used to run, via 03-deploy.sh's own prune
-# step for Docker images specifically, not worktrees).
+# without this, worktrees (each a full checkout, often with heavy
+# dependency trees) accumulate forever and fill the disk. Confirmed live:
+# hit a real ENOSPC mid-tick from exactly this. Every 30 ticks at the
+# default 60s interval is ~30 minutes — frequent enough that a small boot
+# disk doesn't have to survive hours of accumulation between deploys
+# (which is the only other time cleanup used to run, via 03-deploy.sh's
+# own prune step for Docker images specifically, not worktrees).
 CLEANUP_EVERY_N_TICKS="${GANTRY_CLEANUP_EVERY_N_TICKS:-30}"
 
 echo "gantry docker tick loop starting for $GANTRY_TARGET (interval ${INTERVAL}s, cleanup every ${CLEANUP_EVERY_N_TICKS} ticks)"

@@ -12,7 +12,7 @@ behalf of the user to run tasks end-to-end: plan -> build -> checks -> evidence 
 
 ```bash
 source ~/gantry/.venv/bin/activate
-export GANTRY_TARGET=<target-repo-path>   # e.g. ~/edupaid
+export GANTRY_TARGET=<target-repo-path>   # e.g. ~/my-app
 cd "$GANTRY_TARGET"
 ```
 

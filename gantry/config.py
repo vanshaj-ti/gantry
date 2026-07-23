@@ -481,8 +481,9 @@ class ProxyConfig:
     """Per-runner proxy/gateway override — an org-internal LLM gateway sitting
     in front of the vendor API, keyed by runner name under `[proxy.<runner>]`
     (e.g. `[proxy.claude-code]`, `[proxy.codex-cli]`). Independent of and
-    additive to docker.py's own TFY_API_KEY container mechanism (see
-    _codex_env_args) — this works bare-metal too, not just inside Docker.
+    additive to docker.py's container env pass-through
+    (_pass_env_args / GANTRY_DOCKER_PASS_ENV) — this works bare-metal too,
+    not just inside Docker.
 
     Only claude-code and codex-cli are supported (cursor-cli has no verified
     base-url/headers override mechanism); a `[proxy.cursor-cli]` table is

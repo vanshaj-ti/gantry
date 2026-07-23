@@ -3,13 +3,13 @@
 # Idempotent: re-running skips resources that already exist.
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-aristotle-436708}"
+PROJECT_ID="${PROJECT_ID:?set PROJECT_ID to your GCP project id}"
 ZONE="${ZONE:-us-central1-a}"
 REGION="${REGION:-us-central1}"
 VM_NAME="${VM_NAME:-gantry-vm}"
 SA_NAME="${SA_NAME:-gantry-runner}"
 LINEAR_PORT="${LINEAR_PORT:-8080}"
-VPC_NETWORK="${VPC_NETWORK:-default}"  # override to edupaid's existing VPC if it has one
+VPC_NETWORK="${VPC_NETWORK:-default}"
 
 echo "Project:  $PROJECT_ID"
 echo "Zone:     $ZONE"

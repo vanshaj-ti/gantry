@@ -29,10 +29,22 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Deploy to gantry-vm
+        env:
+          # Repo/org Actions variables — no project name is hardcoded here.
+          TARGET_REPO_URL: ${{ vars.GANTRY_TARGET_REPO_URL }}
+          GANTRY_REPO_URL: ${{ vars.GANTRY_REPO_URL }}
+          BASE_BRANCH: ${{ vars.GANTRY_BASE_BRANCH || 'staging' }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+          GCP_VM_NAME: ${{ vars.GCP_VM_NAME || 'gantry-vm' }}
         run: |
-          gcloud compute ssh gantry-vm --zone=us-central1-a --tunnel-through-iap \
-            --command='sudo bash -c "
-              export EDUPAID_REPO_URL=https://github.com/trilogy-group/edupaid.git
-              export GANTRY_REPO_URL=https://github.com/vanshaj-ti/gantry.git
+          if [ -z "$TARGET_REPO_URL" ] || [ -z "$GANTRY_REPO_URL" ]; then
+            echo "Set repo variables GANTRY_TARGET_REPO_URL and GANTRY_REPO_URL" >&2
+            exit 1
+          fi
+          gcloud compute ssh "$GCP_VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap \
+            --command="sudo bash -c '
+              export TARGET_REPO_URL=${TARGET_REPO_URL}
+              export GANTRY_REPO_URL=${GANTRY_REPO_URL}
+              export BASE_BRANCH=${BASE_BRANCH}
               echo y | /opt/gantry-src/deploy/gcp/03-deploy.sh
-            "'
+            '"

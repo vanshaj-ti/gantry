@@ -60,17 +60,15 @@ def _write_container_gitconfig(name: str) -> None:
     """Copy host ~/.gitconfig into the container, rewritten for container use.
 
     Bind-mounting ~/.gitconfig directly (the old approach) broke `gh` auth for
-    git push/pull: this org's config points the github.com credential helper
-    at an absolute host path (`!/opt/homebrew/bin/gh auth git-credential`),
+    git push/pull when the host config points the github.com credential helper
+    at an absolute host path (e.g. `!/opt/homebrew/bin/gh auth git-credential`),
     which doesn't exist in the container (gh lives at /usr/bin/gh there,
     installed by the Dockerfile) — every push failed with
-    "gh: not found" / "could not read Username for 'https://github.com'"
-    (real bug, hit ship_failed on a run that had already passed review).
+    "gh: not found" / "could not read Username for 'https://github.com'".
     Rewriting to a bare `!gh auth git-credential` resolves via $PATH in
     either environment. Also drops `credential.helper = osxkeychain`
-    (macOS-only, meaningless — and would just silently no-op — inside a
-    Linux container) and any `includeIf "gitdir:...` pointing at a host-only
-    path (e.g. ~/Personal/), which the container will never match.
+    (macOS-only, meaningless inside a Linux container) and any
+    `includeIf "gitdir:...` pointing at a host-only path.
     """
     host_gitconfig = Path.home() / ".gitconfig"
     if not host_gitconfig.exists():
@@ -115,40 +113,44 @@ def _claude_auth_volume(target: Path) -> str:
 def _codex_auth_volume(target: Path) -> str:
     """Named volume for codex's ~/.codex — needs to be writable (codex
     writes cache/session files there even when auth itself comes from an
-    env var, see _codex_env_args)."""
+    env var passed through _pass_env_args)."""
     return f"gantry-codex-auth-{_slug_for(target)}"
 
 
-def _codex_env_args() -> list[str]:
-    """This org's ~/.codex/config.toml sets `env_key = "TFY_API_KEY"` under
-    its custom model_provider — codex reads that env var directly as its
-    auth, bypassing the normal OAuth `codex login` flow entirely. Good,
-    because that flow doesn't work from a container anyway: it runs a
-    localhost:1455 callback server that (a) binds loopback-only inside the
-    container regardless of published ports, and (b) this org's OpenAI
-    workspace has --device-auth (the no-callback alternative) disabled.
-    Passing the env var through is simpler and actually works, unlike
-    fighting the OAuth callback."""
-    import os
-    val = os.environ.get("TFY_API_KEY")
-    return ["-e", f"TFY_API_KEY={val}"] if val else []
+# Host env vars forwarded into the container when set. Covers common auth for
+# gh, Claude Code, Codex/OpenAI, and optional org gateways. Override the full
+# list with GANTRY_DOCKER_PASS_ENV=comma,separated,NAMES (empty entries ignored).
+# Codex OAuth (localhost callback) does not work inside containers — pass the
+# API key / gateway env your ~/.codex/config.toml's model_provider.env_key names.
+_DEFAULT_DOCKER_PASS_ENV = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+)
 
 
-def _gh_env_args() -> list[str]:
-    """This host's `gh` CLI is authenticated via a `GH_TOKEN` env var (set in
-    the shell profile), NOT via `gh auth login`'s on-disk `~/.config/gh/
-    hosts.yml` — that file has no token in it at all here (`gh auth status`
-    on the host reports `Token: ... (GH_TOKEN)`). Bind-mounting
-    ~/.config/gh (the old assumption) therefore gave the container nothing
-    to authenticate with: every ship's push step failed with "could not
-    read Username for 'https://github.com'" even though `gh auth status`
-    inside the container reported "not logged into any GitHub hosts" — the
-    real gap was the missing token, not a stale/wrong mount. `gh` (and git's
-    own `!gh auth git-credential` helper, see _write_container_gitconfig)
-    both honor GH_TOKEN directly, so passing it through is sufficient."""
+def _pass_env_names() -> list[str]:
     import os
-    val = os.environ.get("GH_TOKEN")
-    return ["-e", f"GH_TOKEN={val}"] if val else []
+    override = os.environ.get("GANTRY_DOCKER_PASS_ENV")
+    if override is not None:
+        return [n.strip() for n in override.split(",") if n.strip()]
+    return list(_DEFAULT_DOCKER_PASS_ENV)
+
+
+def _pass_env_args() -> list[str]:
+    """Forward selected host env vars into the container (only if set)."""
+    import os
+    args: list[str] = []
+    for name in _pass_env_names():
+        val = os.environ.get(name)
+        if val:
+            args += ["-e", f"{name}={val}"]
+    return args
 
 
 def up(target: Path, interval_seconds: int = 60) -> dict:
@@ -163,8 +165,7 @@ def up(target: Path, interval_seconds: int = 60) -> dict:
         "docker", "run", "-d", "--name", name, "--restart", "unless-stopped",
         "-v", f"{_claude_auth_volume(target)}:/home/gantry/.claude",
         "-v", f"{_codex_auth_volume(target)}:/home/gantry/.codex",
-        *_codex_env_args(),
-        *_gh_env_args(),
+        *_pass_env_args(),
         # Mounted at the SAME absolute path as on the host, not a fixed
         # /workspace — pre-existing worktrees under target/.worktrees/gantry/
         # have `.git` gitlink files pointing at an absolute host path
@@ -192,24 +193,13 @@ def up(target: Path, interval_seconds: int = 60) -> dict:
     subprocess.run(["docker", "exec", "-u", "root", name, "chown", "-R", "gantry:gantry",
                    "/home/gantry/.claude", "/home/gantry/.codex"], capture_output=True)
 
-    # ~/.claude.json carries claude-code's own login state (oauthAccount,
-    # userID) and ~/.claude/settings.json carries this org's custom gateway
-    # config (ANTHROPIC_BASE_URL + bearer token) — env vars alone weren't
-    # sufficient ("Not logged in" even with the gateway ANTHROPIC_* vars
-    # set). Both are copied in as one-time snapshots rather than bind-
-    # mounted: ~/.claude.json is live/frequently-rewritten (a bind mount
-    # risks the container reading it mid-write off the host, observed as
-    # "Unterminated string" JSON corruption), and settings.json needs to
-    # land inside the same volume-backed ~/.claude dir as the persisted
-    # login state (see _auth_volume) rather than as a separate bind mount
-    # nested under it. Skipped entirely if the auth volume already has a
-    # completed interactive `/login` from a prior `docker exec -it ...
-    # claude` session — copying over it would just overwrite it with the
-    # same (or stale) host snapshot harmlessly, but there's no need to.
-    # codex's config.toml (model_provider, base_url, env_key mapping) is
-    # the same static-config story as claude's settings.json above — copy
-    # once rather than bind-mount, so it lands inside the same volume-backed
-    # ~/.codex dir as codex's own runtime state.
+    # Snapshot host runner auth/config into the container's named volumes
+    # (not bind-mounted — host files are live/rewritten and can corrupt
+    # mid-read). ~/.claude.json = claude-code login state; settings.json =
+    # optional gateway/env overrides; ~/.codex/config.toml = codex
+    # model_provider/base_url/env_key. Env vars from _pass_env_args cover
+    # token auth when present; these files cover interactive-login state
+    # and static provider config the CLIs also read from disk.
     for host_rel, container_path in [
         (Path.home() / ".claude.json", "/home/gantry/.claude.json"),
         (Path.home() / ".claude" / "settings.json", "/home/gantry/.claude/settings.json"),

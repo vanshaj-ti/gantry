@@ -278,7 +278,7 @@ def main(argv=None) -> int:
     except Exception as exc:  # surface a clean error, non-zero exit
         # An exception message can in principle quote a secret value (e.g. a
         # failed auth header, a subprocess error echoing its own args) — redact
-        # known-sensitive env values (GH_TOKEN/TFY_API_KEY; per-target proxy
+        # known-sensitive env values (auth tokens; per-target proxy
         # secrets aren't resolvable here without a target config, so only the
         # always-sensitive env vars are covered) before this ever reaches stderr.
         from ..redact import redact_secrets

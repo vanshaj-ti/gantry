@@ -1,16 +1,17 @@
 """Secret redaction for anything gantry writes to disk or stdout/stderr.
 
 gantry holds several credential-shaped values with its own ambient
-privileges: `GH_TOKEN`/`TFY_API_KEY` (see docker.py), and per-runner
-`[proxy.<runner>]` `api_key_env`-resolved tokens plus `headers` values (see
-config.ProxyConfig, runners.resolve_proxy_env). None of these are ever
-*written* deliberately anywhere gantry persists state — but a subprocess
-gantry shells out to (an agent runner CLI, a repo check command) can echo
-its own invocation args or quote a failed auth header in its stdout/stderr,
-and that text gets persisted verbatim to a `.stderr`/`.stdout` log file in
-the run directory (see engine.py/review.py's `store.write_log` calls) or
-surfaces in an exception message printed by cli/__init__.py's top-level
-handler. This is a low-probability but real leak vector.
+privileges: common auth env vars (GH_TOKEN, ANTHROPIC_*, OPENAI_*, etc. —
+see docker.py's pass-through list), and per-runner `[proxy.<runner>]`
+`api_key_env`-resolved tokens plus `headers` values (see config.ProxyConfig,
+runners.resolve_proxy_env). None of these are ever *written* deliberately
+anywhere gantry persists state — but a subprocess gantry shells out to (an
+agent runner CLI, a repo check command) can echo its own invocation args or
+quote a failed auth header in its stdout/stderr, and that text gets
+persisted verbatim to a `.stderr`/`.stdout` log file in the run directory
+(see engine.py/review.py's `store.write_log` calls) or surfaces in an
+exception message printed by cli/__init__.py's top-level handler. This is a
+low-probability but real leak vector.
 
 Deliberately simple: literal substring replacement of known secret VALUES,
 not regex/URL-based credential detection (gantry doesn't store credentialled
@@ -24,8 +25,20 @@ import os
 REDACTED = "***REDACTED***"
 
 # Env vars whose VALUES are always secret-shaped, if present in this process's
-# environment, regardless of any per-run proxy config.
-_ALWAYS_SENSITIVE_ENV_VARS = ("GH_TOKEN", "TFY_API_KEY")
+# environment, regardless of any per-run proxy config. Keep this list generic
+# (vendor + common integration names) — project-specific gateway keys should
+# be named via [proxy.<runner>].api_key_env so proxy_secrets() picks them up.
+_ALWAYS_SENSITIVE_ENV_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "GANTRY_LINEAR_API_KEY",
+    "GANTRY_LINEAR_WEBHOOK_SECRET",
+    "GANTRY_TELEGRAM_BOT_TOKEN",
+)
 
 # Trivially short "secrets" (empty string, a single char) would redact far too
 # aggressively if ever accidentally collected — never treat anything shorter
@@ -35,7 +48,7 @@ _MIN_SECRET_LEN = 6
 
 def known_secrets(extra_env_vars: list[str] | None = None) -> list[str]:
     """Collect the current process's known-sensitive env var VALUES:
-    GH_TOKEN, TFY_API_KEY, plus any `extra_env_vars` names the caller wants
+    the always-sensitive set, plus any `extra_env_vars` names the caller wants
     resolved too (e.g. a configured `[proxy.<runner>].api_key_env` name).
     Returns literal secret values (never the var names themselves) — empty
     or unset vars are silently skipped."""
@@ -65,8 +78,8 @@ def redact_secrets(text: str, extra_secrets: list[str] | None = None) -> str:
     """Replace every literal occurrence of a known-sensitive value in `text`
     with a placeholder. `extra_secrets` are additional literal secret VALUES
     (not env var names) the caller already resolved — e.g. from
-    `proxy_secrets(cfg)`. Always also checks the always-sensitive env vars
-    (GH_TOKEN, TFY_API_KEY). Safe on empty/None text."""
+    `proxy_secrets(cfg)`. Always also checks the always-sensitive env vars.
+    Safe on empty/None text."""
     if not text:
         return text
     secrets = known_secrets() + list(extra_secrets or [])

@@ -51,19 +51,8 @@ COPY --chown=gantry:gantry gantry/skills/ /home/gantry/.codex/skills/
 COPY --chown=gantry:gantry claude-skills/gantry-pipeline/ /home/gantry/.claude/skills/gantry-pipeline/
 COPY --chown=gantry:gantry claude-skills/gantry-pipeline/ /home/gantry/.codex/skills/gantry-pipeline/
 
-# Marketplace skills this org's Claude Code sessions already use locally —
-# baked in so a headless VM agent gets the same toolset, not a bare CLI.
-# Exact slugs/sources confirmed from a live installed_plugins.json /
-# known_marketplaces.json, not guessed. Codex picks up third-party skill
-# libraries via [skills].installers at `gantry init --with-skills` time
-# (npx skills add ... -a codex), not baked here — those are project-opt-in.
-RUN claude plugin marketplace add JuliusBrussee/caveman \
-    && claude plugin marketplace add mksglu/context-mode \
-    && claude plugin marketplace add DietrichGebert/ponytail \
-    && claude plugin marketplace add anthropics/claude-plugins-official \
-    && claude plugin install caveman@caveman \
-    && claude plugin install context-mode@context-mode \
-    && claude plugin install ponytail@ponytail \
-    && claude plugin install playwright@claude-plugins-official
+# Third-party / marketplace skills are project-opt-in via [skills].enabled
+# and `gantry init --with-skills` (per-runner installers in gantry.toml) —
+# not baked into the image, so every deployment stays project-agnostic.
 
 ENTRYPOINT ["/opt/gantry/docker-entrypoint.sh"]

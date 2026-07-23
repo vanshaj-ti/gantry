@@ -17,10 +17,23 @@ class TestRedactSecrets(unittest.TestCase):
         self.assertIn("***REDACTED***", out)
 
     def test_multiple_known_secrets_all_replaced(self):
-        with mock.patch.dict(os.environ, {"GH_TOKEN": "tok-gh-abcdef", "TFY_API_KEY": "tok-tfy-ghijkl"}):
-            out = redact_secrets("gh=tok-gh-abcdef tfy=tok-tfy-ghijkl")
+        with mock.patch.dict(os.environ, {
+            "GH_TOKEN": "tok-gh-abcdef",
+            "ANTHROPIC_API_KEY": "tok-ant-ghijkl",
+            "OPENAI_API_KEY": "tok-oai-mnopqr",
+        }):
+            out = redact_secrets("gh=tok-gh-abcdef ant=tok-ant-ghijkl oai=tok-oai-mnopqr")
         self.assertNotIn("tok-gh-abcdef", out)
-        self.assertNotIn("tok-tfy-ghijkl", out)
+        self.assertNotIn("tok-ant-ghijkl", out)
+        self.assertNotIn("tok-oai-mnopqr", out)
+
+    def test_project_gateway_key_via_extra_env_or_proxy(self):
+        # Org-specific gateway keys are not hardcoded — pass via known_secrets
+        # extra names (docker pass-env) or [proxy].api_key_env.
+        with mock.patch.dict(os.environ, {"MY_GATEWAY_TOKEN": "tok-gw-stuvwxyz"}):
+            secrets = known_secrets(["MY_GATEWAY_TOKEN"])
+            out = redact_secrets("auth tok-gw-stuvwxyz", extra_secrets=secrets)
+        self.assertNotIn("tok-gw-stuvwxyz", out)
 
     def test_extra_secrets_replaced(self):
         out = redact_secrets("Bearer sk-live-abcdef123456", extra_secrets=["sk-live-abcdef123456"])

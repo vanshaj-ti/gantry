@@ -260,9 +260,9 @@ enabled = []                  # e.g. ["codebase-memory", "chrome-devtools"]
 
 [proxy]
 # Per-runner LLM gateway/proxy overrides — for an org-internal gateway sitting
-# in front of the vendor API. Independent of Docker's own container-level
-# TFY_API_KEY mechanism (see docker.py); works bare-metal too. Only
-# claude-code and codex-cli are supported (cursor-cli has no verified
+# in front of the vendor API. Independent of Docker's container env
+# pass-through (see docker.py / GANTRY_DOCKER_PASS_ENV); works bare-metal too.
+# Only claude-code and codex-cli are supported (cursor-cli has no verified
 # base-url/headers override mechanism — a [proxy.cursor-cli] table here is
 # ignored with a logged warning). Empty/absent = no override (default), each
 # runner talks to its normal vendor endpoint with its normal ambient auth.

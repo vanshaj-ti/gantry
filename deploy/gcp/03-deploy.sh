@@ -1,53 +1,72 @@
 #!/usr/bin/env bash
 # Run this ON THE VM (after SSHing in via IAP tunnel), not from your laptop.
-# Clones edupaid, builds the gantry image, fetches secrets, starts both
-# containers. Safe to re-run: recreates containers, does not re-clone if
-# /opt/edupaid already exists (pulls instead).
+# Clones the target project, builds the gantry image, fetches secrets, starts
+# both containers. Safe to re-run: recreates containers; pulls if the target
+# clone already exists.
 set -euo pipefail
 
-EDUPAID_REPO_URL="${EDUPAID_REPO_URL:?set EDUPAID_REPO_URL, e.g. https://github.com/<org>/edupaid.git}"
+# Prefer TARGET_REPO_URL; accept legacy EDUPAID_REPO_URL as an alias.
+if [[ -z "${TARGET_REPO_URL:-}" && -n "${EDUPAID_REPO_URL:-}" ]]; then
+  TARGET_REPO_URL="$EDUPAID_REPO_URL"
+fi
+TARGET_REPO_URL="${TARGET_REPO_URL:?set TARGET_REPO_URL (git HTTPS URL of the project to build)}"
 GANTRY_REPO_URL="${GANTRY_REPO_URL:-https://github.com/<org>/gantry.git}"
-TARGET_DIR="/opt/edupaid"
-GANTRY_SRC_DIR="/opt/gantry-src"
+TARGET_NAME="${TARGET_NAME:-$(basename "${TARGET_REPO_URL}" .git)}"
+TARGET_DIR="${TARGET_DIR:-/opt/${TARGET_NAME}}"
+BASE_BRANCH="${BASE_BRANCH:-staging}"
+GANTRY_SRC_DIR="${GANTRY_SRC_DIR:-/opt/gantry-src}"
 LINEAR_PORT="${LINEAR_PORT:-8080}"
 
-echo "This will clone/pull $EDUPAID_REPO_URL into $TARGET_DIR and build gantry:latest."
+echo "This will clone/pull $TARGET_REPO_URL into $TARGET_DIR (branch $BASE_BRANCH) and build gantry:latest."
 read -p "Proceed? [y/N] " confirm
 [[ "$confirm" == "y" ]] || exit 1
 
 # --- fetch secrets from Secret Manager into a 0600 env file ---
+# Optional secrets (gateway URL / auth token) are included only when present
+# so a plain Anthropic ANTHROPIC_API_KEY deploy still works.
 SECRETS_FILE="/run/gantry-secrets.env"
-{
-  echo "GH_TOKEN=$(gcloud secrets versions access latest --secret=gantry-github-token)"
-  # This org routes Claude Code through TrueFoundry's gateway (see Maat) —
-  # ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, not a raw ANTHROPIC_API_KEY.
-  echo "ANTHROPIC_BASE_URL=$(gcloud secrets versions access latest --secret=gantry-anthropic-base-url)"
-  echo "ANTHROPIC_AUTH_TOKEN=$(gcloud secrets versions access latest --secret=gantry-anthropic-auth-token)"
-  echo "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
-  echo "GANTRY_LINEAR_API_KEY=$(gcloud secrets versions access latest --secret=gantry-linear-api-key)"
-  echo "GANTRY_LINEAR_TEAM_ID=$(gcloud secrets versions access latest --secret=gantry-linear-team-id)"
-  echo "GANTRY_LINEAR_WEBHOOK_SECRET=$(gcloud secrets versions access latest --secret=gantry-linear-webhook-secret)"
-} > "$SECRETS_FILE"
+: > "$SECRETS_FILE"
 chmod 600 "$SECRETS_FILE"
+
+append_secret() {
+  local env_name="$1" secret_name="$2" required="${3:-0}"
+  if gcloud secrets describe "$secret_name" &>/dev/null; then
+    echo "${env_name}=$(gcloud secrets versions access latest --secret=${secret_name})" >> "$SECRETS_FILE"
+  elif [[ "$required" == "1" ]]; then
+    echo "missing required secret: $secret_name" >&2
+    exit 1
+  fi
+}
+
+append_secret GH_TOKEN gantry-github-token 1
+append_secret ANTHROPIC_API_KEY gantry-anthropic-api-key 0
+append_secret ANTHROPIC_BASE_URL gantry-anthropic-base-url 0
+append_secret ANTHROPIC_AUTH_TOKEN gantry-anthropic-auth-token 0
+append_secret OPENAI_API_KEY gantry-openai-api-key 0
+append_secret GANTRY_LINEAR_API_KEY gantry-linear-api-key 1
+append_secret GANTRY_LINEAR_TEAM_ID gantry-linear-team-id 1
+append_secret GANTRY_LINEAR_WEBHOOK_SECRET gantry-linear-webhook-secret 1
+# Optional Claude Code flag some gateways need; ignore if unset.
+if gcloud secrets describe gantry-claude-code-disable-experimental-betas &>/dev/null; then
+  echo "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=$(gcloud secrets versions access latest --secret=gantry-claude-code-disable-experimental-betas)" >> "$SECRETS_FILE"
+fi
 
 GH_TOKEN="$(grep ^GH_TOKEN= "$SECRETS_FILE" | cut -d= -f2-)"
 
 # This script runs under sudo (root), but the previous run's chown (below)
 # leaves the clone owned by uid 1001 — git's dubious-ownership check then
-# refuses to touch it as root on every subsequent redeploy. Idempotent: a
-# no-op the first time (directory doesn't exist yet), harmless every time
-# after.
+# refuses to touch it as root on every subsequent redeploy. Idempotent.
 git config --global --add safe.directory "$TARGET_DIR"
 
-# --- persistent edupaid clone ---
+# --- persistent target clone ---
 if [[ -d "$TARGET_DIR/.git" ]]; then
   git -C "$TARGET_DIR" fetch origin
-  git -C "$TARGET_DIR" checkout staging
-  git -C "$TARGET_DIR" pull origin staging
+  git -C "$TARGET_DIR" checkout "$BASE_BRANCH"
+  git -C "$TARGET_DIR" pull origin "$BASE_BRANCH"
 else
-  AUTH_URL="$(echo "$EDUPAID_REPO_URL" | sed "s#https://#https://x-access-token:${GH_TOKEN}@#")"
+  AUTH_URL="$(echo "$TARGET_REPO_URL" | sed "s#https://#https://x-access-token:${GH_TOKEN}@#")"
   git clone "$AUTH_URL" "$TARGET_DIR"
-  git -C "$TARGET_DIR" checkout staging
+  git -C "$TARGET_DIR" checkout "$BASE_BRANCH"
 fi
 # The container runs as its own unprivileged "gantry" user (uid 1001, see
 # Dockerfile) — a clone/checkout done here (as root, since this script runs
@@ -62,14 +81,8 @@ if [[ -d "$GANTRY_SRC_DIR/.git" ]]; then
 else
   git clone "$GANTRY_REPO_URL" "$GANTRY_SRC_DIR"
 fi
-# Prune the PREVIOUS build's now-dangling image layers before building the
-# new one — a rebuild leaves the prior gantry:latest layers unreferenced
-# (docker retags, doesn't delete), and this VM's small boot disk fills up
-# fast across repeated deploys (hit ENOSPC mid-build once already). Old
-# stopped containers too, in case a prior `docker rm -f` step ever fails
-# partway. Never touches the currently-running containers (`docker ps -a`
-# without -a would still be enough, but --filter status=exited is explicit
-# about intent).
+# Prune dangling image layers from prior rebuilds before building — small
+# boot disks fill up across repeated deploys otherwise.
 docker container prune -f --filter "until=1h" 2>&1 || true
 docker image prune -a -f --filter "until=1h" 2>&1 || true
 
@@ -93,4 +106,5 @@ docker run -d --name gantry-linear --restart unless-stopped \
   --entrypoint gantry gantry:latest linear-serve --port "$LINEAR_PORT"
 
 echo "Both containers started. Check: docker ps"
+echo "Target: $TARGET_DIR (from $TARGET_REPO_URL @ $BASE_BRANCH)"
 echo "Logs: docker logs -f gantry-advance   /   docker logs -f gantry-linear"

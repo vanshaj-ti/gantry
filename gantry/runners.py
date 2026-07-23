@@ -352,13 +352,11 @@ def resolve_proxy_env(runner_name: str, proxy: ProxyConfig | None) -> dict | Non
       has no verified passthrough for this CLI — configuring it only logs a
       warning, nothing is set for it.
     - codex-cli: sets no env var for base_url/headers (those go through
-      CodexRunner._proxy_config_args' per-invocation `-c` flags instead);
-      only the api_key_env-named var is read from the current process env
-      here, matching this org's own env_key convention (see docker.py's
-      _codex_env_args) — codex reads whatever env var name model_providers.
-      <id>.env_key points at, which the `-c` override above already sets to
-      proxy.api_key_env, so nothing further is needed in `env` for codex
-      beyond inheriting the ambient environment (which already contains it).
+      CodexRunner._proxy_config_args' per-invocation `-c` flags instead).
+      Codex reads whatever env var name model_providers.<id>.env_key points
+      at; the `-c` override already sets that to proxy.api_key_env, so the
+      ambient environment (which must contain that var) is enough — nothing
+      further is added here.
     """
     import os
     if proxy is None or not (proxy.base_url or proxy.api_key_env or proxy.headers):
