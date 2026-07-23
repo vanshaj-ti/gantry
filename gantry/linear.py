@@ -343,9 +343,18 @@ def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: st
         dedup_field = "linear_questions_posted"
     elif status.endswith("_failed"):
         stage = status.removesuffix("_failed")
+        # Try every place a real failure reason could live, in order of
+        # specificity: the doc-stage structural gate (missing/empty
+        # artifact), then the stage's own stderr log (covers the case this
+        # was written for — a real 900s timeout produces an empty
+        # {stage}-result.json but a real stderr message, "Agent subprocess
+        # timed out after 900s" — the old code only checked the gate, so a
+        # genuine timeout showed up on Linear as a blank "(no failure
+        # detail captured)").
         gate = store.read_result(run_id, f"{stage}-gate.json")
         reason = (gate or {}).get("reason", "") if isinstance(gate, dict) else ""
-        detail = reason or "(no failure detail captured)"
+        stderr = (store.read_artifact(run_id, f"logs/{stage}.stderr") or "").strip()
+        detail = reason or stderr or "(no failure detail captured)"
         framing = f"{stage.capitalize()} stage failed:"
         dedup_field = "linear_failures_posted"
     else:
