@@ -18,8 +18,12 @@ GANTRY_SRC_DIR="${GANTRY_SRC_DIR:-/opt/gantry-src}"
 LINEAR_PORT="${LINEAR_PORT:-8080}"
 
 echo "This will clone/pull $TARGET_REPO_URL into $TARGET_DIR (branch $BASE_BRANCH) and build gantry:latest."
-read -p "Proceed? [y/N] " confirm
-[[ "$confirm" == "y" ]] || exit 1
+if [[ -t 0 && "${GANTRY_DEPLOY_YES:-}" != "1" ]]; then
+  read -p "Proceed? [y/N] " confirm
+  [[ "$confirm" == "y" ]] || exit 1
+else
+  echo "Non-interactive (or GANTRY_DEPLOY_YES=1) — proceeding."
+fi
 
 # --- fetch secrets from Secret Manager into a 0600 env file ---
 # Optional secrets (gateway URL / auth token) are included only when present

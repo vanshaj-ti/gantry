@@ -30,21 +30,47 @@ jobs:
 
       - name: Deploy to gantry-vm
         env:
-          # Repo/org Actions variables — no project name is hardcoded here.
           TARGET_REPO_URL: ${{ vars.GANTRY_TARGET_REPO_URL }}
           GANTRY_REPO_URL: ${{ vars.GANTRY_REPO_URL }}
           BASE_BRANCH: ${{ vars.GANTRY_BASE_BRANCH || 'staging' }}
           GCP_ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
           GCP_VM_NAME: ${{ vars.GCP_VM_NAME || 'gantry-vm' }}
         run: |
-          if [ -z "$TARGET_REPO_URL" ] || [ -z "$GANTRY_REPO_URL" ]; then
+          set -euo pipefail
+          if [ -z "${TARGET_REPO_URL}" ] || [ -z "${GANTRY_REPO_URL}" ]; then
             echo "Set repo variables GANTRY_TARGET_REPO_URL and GANTRY_REPO_URL" >&2
             exit 1
           fi
-          gcloud compute ssh "$GCP_VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap \
-            --command="sudo bash -c '
-              export TARGET_REPO_URL=${TARGET_REPO_URL}
-              export GANTRY_REPO_URL=${GANTRY_REPO_URL}
-              export BASE_BRANCH=${BASE_BRANCH}
-              echo y | /opt/gantry-src/deploy/gcp/03-deploy.sh
-            '"
+          # Write the remote script locally so quoting stays simple, then
+          # pipe it through IAP SSH. Always refresh /opt/gantry-src first so
+          # the VM runs this commit's 03-deploy.sh (not a stale checkout).
+          cat > /tmp/gantry-remote-deploy.sh <<'REMOTE'
+          set -euo pipefail
+          : "${TARGET_REPO_URL:?}"
+          : "${GANTRY_REPO_URL:?}"
+          : "${BASE_BRANCH:=staging}"
+          export TARGET_REPO_URL GANTRY_REPO_URL BASE_BRANCH
+          # Back-compat for any leftover callers of the old env name.
+          export EDUPAID_REPO_URL="${TARGET_REPO_URL}"
+          export GANTRY_DEPLOY_YES=1
+          GANTRY_SRC_DIR=/opt/gantry-src
+          if [ -d "$GANTRY_SRC_DIR/.git" ]; then
+            git -C "$GANTRY_SRC_DIR" remote set-url origin "$GANTRY_REPO_URL" || true
+            git -C "$GANTRY_SRC_DIR" fetch --depth=1 origin main
+            git -C "$GANTRY_SRC_DIR" checkout -f FETCH_HEAD
+            git -C "$GANTRY_SRC_DIR" clean -fd
+          else
+            git clone --depth=1 --branch main "$GANTRY_REPO_URL" "$GANTRY_SRC_DIR"
+          fi
+          bash "$GANTRY_SRC_DIR/deploy/gcp/03-deploy.sh"
+          REMOTE
+          # Inject env into the remote shell before the script body.
+          {
+            printf 'export TARGET_REPO_URL=%q\n' "$TARGET_REPO_URL"
+            printf 'export GANTRY_REPO_URL=%q\n' "$GANTRY_REPO_URL"
+            printf 'export BASE_BRANCH=%q\n' "$BASE_BRANCH"
+            cat /tmp/gantry-remote-deploy.sh
+          } | gcloud compute ssh "$GCP_VM_NAME" \
+                --zone="$GCP_ZONE" \
+                --tunnel-through-iap \
+                --command='sudo bash -s'
