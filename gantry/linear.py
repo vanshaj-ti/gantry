@@ -141,22 +141,24 @@ def set_stage_label(issue_id: str, stage: str, team_id: str, api_key: str) -> No
     )
 
 
-# Every comment gantry itself posts carries this invisible marker. Without
-# it, a real, catastrophic incident: gantry posts a status comment ->
-# Linear delivers that as a Comment webhook event right back to gantry ->
+# Every comment gantry itself posts carries this prefix. Without it, a
+# real, catastrophic incident: gantry posts a status comment -> Linear
+# delivers that as a Comment webhook event right back to gantry ->
 # handle_comment_created treats it as a human reply and resumes the stage
 # -> which posts another comment -> infinite loop, dozens of comments per
 # second, real API cost, until the container is killed by hand. Confirmed
 # live against a real Linear team (see incident notes in linear.py's git
-# history) — this is not a hypothetical.
-_GANTRY_COMMENT_MARKER = "<!-- gantry:auto -->"
+# history) — this is not a hypothetical. A plain readable prefix (not a
+# hidden HTML-comment marker) so it also reads naturally as "this is the
+# bot talking" to a human scanning the thread.
+_GANTRY_COMMENT_PREFIX = "Gantry: "
 
 
 def post_comment(issue_id: str, body: str, api_key: str) -> None:
     _graphql(
         "mutation($issueId: String!, $body: String!) { "
         "commentCreate(input: {issueId: $issueId, body: $body}) { success } }",
-        {"issueId": issue_id, "body": f"{body}\n{_GANTRY_COMMENT_MARKER}"}, api_key,
+        {"issueId": issue_id, "body": f"{_GANTRY_COMMENT_PREFIX}{body}"}, api_key,
     )
 
 
@@ -372,11 +374,25 @@ Respond with exactly one word: the tag."""
 
 def handle_issue_created(payload: dict[str, Any], team_id: str, linear_api_key: str,
                           project_root: Path) -> dict[str, Any]:
-    """Full intake: classify -> tag in Linear -> create the matching gantry run."""
+    """Full intake: classify -> tag in Linear -> create the matching gantry run.
+
+    Idempotent per issue_id: Linear can and does redeliver the same webhook
+    event (retries, or a genuine duplicate delivery) — confirmed live, two
+    `Issue create` events ~40s apart for the same issue produced two
+    separate runs before this check existed. RunStore.run_for_linear_issue
+    is checked first; a second delivery for an already-handled issue is a
+    no-op, not a second classify+run+comment."""
+    from .state import RunStore
+
     issue = payload["data"]
     issue_id = issue["id"]
     title = issue.get("title", "")
     description = issue.get("description") or ""
+
+    existing_run_id = RunStore(project_root).run_for_linear_issue(issue_id)
+    if existing_run_id:
+        return {"tag": None, "run_id": existing_run_id, "issue_id": issue_id,
+                "duplicate": True}
 
     tag = classify_ticket(title, description)
     label_id = get_or_create_label(team_id, tag, linear_api_key)
@@ -413,10 +429,10 @@ def handle_comment_created(payload: dict[str, Any], linear_api_key: str,
     body = comment.get("body", "")
     if not issue_id:
         raise LinearError("comment payload missing issueId")
-    if _GANTRY_COMMENT_MARKER in body:
+    if body.startswith(_GANTRY_COMMENT_PREFIX):
         # gantry's own status comment, delivered back as a webhook event —
         # NOT a human reply. Processing this is what causes the infinite
-        # comment loop (see _GANTRY_COMMENT_MARKER's docstring). Must be
+        # comment loop (see _GANTRY_COMMENT_PREFIX's docstring). Must be
         # checked before anything else.
         return {"handled": False, "reason": "comment authored by gantry itself, ignoring"}
 
