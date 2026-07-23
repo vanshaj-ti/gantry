@@ -33,6 +33,18 @@ def _make_handler(secret: str, team_id: str, api_key: str, project_root: Path):
         def log_message(self, fmt, *args):  # route through logging, not stderr
             logger.info("%s - %s", self.address_string(), fmt % args)
 
+        def do_GET(self):
+            # GCP HTTPS Load Balancer health check hits this — a bare
+            # BaseHTTPRequestHandler has no do_GET and returns 501, which
+            # the LB reads as unhealthy and stops routing traffic here.
+            if self.path == "/health":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             raw_body = self.rfile.read(length)
