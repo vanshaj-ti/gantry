@@ -90,6 +90,8 @@ class TestRunAgentStage(unittest.TestCase):
             self.eng.run_agent_stage("does-not-exist", "plan")
 
     def test_spec_stage_with_valid_acceptance_criteria_reaches_complete(self):
+        self.eng.store.artifact_path(self.run_id, "product-spec.md").write_text(
+            "# Spec\n\nAdd the health endpoint feature.\n")
         self.eng.store.artifact_path(self.run_id, "acceptance-criteria.json").write_text(
             '{"criteria": [{"id": "AC-1", "text": "does the thing", '
             '"verifiable_by": "test"}]}')
@@ -125,6 +127,33 @@ class TestRunAgentStage(unittest.TestCase):
             res = self.eng.run_agent_stage(self.run_id, "plan")
         self.assertTrue(res["ok"])
         self.assertEqual(self.eng.store.state(self.run_id)["status"], "plan_complete")
+
+    def test_investigation_reports_ok_but_writes_no_artifact_fails_gate(self):
+        """Real incident this generalized gate exists to catch: an agent call
+        can report result.ok=True (its own API call succeeded) while never
+        actually writing the stage's required artifact — e.g. it stopped
+        after a tool call with no final text/file write. Without this gate
+        that silently reaches investigation_complete with nothing for a
+        human to review."""
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": ""}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            res = self.eng.run_agent_stage(self.run_id, "investigation")
+        self.assertFalse(res["ok"])
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "investigation_failed")
+        gate = self.eng.store.read_result(self.run_id, "investigation-gate.json")
+        self.assertFalse(gate["pass"])
+        self.assertIn("missing", gate["reason"])
+
+    def test_investigation_with_real_report_reaches_complete(self):
+        self.eng.store.artifact_path(self.run_id, "investigation-report.md").write_text(
+            "# Investigation\n\nRoot cause: found it.\n")
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={"result": "done"}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            res = self.eng.run_agent_stage(self.run_id, "investigation")
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.eng.store.state(self.run_id)["status"], "investigation_complete")
 
     def test_heartbeat_set_at_stage_start(self):
         fake = _FakeRunner(result=RunnerResult(

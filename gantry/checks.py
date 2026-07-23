@@ -417,3 +417,29 @@ def check_spec_artifacts(store: RunStore, run_id: str) -> dict[str, Any]:
     if not isinstance(criteria, list) or not criteria:
         return {"pass": False, "reason": "acceptance-criteria.json's \"criteria\" must be a non-empty list"}
     return {"pass": True, "criteria_count": len(criteria)}
+
+
+# A stage "succeeding" (result.ok True) only means the agent's own API call
+# didn't error — it says nothing about whether the agent actually wrote its
+# required artifact before running out of turns/budget or ending on a bare
+# tool call with no final text. Seen for real: an investigation run that
+# burned $0.98/14 turns, reported success, and never wrote
+# investigation-report.md at all — silently reached investigation_complete
+# anyway, with no report for a human to review. This check closes that gap
+# for every doc stage generically (spec/design/investigation/research),
+# distinct from check_spec_artifacts above which validates spec's specific
+# structured JSON companion, not just file presence.
+MIN_ARTIFACT_BYTES = 20
+
+
+def check_doc_artifact_written(store: RunStore, run_id: str, artifact_name: str) -> dict[str, Any]:
+    """Deterministic (no LLM call) gate: does this doc stage's own required
+    artifact file exist and have non-trivial content? Does not judge quality
+    — only that the stage actually produced *something*, not an empty or
+    missing file despite reporting success."""
+    raw = store.read_artifact(run_id, artifact_name)
+    if raw is None:
+        return {"pass": False, "reason": f"{artifact_name} is missing"}
+    if len(raw.strip()) < MIN_ARTIFACT_BYTES:
+        return {"pass": False, "reason": f"{artifact_name} is empty or too short to be real content"}
+    return {"pass": True}

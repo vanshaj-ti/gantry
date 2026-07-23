@@ -427,22 +427,30 @@ class Engine:
         _accumulate_cost(self.store, run_id, stage, result.usage,
                          runner=runner.name, session_id=result.session_id)
         ok = result.ok
-        if stage == "spec" and ok:
-            # Deterministic structural gate — no LLM call — that the spec
-            # stage's own acceptance-criteria.json companion artifact
-            # actually exists and is well-formed, before letting the run
-            # reach spec_complete (a human-review gate downstream trusts that
-            # status to mean "the spec stage really finished its job").
-            # Scoped to spec only; design/plan/build/evidence have no
-            # equivalent structural gate here.
-            from .checks import check_spec_artifacts
-            gate = check_spec_artifacts(self.store, run_id)
-            self.store.write_result(run_id, "spec-gate.json", gate)
+        if stage in DOC_STAGES and ok:
+            # Deterministic structural gate — no LLM call — that this doc
+            # stage's required artifact actually exists with real content
+            # before letting the run reach {stage}_complete. Seen for real:
+            # an agent call reporting success (result.ok True) while never
+            # writing its report at all — burned turns/cost, empty result,
+            # and would otherwise have sailed through to a human-review gate
+            # with nothing to review.
+            from .checks import check_doc_artifact_written
+            artifact_name = self.cfg.artifact_for(stage)
+            gate = check_doc_artifact_written(self.store, run_id, artifact_name)
+            if stage == "spec":
+                # spec additionally validates its structured
+                # acceptance-criteria.json companion, not just file presence.
+                from .checks import check_spec_artifacts
+                spec_gate = check_spec_artifacts(self.store, run_id)
+                if gate["pass"] and not spec_gate["pass"]:
+                    gate = spec_gate
+            self.store.write_result(run_id, f"{stage}-gate.json", gate)
             if not gate["pass"]:
                 ok = False
                 self.store.write_log(
-                    run_id, "spec-gate.stderr",
-                    self._redact(f"Spec stage structural gate failed: {gate['reason']}"))
+                    run_id, f"{stage}-gate.stderr",
+                    self._redact(f"{stage} stage structural gate failed: {gate['reason']}"))
         status = f"{stage}_complete" if ok else f"{stage}_failed"
         self._set_status(run_id, status)
         return {"stage": stage, "ok": ok, "session_id": result.session_id}
