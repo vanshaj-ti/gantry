@@ -15,6 +15,21 @@ _WATCH_COLOR = {
     "green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m", "reset": "\033[0m",
 }
 
+# Deterministic (not LLM-classified) affirmative-reply check — a real
+# incident: "approved" (past tense, a completely normal way to reply on
+# Linear) failed the old exact `in ("approve", "yes", "y")` check and got
+# silently treated as feedback instead, resuming a stage with "approved" as
+# its literal answer text. `startswith` on this same short word list stays
+# fully predictable/free/instant (deliberately NOT an LLM classifier here —
+# same reasoning as engine.py's question.md being a file check, not a
+# prose guess: a non-deterministic approve/feedback classifier would fail
+# unpredictably on every single reply, not just this one word form).
+_AFFIRMATIVE_PREFIXES = ("approve", "yes", "y", "retry", "lgtm", "ok", "okay", "continue")
+
+
+def _is_affirmative_reply(lowered: str) -> bool:
+    return lowered.startswith(_AFFIRMATIVE_PREFIXES)
+
 
 def _watch_color_family(status: str) -> str:
     if status in ("shipped", "shipped_manually") or status.endswith("_complete") or status == "review_approved":
@@ -253,7 +268,7 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
 
     if status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES:
         stage = status.removesuffix("_complete")
-        if lowered.startswith("1") or lowered in ("approve", "yes", "y"):
+        if lowered.startswith("1") or _is_affirmative_reply(lowered):
             nxt = eng.approve(run_id, stage)
             _notify(store, notifier, run_id, f"Approved *{run_id}* {stage} — moved to `{nxt}`.")
         else:
@@ -285,7 +300,7 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
 
     if status.endswith("_failed"):
         stage = status.removesuffix("_failed")
-        if lowered.startswith("1") or lowered in ("retry", "yes", "y"):
+        if lowered.startswith("1") or _is_affirmative_reply(lowered):
             _notify(store, notifier, run_id, f"Resuming *{run_id}* stage `{stage}`…")
             eng.run_agent_stage(run_id, stage, resume=True)
             new_status = store.state(run_id).get("status", "")
@@ -295,7 +310,7 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
         return
 
     if status == "review_escalated":
-        if lowered.startswith("1") or lowered in ("approve", "yes", "y"):
+        if lowered.startswith("1") or _is_affirmative_reply(lowered):
             eng.approve(run_id, "review")
             _notify(store, notifier, run_id, f"Approved *{run_id}* — proceeding.")
         else:
