@@ -32,6 +32,13 @@ chmod 600 "$SECRETS_FILE"
 
 GH_TOKEN="$(grep ^GH_TOKEN= "$SECRETS_FILE" | cut -d= -f2-)"
 
+# This script runs under sudo (root), but the previous run's chown (below)
+# leaves the clone owned by uid 1001 — git's dubious-ownership check then
+# refuses to touch it as root on every subsequent redeploy. Idempotent: a
+# no-op the first time (directory doesn't exist yet), harmless every time
+# after.
+git config --global --add safe.directory "$TARGET_DIR"
+
 # --- persistent edupaid clone ---
 if [[ -d "$TARGET_DIR/.git" ]]; then
   git -C "$TARGET_DIR" fetch origin
