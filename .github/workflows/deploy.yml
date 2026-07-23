@@ -9,6 +9,7 @@ on:
     workflows: ["CI"]
     types: [completed]
     branches: [main]
+  workflow_dispatch: {}   # manual retrigger for testing/recovery
 
 permissions:
   id-token: write   # required for Workload Identity Federation
@@ -16,7 +17,7 @@ permissions:
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - id: auth

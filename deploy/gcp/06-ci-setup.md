@@ -39,6 +39,18 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:gantry-ci-deployer@$PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/compute.osAdminLogin" --condition=None
 
+# gcloud compute ssh requires the caller to act-as the target VM's own
+# attached service account — gantry-vm was created with a custom SA
+# (gantry-runner@...), NOT the project's default compute SA, so this binds
+# to that specific one. Confirm the actual attached SA first if this ever
+# needs redoing: gcloud compute instances describe gantry-vm --zone=... \
+#   --format="value(serviceAccounts[].email)"
+gcloud iam service-accounts add-iam-policy-binding \
+  gantry-runner@$PROJECT_ID.iam.gserviceaccount.com \
+  --project=$PROJECT_ID \
+  --member="serviceAccount:gantry-ci-deployer@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
+
 # Let this specific GitHub repo's OIDC identity impersonate the deployer SA.
 gcloud iam service-accounts add-iam-policy-binding \
   gantry-ci-deployer@$PROJECT_ID.iam.gserviceaccount.com \
