@@ -111,7 +111,7 @@ class TestV2VerificationPipeline(unittest.TestCase):
             scope={"pass": True, "high_risk_files": []},
             checks={"pass": True, "results": []},
         )
-        with patch("gantry.advance.evaluate_checks", return_value=checks):
+        with patch("gantry.advance_dispatch.evaluate_checks", return_value=checks):
             first = advance_run(self.eng, self.run_id)
         state = self.eng.store.state(self.run_id)
         self.assertEqual(first["action"], "checks_passed")
@@ -133,7 +133,7 @@ class TestV2VerificationPipeline(unittest.TestCase):
             scope={"pass": True},
             checks={"pass": False, "results": []},
         )
-        with patch("gantry.advance.evaluate_checks", return_value=failed):
+        with patch("gantry.advance_dispatch.evaluate_checks", return_value=failed):
             result = advance_run(self.eng, self.run_id)
         self.assertEqual(result["action"], "checks_failed")
         self.assertEqual(self.eng.store.state(self.run_id)["status"], Status.CHECKS_FAILED)
@@ -157,7 +157,7 @@ class TestLegacyVerificationCompatibility(unittest.TestCase):
                 eng, "run_checks",
                 return_value={"pass": True, "scope": {"high_risk_files": []}},
             ) as legacy_checks, patch(
-                "gantry.advance.run_e2e_tests",
+                "gantry.advance_dispatch.run_e2e_tests",
                 return_value={"pass": True},
             ):
                 advance_run(eng, run_id)

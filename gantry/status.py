@@ -49,6 +49,11 @@ class Status(StrEnum):
     DESIGN_COMPLETE = "design_complete"
     DESIGN_FAILED = "design_failed"
 
+    AWAITING_DEFINITION = "awaiting_definition"
+    DEFINITION_RUNNING = "definition_running"
+    DEFINITION_COMPLETE = "definition_complete"
+    DEFINITION_FAILED = "definition_failed"
+
     AWAITING_PLAN = "awaiting_plan"
     PLAN_RUNNING = "plan_running"
     PLAN_COMPLETE = "plan_complete"
@@ -68,6 +73,7 @@ class Status(StrEnum):
     EVIDENCE_CHANGES_REQUESTED = "evidence_changes_requested"
     SPEC_CHANGES_REQUESTED = "spec_changes_requested"
     DESIGN_CHANGES_REQUESTED = "design_changes_requested"
+    DEFINITION_CHANGES_REQUESTED = "definition_changes_requested"
 
     CHECKS_RUNNING = "checks_running"
     CHECKS_PASSED = "checks_passed"
@@ -150,23 +156,28 @@ S = Status
 # table below doesn't need to hand-enumerate spec/design/plan/build/evidence
 # five times over for the shape they all share.
 _AWAITING = {
-    "spec": S.AWAITING_SPEC, "design": S.AWAITING_DESIGN, "plan": S.AWAITING_PLAN,
+    "spec": S.AWAITING_SPEC, "design": S.AWAITING_DESIGN,
+    "definition": S.AWAITING_DEFINITION, "plan": S.AWAITING_PLAN,
     "build": S.AWAITING_BUILD, "evidence": S.AWAITING_EVIDENCE,
 }
 _RUNNING = {
-    "spec": S.SPEC_RUNNING, "design": S.DESIGN_RUNNING, "plan": S.PLAN_RUNNING,
+    "spec": S.SPEC_RUNNING, "design": S.DESIGN_RUNNING,
+    "definition": S.DEFINITION_RUNNING, "plan": S.PLAN_RUNNING,
     "build": S.BUILD_RUNNING, "evidence": S.EVIDENCE_RUNNING,
 }
 _COMPLETE = {
-    "spec": S.SPEC_COMPLETE, "design": S.DESIGN_COMPLETE, "plan": S.PLAN_COMPLETE,
+    "spec": S.SPEC_COMPLETE, "design": S.DESIGN_COMPLETE,
+    "definition": S.DEFINITION_COMPLETE, "plan": S.PLAN_COMPLETE,
     "build": S.BUILD_COMPLETE, "evidence": S.EVIDENCE_COMPLETE,
 }
 _FAILED = {
-    "spec": S.SPEC_FAILED, "design": S.DESIGN_FAILED, "plan": S.PLAN_FAILED,
+    "spec": S.SPEC_FAILED, "design": S.DESIGN_FAILED,
+    "definition": S.DEFINITION_FAILED, "plan": S.PLAN_FAILED,
     "build": S.BUILD_FAILED, "evidence": S.EVIDENCE_FAILED,
 }
 _CHANGES_REQUESTED = {
     "spec": S.SPEC_CHANGES_REQUESTED, "design": S.DESIGN_CHANGES_REQUESTED,
+    "definition": S.DEFINITION_CHANGES_REQUESTED,
     "plan": S.PLAN_CHANGES_REQUESTED, "build": S.BUILD_CHANGES_REQUESTED,
     "evidence": S.EVIDENCE_CHANGES_REQUESTED,
 }
@@ -231,12 +242,13 @@ AUTOMATIC_TRANSITIONS: dict[Status | tuple[Status, str], set[Status]] = {
     # own terminal write, also the resolver's stale-heartbeat repair path
     # writing {stage}_failed with last_failure_reason=stale_heartbeat)
     **{_RUNNING[stage]: {_COMPLETE[stage], _FAILED[stage]} for stage in _RUNNING},
-    # spec_complete/design_complete -> awaiting_{next} (auto_approve_docs)
+    # spec_complete/design_complete/definition_complete -> awaiting_{next}
     S.SPEC_COMPLETE: {S.AWAITING_DESIGN, S.AWAITING_PLAN},  # next stage depends on
                                                               # cfg.stages; both are
                                                               # legitimate depending on
                                                               # whether design is enabled
     S.DESIGN_COMPLETE: {S.AWAITING_PLAN},
+    S.DEFINITION_COMPLETE: {S.AWAITING_PLAN},
     # plan_complete -> build_running (via run_agent_stage)
     S.PLAN_COMPLETE: {S.BUILD_RUNNING},
     # build_complete -> checks_high_risk_escalated / blocked(e2e) /

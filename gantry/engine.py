@@ -30,7 +30,7 @@ from .config import (
 )
 from .git import ensure_worktree
 from .invocation import InvocationRequest, invoke
-from .pipeline import definition_from_snapshot, snapshot_definition
+from .pipeline import definition_from_snapshot, materialize_stages, snapshot_definition
 from .redact import proxy_secrets, redact_secrets
 from .state import RunStore
 from .status import Status
@@ -173,7 +173,9 @@ class Engine:
     # Distinct from _skills_directive below: this is gantry's OWN stage
     # discipline, not a generic third-party methodology library, so it applies
     # to every stage — not just build/evidence.
-    _STAGE_SKILLS = {"spec", "design", "investigation", "research", "plan", "build", "evidence"}
+    _STAGE_SKILLS = {
+        "spec", "design", "definition", "investigation", "research", "plan", "build", "evidence",
+    }
 
     def _stage_skill_directive(self, stage: str) -> str:
         if stage not in self._STAGE_SKILLS:
@@ -238,7 +240,8 @@ class Engine:
 
     # --- run lifecycle ---
     def create_run(self, title: str, request: str, run_id: str | None = None,
-                    depends_on: list[str] | None = None, tag: str | None = None) -> str:
+                    depends_on: list[str] | None = None, tag: str | None = None,
+                    pipeline_overrides: dict | None = None) -> str:
         """Create a run. If `depends_on` names other run_ids, this run is
         queued (status "queued", not "awaiting_{first_stage}") until every
         listed run is actually merged, not merely review_approved (see
@@ -254,16 +257,22 @@ class Engine:
         gantry.toml overrides the stage list for that tag (see
         GantryConfig.stages_for) — in which case it also picks this run's
         pipeline (e.g. tag="bug" -> investigation/plan/build/evidence/review
-        instead of the project's default stages)."""
+        instead of the project's default stages).
+
+        `pipeline_overrides` is forwarded to triage (e.g.
+        ``{"definition_policy": "separate"}`` or ``{"pipeline": "large"}``).
+        """
         # Keep the legacy stage resolver authoritative: existing queue
         # mappings and project overrides must remain byte-for-byte compatible.
-        # Triage supplies additive policy/version metadata around that pinned
-        # stage list.
-        stages = stages_for_pipeline(
-            self.cfg.stages_for(tag), self.cfg.pipeline.version,
+        # Triage supplies additive policy/version metadata; definition_policy
+        # then materializes combined/skip/separate stage lists for new runs.
+        pipeline = decide(title, request, tag, pipeline_overrides, self.cfg)
+        stages = materialize_stages(
+            stages_for_pipeline(self.cfg.stages_for(tag), self.cfg.pipeline.version),
+            pipeline.definition_policy,
         )
         pipeline = replace(
-            decide(title, request, tag, None, self.cfg),
+            pipeline,
             stages=tuple(stages),
             version=self.cfg.pipeline.version,
         )
@@ -476,6 +485,18 @@ class Engine:
                     from .checks import check_spec_artifacts
                     spec_gate = check_spec_artifacts(self.store, run_id)
                     if gate["pass"] and not spec_gate["pass"]:
+                        gate = spec_gate
+                elif stage == "definition":
+                    # Combined stage must produce both prose artifacts plus the
+                    # structured acceptance-criteria companion.
+                    from .checks import check_spec_artifacts
+                    design_gate = check_doc_artifact_written(
+                        self.store, run_id, "architecture-design.md",
+                    )
+                    spec_gate = check_spec_artifacts(self.store, run_id)
+                    if gate["pass"] and not design_gate["pass"]:
+                        gate = design_gate
+                    elif gate["pass"] and not spec_gate["pass"]:
                         gate = spec_gate
                 self.store.write_result(run_id, f"{stage}-gate.json", gate)
                 if not gate["pass"]:

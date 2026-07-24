@@ -844,9 +844,9 @@ class TestStageSkip(unittest.TestCase):
         run_id = eng.create_run("t", "test")
         eng.store.update_state(run_id, status="build_complete")
 
-        with patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+        with patch("gantry.advance_dispatch.run_e2e_tests", return_value={"pass": True}), \
              patch.object(Engine, "run_checks", return_value={"pass": True}), \
-             patch("gantry.advance.run_review", return_value={"verdict": "APPROVE"}) as mock_review:
+             patch("gantry.advance_dispatch.run_review", return_value={"verdict": "APPROVE"}) as mock_review:
             result = advance_run(eng, run_id)
 
         self.assertTrue(mock_review.called)
@@ -862,7 +862,7 @@ class TestStageSkip(unittest.TestCase):
         run_id = eng.create_run("t", "test")
         eng.store.update_state(run_id, status="build_complete")
 
-        with patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+        with patch("gantry.advance_dispatch.run_e2e_tests", return_value={"pass": True}), \
              patch.object(Engine, "run_checks", return_value={"pass": True}):
             result = advance_run(eng, run_id)
 
@@ -875,7 +875,7 @@ class TestStageSkip(unittest.TestCase):
         run_id = eng.create_run("t", "test")
         eng.store.update_state(run_id, status="build_complete")
 
-        with patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+        with patch("gantry.advance_dispatch.run_e2e_tests", return_value={"pass": True}), \
              patch.object(Engine, "run_checks", return_value={"pass": True}), \
              patch.object(Engine, "run_agent_stage") as mock_run_agent_stage:
             result = advance_run(eng, run_id)
@@ -911,7 +911,7 @@ class TestHighRiskEscalation(unittest.TestCase):
         fake_checks = {"pass": True, "scope": {"pass": True, "high_risk_files": ["auth/login.ts"]},
                        "checks": {"pass": True, "results": []}}
         with patch.object(Engine, "run_checks", return_value=fake_checks), \
-             patch("gantry.advance.run_e2e_tests") as mock_e2e:
+             patch("gantry.advance_dispatch.run_e2e_tests") as mock_e2e:
             result = advance_run(eng, run_id)
 
         self.assertFalse(mock_e2e.called)
@@ -934,7 +934,7 @@ class TestHighRiskEscalation(unittest.TestCase):
         fake_checks = {"pass": True, "scope": {"pass": True, "high_risk_files": []},
                        "checks": {"pass": True, "results": []}}
         with patch.object(Engine, "run_checks", return_value=fake_checks), \
-             patch("gantry.advance.run_e2e_tests", return_value={"pass": True}), \
+             patch("gantry.advance_dispatch.run_e2e_tests", return_value={"pass": True}), \
              patch.object(Engine, "run_agent_stage") as mock_run_agent_stage:
             result = advance_run(eng, run_id)
 

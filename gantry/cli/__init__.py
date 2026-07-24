@@ -181,6 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "offer to configure it as [agent].runner")
     s.add_argument("--yes", action="store_true",
                    help="with --fix, apply the fix without an interactive y/n confirmation")
+    s.add_argument("--live-sdk-smoke", action="store_true",
+                   help="run credential-gated Cursor SDK live smoke "
+                        "(requires CURSOR_API_KEY; same as "
+                        "GANTRY_CURSOR_SDK_LIVE=1 unittest)")
     s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("listen", help="poll Telegram replies, act on the pending run")
@@ -244,16 +248,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _ensure_notify_env() -> None:
-    """Auto-load ~/.config/gantry/env.sh's telegram bridge if the caller's shell
-    never sourced it. Without this, every stage/advance/ship call silently no-ops
-    notifications (TelegramNotifier.send returns {"sent": False, ...} — no
-    exception, no visible error) whenever gantry runs from a shell that skipped
-    the documented `source ~/.config/gantry/env.sh` setup step. Since agents and
-    scripts routinely invoke `gantry` directly without that step, load it here
-    once, unconditionally, instead of depending on caller discipline."""
+    """Auto-load local env files so callers don't need to source them.
+
+    Load order (later does not overwrite already-set vars):
+      1. ~/.config/gantry/env.sh  (telegram + optional Cursor key)
+      2. <gantry-checkout>/.env   (CURSOR_API_KEY for this install)
+    """
     import os
-    if os.environ.get("GANTRY_TELEGRAM_BOT_TOKEN") and os.environ.get("GANTRY_TELEGRAM_CHAT_ID"):
-        return
+    _load_config_env_sh()
+    _load_dotenv_file(_gantry_checkout_env())
+    _load_dotenv_file(Path.cwd() / ".env")
+
+
+def _gantry_checkout_env() -> Path:
+    # gantry/cli/__init__.py -> gantry/cli -> gantry -> checkout root
+    return Path(__file__).resolve().parents[2] / ".env"
+
+
+def _load_config_env_sh() -> None:
+    import os
     env_sh = Path.home() / ".config" / "gantry" / "env.sh"
     if not env_sh.exists():
         return
@@ -264,10 +277,35 @@ def _ensure_notify_env() -> None:
         ).stdout
     except Exception:
         return
+    wanted = (
+        "GANTRY_TELEGRAM_BOT_TOKEN",
+        "GANTRY_TELEGRAM_CHAT_ID",
+        "CURSOR_API_KEY",
+    )
     for line in out.splitlines():
-        if line.startswith("GANTRY_TELEGRAM_BOT_TOKEN=") or line.startswith("GANTRY_TELEGRAM_CHAT_ID="):
+        for key in wanted:
+            if line.startswith(key + "=") and not os.environ.get(key):
+                _, _, val = line.partition("=")
+                os.environ[key] = val
+
+
+def _load_dotenv_file(path: Path) -> None:
+    """Minimal KEY=VALUE loader. Does not override existing environ."""
+    import os
+    if not path.is_file():
+        return
+    try:
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
             key, _, val = line.partition("=")
-            os.environ[key] = val
+            key = key.strip()
+            val = val.strip().strip("'").strip('"')
+            if key and not os.environ.get(key):
+                os.environ[key] = val
+    except Exception:
+        return
 
 
 def main(argv=None) -> int:

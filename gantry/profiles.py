@@ -12,6 +12,7 @@ PROFILE_VERSION = 1
 ROLES = (
     "spec",
     "design",
+    "definition",
     "investigator",
     "researcher",
     "planner-builder",
@@ -26,6 +27,7 @@ ROLES = (
 _STAGE_ROLES = {
     "spec": "spec",
     "design": "design",
+    "definition": "definition",
     "investigation": "investigator",
     "investigator": "investigator",
     "research": "researcher",
@@ -50,6 +52,7 @@ _STAGE_ROLES = {
 _DEFAULT_STAGE = {
     "spec": "spec",
     "design": "design",
+    "definition": "definition",
     "investigator": "investigation",
     "researcher": "research",
     "planner-builder": "plan",
@@ -124,7 +127,7 @@ def _legacy_execution(cfg: GantryConfig, role: str, stage: str) -> tuple[str, st
 
 def _stage_skills(cfg: GantryConfig, stage: str) -> tuple[str, ...]:
     required = (f"gantry-stage-{stage}",) if stage in {
-        "spec", "design", "investigation", "research", "plan", "build", "evidence",
+        "spec", "design", "definition", "investigation", "research", "plan", "build", "evidence",
     } else ()
     legacy = cfg.skills.enabled if stage in ("build", "evidence") else ()
     return _ordered_union(required, legacy)

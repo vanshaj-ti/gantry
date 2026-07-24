@@ -33,7 +33,7 @@ CONFIG_FILENAME = "gantry.toml"
 # design.md, and templates/gantry.toml's [stages] comment for how to opt in).
 DEFAULT_STAGES = ["plan", "build", "evidence", "review"]
 
-DOC_STAGES = {"spec", "design", "investigation", "research"}  # human-authored/agent-drafted, human-gated
+DOC_STAGES = {"spec", "design", "definition", "investigation", "research"}  # human-authored/agent-drafted, human-gated
 AGENT_STAGES = {"plan", "build", "evidence"}  # invoke the agent runner
 REVIEW_STAGE = "review"                    # independent LLM review
 VERIFICATION_STAGES = {"checks", "e2e"}
@@ -41,6 +41,9 @@ VERIFICATION_STAGES = {"checks", "e2e"}
 STAGE_ARTIFACTS = {
     "spec": "product-spec.md",
     "design": "architecture-design.md",
+    # Combined medium-feature stage still writes the dual artifacts below;
+    # product-spec.md is the primary gate key for STAGE_ARTIFACTS lookup.
+    "definition": "product-spec.md",
     "investigation": "investigation-report.md",
     "research": "research-report.md",
     "plan": "implementation-plan.md",

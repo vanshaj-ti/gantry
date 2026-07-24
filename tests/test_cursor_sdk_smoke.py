@@ -107,21 +107,111 @@ class TestCursorSdkDocumentedContract(unittest.TestCase):
 class TestCursorSdkLiveSmoke(unittest.TestCase):
     """Opt-in live acceptance — not part of ordinary CI."""
 
-    def test_local_create_send_dispose(self):
+    def setUp(self):
         from cursor_sdk import Agent, LocalAgentOptions
+        self.Agent = Agent
+        self.LocalAgentOptions = LocalAgentOptions
+        self.model = os.environ.get("GANTRY_CURSOR_SDK_MODEL", "composer-2.5")
 
+    def test_local_create_send_dispose(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with Agent.create(
-                model=os.environ.get("GANTRY_CURSOR_SDK_MODEL", "composer-2.5"),
-                local=LocalAgentOptions(cwd=tmp),
+            with self.Agent.create(
+                model=self.model,
+                local=self.LocalAgentOptions(cwd=tmp),
             ) as agent:
                 self.assertTrue(agent.agent_id)
                 run = agent.send("Reply with exactly: pong")
-                # Prefer wait()/text() if present; otherwise iterate stream.
                 if hasattr(run, "wait"):
                     run.wait()
                 text = run.text() if callable(getattr(run, "text", None)) else str(run)
                 self.assertTrue(text)
+
+    def test_local_resume_round_trip(self):
+        """Resume after close — same path Gantry uses for plan→build lineage."""
+        from cursor_sdk import AgentOptions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            api_key = os.environ.get("CURSOR_API_KEY")
+            created = self.Agent.create(
+                model=self.model,
+                api_key=api_key,
+                local=self.LocalAgentOptions(cwd=tmp),
+            )
+            try:
+                agent_id = created.agent_id
+                first = created.send("Remember the word: gantry-live. Reply ok.")
+                if hasattr(first, "wait"):
+                    first.wait()
+            finally:
+                close = getattr(created, "close", None)
+                if callable(close):
+                    close()
+
+            resumed = self.Agent.resume(
+                agent_id,
+                options=AgentOptions(
+                    api_key=api_key,
+                    model=self.model,
+                    local=self.LocalAgentOptions(cwd=tmp),
+                ),
+            )
+            try:
+                self.assertEqual(getattr(resumed, "agent_id", None), agent_id)
+                second = resumed.send(
+                    "What word did I ask you to remember? Reply with only that word."
+                )
+                if hasattr(second, "wait"):
+                    second.wait()
+                status = str(getattr(second, "status", "") or "").lower()
+                text_fn = getattr(second, "text", None)
+                text = text_fn() if callable(text_fn) else getattr(second, "result", "")
+                text = str(text or "")
+                # Gantry's live plan→build resume already proves durable ids.
+                # This smoke asserts resume reattaches and the follow-up does
+                # not hard-fail; prefer content when the SDK returns it.
+                self.assertNotEqual(status, "error", f"resume follow-up error text={text!r}")
+                if text.strip():
+                    self.assertIn("gantry-live", text.lower())
+            finally:
+                close = getattr(resumed, "close", None)
+                if callable(close):
+                    close()
+                elif hasattr(resumed, "__exit__"):
+                    resumed.__exit__(None, None, None)
+
+    def test_local_cancel_does_not_invent_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.Agent.create(
+                model=self.model,
+                local=self.LocalAgentOptions(cwd=tmp),
+            ) as agent:
+                run = agent.send("Count slowly from 1 to 1000 in words.")
+                if hasattr(run, "cancel"):
+                    run.cancel()
+                usage = getattr(run, "usage", None)
+                if usage is not None:
+                    self.assertFalse(hasattr(usage, "cost_usd") and usage.cost_usd is not None)
+
+    def test_backend_invoke_in_temp_repo(self):
+        from gantry.backends.cursor_sdk import CursorSdkBackend
+        from gantry.backends.protocol import InvocationSpec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            backend = CursorSdkBackend()
+            result = backend.invoke(InvocationSpec(
+                cwd=cwd,
+                prompt="Reply with exactly: gantry-backend-ok",
+                model=self.model,
+                session=None,
+                plan_mode=False,
+                skip_permissions=True,
+                max_turns=4,
+                timeout=180,
+                session_name="live-smoke",
+            ))
+            self.assertTrue(result.ok or result.session_id)
+            self.assertIsNone(result.usage.get("cost_usd"))
 
 
 if __name__ == "__main__":

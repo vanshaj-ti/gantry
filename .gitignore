@@ -14,6 +14,11 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
 # Gantry local state / logs
 *.log
 .agent-runs/

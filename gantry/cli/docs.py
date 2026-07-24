@@ -276,6 +276,24 @@ def cmd_doctor(args) -> int:
         "herdr": herdr_status,
     }
 
+    if getattr(args, "live_sdk_smoke", False):
+        import unittest
+        os.environ["GANTRY_CURSOR_SDK_LIVE"] = "1"
+        suite = unittest.defaultTestLoader.loadTestsFromName(
+            "tests.test_cursor_sdk_smoke.TestCursorSdkLiveSmoke",
+        )
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        out["live_sdk_smoke"] = {
+            "ok": result.wasSuccessful(),
+            "tests_run": result.testsRun,
+            "failures": len(result.failures),
+            "errors": len(result.errors),
+            "skipped": len(result.skipped),
+        }
+        if not result.wasSuccessful():
+            _out(out)
+            return 1
+
     if getattr(args, "fix", False):
         out["fix"] = _run_doctor_fix(tgt, cfg, runners, getattr(args, "yes", False))
 

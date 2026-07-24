@@ -23,6 +23,7 @@ LineageKind = Literal["isolated", "shared_implementation", "fresh"]
 STAGE_LINEAGE: dict[str, LineageKind] = {
     "spec": "isolated",
     "design": "isolated",
+    "definition": "isolated",
     "investigation": "isolated",
     "research": "isolated",
     "plan": "shared_implementation",

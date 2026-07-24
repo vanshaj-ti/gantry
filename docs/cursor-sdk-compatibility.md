@@ -55,9 +55,24 @@ Live tests in `tests/test_cursor_sdk_smoke.py` run only when:
 ```bash
 export GANTRY_CURSOR_SDK_LIVE=1
 export CURSOR_API_KEY=...
+# optional model override:
+# export GANTRY_CURSOR_SDK_MODEL=composer-2.5
+python -m unittest tests.test_cursor_sdk_smoke.TestCursorSdkLiveSmoke -v
 ```
 
-Ordinary CI runs mocked contract tests only.
+Or via doctor:
+
+```bash
+gantry doctor --live-sdk-smoke
+```
+
+Ordinary CI runs mocked contract tests only. A GitHub Actions
+`workflow_dispatch` job (`sdk-smoke`) can run the live suite when
+`CURSOR_API_KEY` is configured as a repository secret.
+
+Live coverage includes: create/send/dispose, resume round-trip, cancel
+(without inventing `cost_usd`), and `CursorSdkBackend.invoke` against a
+temp directory.
 
 ## Fallback order (pre-start only)
 

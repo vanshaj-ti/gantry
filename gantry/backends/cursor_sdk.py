@@ -90,6 +90,11 @@ class CursorSdkBackend:
             ) from exc
 
         api_key = spec.extras.get("api_key") or os.environ.get("CURSOR_API_KEY")
+        # Local SDK requires an explicit model; empty gantry.toml model="" used to
+        # mean "runner default" for CLIs but Agent.create rejects a blank model.
+        model = (spec.model or "").strip() or os.environ.get(
+            "GANTRY_CURSOR_SDK_MODEL", "composer-2.5",
+        )
         agent = None
         run = None
         events_path = spec.extras.get("events_path")
@@ -97,17 +102,19 @@ class CursorSdkBackend:
             resume_id = None
             if spec.session is not None:
                 resume_id = spec.session.agent_id or spec.session.session_id
+            local_opts = sdk.LocalAgentOptions(cwd=str(spec.cwd))
             if resume_id:
                 options = sdk.AgentOptions(
                     api_key=api_key,
-                    local=sdk.LocalAgentOptions(cwd=str(spec.cwd)),
+                    model=model,
+                    local=local_opts,
                 )
                 agent = sdk.Agent.resume(agent_id=resume_id, options=options)
             else:
                 agent = sdk.Agent.create(
-                    model=spec.model,
+                    model=model,
                     api_key=api_key,
-                    local=sdk.LocalAgentOptions(cwd=str(spec.cwd)),
+                    local=local_opts,
                 )
 
             run = agent.send(spec.prompt)

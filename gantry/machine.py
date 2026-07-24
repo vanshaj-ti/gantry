@@ -1,13 +1,14 @@
-"""Declarative transition machine — single source of truth for status edges.
+"""Declarative transition machine — sole automatic-advance dispatcher.
 
-Phase 8: automatic advance dispatch and ``validate_transition`` consume the
-same typed definitions. Legacy status *values* remain byte-identical; this
-module does not invent new on-disk strings.
+Automatic advance ticks enter through ``dispatch_automatic_advance``. Typed
+``Transition`` records remain the parity source for allowed status edges.
+Legacy status *values* remain byte-identical; this module does not invent
+new on-disk strings.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from gantry.status import (
     AUTOMATIC_TRANSITIONS,
@@ -16,6 +17,9 @@ from gantry.status import (
     TRANSITIONS,
     validate_transition as _legacy_validate_transition,
 )
+
+if TYPE_CHECKING:
+    from gantry.engine import Engine
 
 Guard = Callable[[dict[str, Any]], bool] | None
 Action = str  # symbolic action name consumed by advance / CLI
@@ -142,3 +146,20 @@ def machine_parity_errors() -> list[str]:
         if missing:
             errors.append(f"missing automatic edges from {key}: {sorted(missing)}")
     return errors
+
+
+def dispatch_automatic_advance(engine: "Engine", run_id: str) -> dict[str, Any]:
+    """Sole automatic-advance entry point used by ``advance.advance_run``.
+
+    Execution order is owned by ``gantry.advance_dispatch.DISPATCH_RULES``
+    (historical if-chain order). Allowed destinations remain validated by
+    ``AUTOMATIC_MACHINE`` / ``validate_transition``.
+    """
+    from gantry.advance_dispatch import execute_dispatch
+    return execute_dispatch(engine, run_id)
+
+
+def dispatch_rule_names() -> tuple[str, ...]:
+    """Ordered rule names — useful for parity / docs tests."""
+    from gantry.advance_dispatch import DISPATCH_RULES
+    return tuple(rule.name for rule in DISPATCH_RULES)

@@ -83,7 +83,10 @@ class TestFullPipelineE2E(unittest.TestCase):
         expected structured artifact lands at each stage and the status
         machine transitions exactly as expected — the core linear-pipeline
         integration check."""
-        run_id = self.eng.create_run("add health endpoint", "add GET /health -> 200")
+        run_id = self.eng.create_run(
+            "add health endpoint", "add GET /health -> 200",
+            pipeline_overrides={"definition_policy": "separate"},
+        )
         self.run_id = run_id
         store = self.eng.store
 

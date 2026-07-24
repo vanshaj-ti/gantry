@@ -86,3 +86,49 @@ def definition_from_snapshot(data: dict[str, object]) -> PipelineDefinition:
         for mutation in values.get("mutations", ())
     )
     return PipelineDefinition(**values)
+
+
+def materialize_stages(
+    stages: list[str] | tuple[str, ...],
+    definition_policy: DefinitionPolicy,
+) -> list[str]:
+    """Apply definition_policy to a queue/stage list.
+
+    - ``skip``: drop spec/design/definition stages
+    - ``combined``: replace contiguous spec+design (or either alone) with
+      a single ``definition`` stage
+    - ``separate``: keep spec/design as-is; drop any explicit definition
+    """
+    out: list[str] = []
+    i = 0
+    seq = list(stages)
+    while i < len(seq):
+        stage = seq[i]
+        if definition_policy == "skip" and stage in ("spec", "design", "definition"):
+            i += 1
+            continue
+        if definition_policy == "separate" and stage == "definition":
+            i += 1
+            continue
+        if definition_policy == "combined":
+            if stage == "definition":
+                if "definition" not in out:
+                    out.append("definition")
+                i += 1
+                continue
+            if stage == "spec":
+                if i + 1 < len(seq) and seq[i + 1] == "design":
+                    i += 2
+                else:
+                    i += 1
+                if "definition" not in out:
+                    out.append("definition")
+                continue
+            if stage == "design":
+                if "definition" not in out:
+                    out.append("definition")
+                i += 1
+                continue
+        out.append(stage)
+        i += 1
+    return out

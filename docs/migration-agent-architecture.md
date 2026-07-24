@@ -34,6 +34,7 @@ Existing projects that already write `runner = "claude-code"` are unchanged.
 export GANTRY_CURSOR_SDK_LIVE=1
 export CURSOR_API_KEY=...
 python -m unittest tests.test_cursor_sdk_smoke.TestCursorSdkLiveSmoke -v
+# or: gantry doctor --live-sdk-smoke
 ```
 
 See [cursor-sdk-compatibility.md](./cursor-sdk-compatibility.md) for documented

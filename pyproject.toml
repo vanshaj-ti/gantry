@@ -49,3 +49,8 @@ select = ["E", "F", "W"]
 [tool.coverage.run]
 source = ["gantry"]
 branch = true
+
+[tool.coverage.report]
+fail_under = 68
+show_missing = true
+skip_empty = true

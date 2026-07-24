@@ -38,6 +38,7 @@ _ALWAYS_SENSITIVE_ENV_VARS = (
     "GANTRY_LINEAR_API_KEY",
     "GANTRY_LINEAR_WEBHOOK_SECRET",
     "GANTRY_TELEGRAM_BOT_TOKEN",
+    "CURSOR_API_KEY",
 )
 
 # Trivially short "secrets" (empty string, a single char) would redact far too
