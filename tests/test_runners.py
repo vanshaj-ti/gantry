@@ -227,6 +227,12 @@ class TestGetRunner(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner_binary("nope")
 
+    def test_backend_registry_stays_in_lockstep_with_runners(self):
+        from gantry.backends import get_backend, list_backends
+        self.assertEqual(set(list_backends()), {"claude-code", "cursor-cli", "codex-cli"})
+        for name in list_backends():
+            self.assertEqual(get_backend(name).name, get_runner(name).name)
+
 
 if __name__ == "__main__":
     unittest.main()

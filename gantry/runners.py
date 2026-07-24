@@ -324,6 +324,12 @@ _RUNNERS: dict[str, type[AgentRunner]] = {
 
 
 def get_runner(name: str) -> AgentRunner:
+    """Compatibility facade — prefer gantry.backends.get_backend for new code.
+
+    Returns the same AgentRunner instances (exact argv / parse / proxy behavior)
+    that CliAgentBackend wraps. Names and registration stay in lockstep with
+    gantry.backends.registry.
+    """
     if name not in _RUNNERS:
         raise ValueError(f"Unknown agent runner: {name!r}. Available: {sorted(_RUNNERS)}")
     return _RUNNERS[name]()
