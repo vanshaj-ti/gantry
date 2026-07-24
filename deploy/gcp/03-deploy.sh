@@ -74,14 +74,29 @@ GH_TOKEN="$(grep ^GH_TOKEN= "$SECRETS_FILE" | cut -d= -f2-)"
 git config --global --add safe.directory "$TARGET_DIR"
 
 # --- persistent target clone ---
+# Deployment clone must track origin/$BASE_BRANCH exactly. Target repos often
+# force-push shared branches (e.g. staging); a plain `git pull` then fails on
+# divergent history. Hard-sync like gantry-src — local VM edits are not kept.
 if [[ -d "$TARGET_DIR/.git" ]]; then
+  git -C "$TARGET_DIR" remote set-url origin "$TARGET_REPO_URL" 2>/dev/null || true
+  # Ensure fetch auth if the remote is HTTPS without embedded creds.
+  if [[ "$TARGET_REPO_URL" == https://* ]]; then
+    AUTH_URL="$(echo "$TARGET_REPO_URL" | sed "s#https://#https://x-access-token:${GH_TOKEN}@#")"
+    git -C "$TARGET_DIR" remote set-url origin "$AUTH_URL"
+  fi
   git -C "$TARGET_DIR" fetch origin
-  git -C "$TARGET_DIR" checkout "$BASE_BRANCH"
-  git -C "$TARGET_DIR" pull origin "$BASE_BRANCH"
+  git -C "$TARGET_DIR" checkout -B "$BASE_BRANCH" "origin/$BASE_BRANCH"
+  git -C "$TARGET_DIR" reset --hard "origin/$BASE_BRANCH"
+  git -C "$TARGET_DIR" clean -fd
+  # Restore a non-token remote URL so secrets aren't written into .git/config.
+  if [[ "$TARGET_REPO_URL" == https://* ]]; then
+    git -C "$TARGET_DIR" remote set-url origin "$TARGET_REPO_URL"
+  fi
 else
   AUTH_URL="$(echo "$TARGET_REPO_URL" | sed "s#https://#https://x-access-token:${GH_TOKEN}@#")"
   git clone "$AUTH_URL" "$TARGET_DIR"
   git -C "$TARGET_DIR" checkout "$BASE_BRANCH"
+  git -C "$TARGET_DIR" remote set-url origin "$TARGET_REPO_URL"
 fi
 # The container runs as its own unprivileged "gantry" user (uid 1001, see
 # Dockerfile) — a clone/checkout done here (as root, since this script runs
