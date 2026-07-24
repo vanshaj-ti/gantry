@@ -254,7 +254,6 @@ def _ensure_notify_env() -> None:
       1. ~/.config/gantry/env.sh  (telegram + optional Cursor key)
       2. <gantry-checkout>/.env   (CURSOR_API_KEY for this install)
     """
-    import os
     _load_config_env_sh()
     _load_dotenv_file(_gantry_checkout_env())
     _load_dotenv_file(Path.cwd() / ".env")
