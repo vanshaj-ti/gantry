@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Vanshaj" }]
 keywords = ["agent", "pipeline", "claude-code", "cursor", "automation", "ci"]
 dependencies = [
+    "cursor-sdk>=1.0.24,<2",
     "rich>=13",  # in-process markdown rendering for `gantry docs --nav`'s
                  # content pane (headers/tables/code, real terminal color) —
                  # everything else stays stdlib-only (tomllib, urllib, subprocess)
@@ -33,7 +34,7 @@ classifiers = [
 gantry = "gantry.cli:main"
 
 [tool.setuptools]
-packages = ["gantry", "gantry.cli"]
+packages = ["gantry", "gantry.backends", "gantry.cli"]
 
 [tool.setuptools.package-data]
 gantry = ["templates/*.toml", "templates/prompts/*.md"]

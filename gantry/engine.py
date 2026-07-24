@@ -20,11 +20,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .backends.registry import get_execution_runner as get_runner
 from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
 from .redact import proxy_secrets, redact_secrets
-from .runners import get_runner, resolve_proxy_env
+from .runners import resolve_proxy_env
 from .state import RunStore, now_iso
 from .status import Status
 

@@ -22,12 +22,11 @@ class TestAgentPaneCmd(unittest.TestCase):
         self.assertNotIn("exec", cmd.split())
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
 
-    def test_claude_default_when_no_config(self):
+    def test_sdk_default_uses_cursor_cli_for_interactive_pane(self):
         with tempfile.TemporaryDirectory() as tmp:
             cmd, runner = _agent_pane_cmd(Path(tmp))
-        self.assertEqual(runner, "claude-code")
-        self.assertIn("claude", cmd)
-        self.assertIn("--dangerously-skip-permissions", cmd)
+        self.assertEqual(runner, "cursor-cli")
+        self.assertEqual(cmd, "cursor-agent -f")
 
     def test_skip_permissions_false_omits_flag(self):
         with tempfile.TemporaryDirectory() as tmp:

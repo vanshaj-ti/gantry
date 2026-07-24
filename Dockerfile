@@ -23,7 +23,8 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 # gantry/cost.py's _codex_cost_from_ccusage.
 RUN npm install -g @openai/codex ccusage@20
 
-# gantry itself
+# gantry itself; its Python dependencies install cursor-sdk. Pass
+# CURSOR_API_KEY into the container at runtime to use the default SDK backend.
 COPY . /opt/gantry
 RUN pip3 install --break-system-packages --no-cache-dir /opt/gantry
 

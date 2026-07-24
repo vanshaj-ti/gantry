@@ -64,8 +64,8 @@ DEFAULT_QUEUE_STAGES: dict[str, list[str]] = {
 
 @dataclass
 class AgentConfig:
-    """Which agent CLI drives the plan/build/evidence stages."""
-    runner: str = "claude-code"        # "claude-code" | "cursor-cli" | "codex-cli"
+    """Which agent backend drives the plan/build/evidence stages."""
+    runner: str = "cursor-sdk"        # SDK default; legacy CLI runner names remain valid
     skip_permissions: bool = True       # pass the runner's auto-approve flag
     output_format: str = "json"
     max_concurrent: int = 0    # cap on concurrently-running agent subprocesses
@@ -127,7 +127,7 @@ class StageModel:
 class ReviewConfig:
     """Independent LLM review after evidence. Separate model family recommended."""
     enabled: bool = True
-    runner: str = "claude-code"          # reviewer can use either runner
+    runner: str = "cursor-sdk"            # defaults to the local Cursor SDK backend
     model: str = ""                       # e.g. a strong reviewing model
     approve_keywords: list[str] = field(default_factory=lambda: ["APPROVE"])
     request_changes_keywords: list[str] = field(default_factory=lambda: ["REQUEST_CHANGES"])
@@ -614,12 +614,13 @@ def load_config(target_workspace: Path) -> GantryConfig:
     if "agent" in raw:
         a = raw["agent"]
         cfg.agent = AgentConfig(
-            runner=a.get("runner", "claude-code"),
+            runner=a.get("runner", "cursor-sdk"),
             skip_permissions=bool(a.get("skip_permissions", True)),
             output_format=a.get("output_format", "json"),
             max_concurrent=int(a.get("max_concurrent", 0)),
         )
     cfg.models = _coerce_models(raw.get("models", {}))
+    cfg.review.runner = cfg.agent.runner
 
     if "review" in raw:
         r = raw["review"]

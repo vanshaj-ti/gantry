@@ -26,9 +26,11 @@ prompts_dir = ".gantry/prompts"
 # stages = ["investigation", "plan", "build", "evidence", "review"]
 
 [agent]
-# Which agent CLI drives plan/build/evidence (and cockpit/herdr interactive pane).
-# "claude-code" | "cursor-cli" | "codex-cli"
-runner = "claude-code"
+# Which agent backend drives plan/build/evidence.
+# "cursor-sdk" (default) | "claude-code" | "cursor-cli" | "codex-cli"
+# Legacy CLI runners remain supported. cursor-sdk is non-TUI, so cockpit uses
+# cursor-cli for its interactive pane when this backend is selected.
+runner = "cursor-sdk"
 skip_permissions = true      # pass the runner's headless auto-approve flag
 output_format = "json"
 # Cap on concurrently-running agent subprocesses across `advance --all`'s
@@ -87,7 +89,7 @@ output_format = "prose"       # "prose" | "structured"
 
 [review]
 enabled = true
-runner = "claude-code"        # ideally a different model family than build
+runner = "cursor-sdk"         # legacy CLI runners remain valid
 model = ""
 approve_keywords = ["APPROVE"]
 request_changes_keywords = ["REQUEST_CHANGES"]

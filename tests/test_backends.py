@@ -26,9 +26,9 @@ from gantry.runners import (
 
 
 class TestBackendRegistry(unittest.TestCase):
-    def test_lists_legacy_cli_backends(self):
+    def test_lists_sdk_and_legacy_cli_backends(self):
         names = list_backends()
-        self.assertEqual(names, ["claude-code", "codex-cli", "cursor-cli"])
+        self.assertEqual(names, ["claude-code", "codex-cli", "cursor-cli", "cursor-sdk"])
 
     def test_get_backend_wraps_matching_runner(self):
         for name in ("claude-code", "cursor-cli", "codex-cli"):
@@ -141,12 +141,11 @@ class TestCliBackendInvokeBridge(unittest.TestCase):
 
 
 class TestFallbackOrder(unittest.TestCase):
-    def test_pre_start_fallback_order_excludes_sdk_until_phase2(self):
-        # Phase 1: CLI-only fallback order. Phase 2 prepends cursor-sdk.
-        self.assertEqual(DEFAULT_FALLBACK_ORDER[0], "cursor-cli")
-        self.assertIn("claude-code", DEFAULT_FALLBACK_ORDER)
-        self.assertIn("codex-cli", DEFAULT_FALLBACK_ORDER)
-        self.assertNotIn("cursor-sdk", DEFAULT_FALLBACK_ORDER)
+    def test_pre_start_fallback_order_prefers_sdk(self):
+        self.assertEqual(
+            DEFAULT_FALLBACK_ORDER,
+            ("cursor-sdk", "cursor-cli", "claude-code", "codex-cli"),
+        )
 
 
 class TestArgvParityViaBackend(unittest.TestCase):

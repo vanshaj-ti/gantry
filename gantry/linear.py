@@ -453,6 +453,7 @@ def classify_ticket(title: str, description: str, *,
     Uses [agent].runner (and its default model) when project_root/runner are
     given, so a codex-only install doesn't hard-depend on `claude` being on
     PATH. model="" lets the runner pick its own default."""
+    from .backends.registry import get_execution_runner
     from .runners import get_runner
 
     if runner is None and project_root is not None:
@@ -472,7 +473,11 @@ Title: {title}
 Description: {description}
 
 Respond with exactly one word: the tag."""
-    result = get_runner(runner).run(
+    try:
+        execution_runner = get_runner(runner)
+    except ValueError:
+        execution_runner = get_execution_runner(runner)
+    result = execution_runner.run(
         cwd=project_root or Path.cwd(), prompt=prompt, model=model, max_turns=1,
     )
     text = (result.raw.get("result") or "").strip().lower() if result.raw else ""

@@ -18,8 +18,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .backends.registry import get_execution_runner as get_runner
 from .config import GantryConfig
-from .runners import get_runner
 from .state import RunStore, slugify
 
 logger = logging.getLogger(__name__)

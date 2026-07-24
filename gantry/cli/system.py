@@ -85,8 +85,12 @@ def cmd_daemon_tick(args) -> int:
 
 
 def _runner_availability() -> dict:
+    from ..backends.cursor_sdk import diagnose_cursor_sdk
     from ..runners import _RUNNERS
-    return {name: bool(shutil.which(cls.binary)) for name, cls in _RUNNERS.items()}
+    availability = {name: bool(shutil.which(cls.binary)) for name, cls in _RUNNERS.items()}
+    sdk = diagnose_cursor_sdk()
+    availability["cursor-sdk"] = bool(sdk["package_available"] and sdk["api_key_present"])
+    return availability
 
 
 def cmd_setup(args) -> int:

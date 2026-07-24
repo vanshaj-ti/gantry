@@ -69,6 +69,8 @@ def _agent_pane_cmd(target: Path) -> tuple[str, str]:
         cfg = load_config(target)
         runner = cfg.agent.runner
         skip = cfg.agent.skip_permissions
+        if runner == "cursor-sdk":
+            runner = "cursor-cli"
     except Exception:
         runner, skip = "claude-code", True
     try:

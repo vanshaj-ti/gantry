@@ -16,6 +16,7 @@ class TestDockerPassEnv(unittest.TestCase):
         self.assertIn("ANTHROPIC_AUTH_TOKEN", names)
         self.assertIn("ANTHROPIC_BASE_URL", names)
         self.assertIn("OPENAI_API_KEY", names)
+        self.assertIn("CURSOR_API_KEY", names)
         # No org-specific hardcoding.
         self.assertNotIn("TFY_API_KEY", names)
         self.assertFalse(any("edupaid" in n.lower() for n in names))

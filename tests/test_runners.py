@@ -217,6 +217,10 @@ class TestGetRunner(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_runner("not-a-real-runner")
 
+    def test_cursor_sdk_is_not_a_cli_runner(self):
+        with self.assertRaises(ValueError):
+            get_runner("cursor-sdk")
+
     def test_runner_binary_and_interactive_helpers(self):
         self.assertEqual(runner_binary("claude-code"), "claude")
         self.assertEqual(runner_binary("codex-cli"), "codex")
@@ -227,11 +231,13 @@ class TestGetRunner(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner_binary("nope")
 
-    def test_backend_registry_stays_in_lockstep_with_runners(self):
+    def test_backend_registry_adds_sdk_without_changing_cli_registry(self):
         from gantry.backends import get_backend, list_backends
-        self.assertEqual(set(list_backends()), {"claude-code", "cursor-cli", "codex-cli"})
-        for name in list_backends():
+        cli_names = {"claude-code", "cursor-cli", "codex-cli"}
+        self.assertEqual(set(list_backends()), cli_names | {"cursor-sdk"})
+        for name in cli_names:
             self.assertEqual(get_backend(name).name, get_runner(name).name)
+        self.assertEqual(get_backend("cursor-sdk").name, "cursor-sdk")
 
 
 if __name__ == "__main__":

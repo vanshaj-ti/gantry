@@ -231,10 +231,12 @@ def _fix_agent_runner(cfg_path: Path, new_runner: str) -> dict:
 
 
 def cmd_doctor(args) -> int:
+    from ..backends.cursor_sdk import diagnose_cursor_sdk
     from .system import _runner_availability
     tgt = _target()
     cfg = load_config(tgt)
     runners = _runner_availability()
+    cursor_sdk = diagnose_cursor_sdk()
     git_ok = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
                             cwd=str(tgt), capture_output=True, text=True).returncode == 0
     herdr_installed = bool(shutil.which("herdr"))
@@ -253,6 +255,12 @@ def cmd_doctor(args) -> int:
         "config_present": (tgt / CONFIG_FILENAME).exists(),
         "active_runner": cfg.agent.runner,
         "runners_available": runners,
+        "cursor_sdk": cursor_sdk,
+        "fallback_availability": {
+            "cursor-cli": bool(shutil.which("cursor-agent")),
+            "claude-code": bool(shutil.which("claude")),
+            "codex-cli": bool(shutil.which("codex")),
+        },
         "git_repo": git_ok,
         "base_branch": cfg.git.base_branch,
         "notify_backend": cfg.notify.backend,

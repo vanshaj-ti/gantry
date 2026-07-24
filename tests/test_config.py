@@ -17,7 +17,8 @@ class TestBareRepoDefaults(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = load_config(Path(tmp))
         self.assertIsInstance(cfg, GantryConfig)
-        self.assertEqual(cfg.agent.runner, "claude-code")
+        self.assertEqual(cfg.agent.runner, "cursor-sdk")
+        self.assertEqual(cfg.review.runner, "cursor-sdk")
         self.assertEqual(cfg.stages, ["plan", "build", "evidence", "review"])
 
 
@@ -43,6 +44,32 @@ class TestRunnerFor(unittest.TestCase):
 
 
 class TestLoadConfigFromToml(unittest.TestCase):
+    def test_absent_review_section_inherits_explicit_agent_runner(self):
+        toml_text = """
+[agent]
+runner = "claude-code"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text(toml_text)
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.review.runner, "claude-code")
+
+    def test_missing_agent_runner_defaults_to_cursor_sdk_and_review_inherits(self):
+        toml_text = """
+[agent]
+skip_permissions = true
+
+[review]
+enabled = true
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantry.toml"
+            path.write_text(toml_text)
+            cfg = load_config(Path(tmp))
+        self.assertEqual(cfg.agent.runner, "cursor-sdk")
+        self.assertEqual(cfg.review.runner, "cursor-sdk")
+
     def test_per_stage_runner_override_from_toml(self):
         toml_text = """
 [agent]

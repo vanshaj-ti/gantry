@@ -45,9 +45,10 @@ from pathlib import Path
 from typing import Any
 
 from . import herdr as _herdr
+from .backends.registry import get_execution_runner as get_runner
 from .config import GantryConfig
 from .redact import proxy_secrets, redact_secrets
-from .runners import get_runner, resolve_proxy_env
+from .runners import resolve_proxy_env
 from .state import RunStore
 from .status import Status
 

@@ -9,10 +9,13 @@ from gantry.backends.protocol import (
 )
 from gantry.backends.registry import (
     DEFAULT_FALLBACK_ORDER,
+    ResolvedBackend,
     capabilities_for,
     get_backend,
+    get_execution_runner,
     list_backends,
     register_backend,
+    resolve_backend,
 )
 
 __all__ = [
@@ -21,9 +24,12 @@ __all__ = [
     "DEFAULT_FALLBACK_ORDER",
     "InvocationResult",
     "InvocationSpec",
+    "ResolvedBackend",
     "SessionRef",
     "capabilities_for",
     "get_backend",
+    "get_execution_runner",
     "list_backends",
     "register_backend",
+    "resolve_backend",
 ]
