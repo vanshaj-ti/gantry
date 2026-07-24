@@ -278,6 +278,12 @@ def cmd_doctor(args) -> int:
 
     if getattr(args, "live_sdk_smoke", False):
         import unittest
+        # Console-script entrypoints put .venv/bin on sys.path[0], not the
+        # checkout root — ensure the repo `tests` package is importable.
+        checkout = Path(__file__).resolve().parents[2]
+        checkout_s = str(checkout)
+        if checkout_s not in sys.path:
+            sys.path.insert(0, checkout_s)
         os.environ["GANTRY_CURSOR_SDK_LIVE"] = "1"
         suite = unittest.defaultTestLoader.loadTestsFromName(
             "tests.test_cursor_sdk_smoke.TestCursorSdkLiveSmoke",
