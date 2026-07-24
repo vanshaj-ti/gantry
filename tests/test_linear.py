@@ -512,11 +512,11 @@ class TestDocStageAttachment(unittest.TestCase):
         self.assertEqual(put_calls, ["https://upload.example/put"])
         self.assertEqual(len([q for q in graphql_calls if "fileUpload" in q]), 1)
         self.assertIn("investigation", store.state(run_id)["linear_docs_posted"])
-        # The completion comment links the uploaded file's assetUrl, not a
-        # separate attachmentCreate card.
-        self.assertEqual(len(posted_comment_bodies), 1)
-        self.assertIn("https://asset.example/file.md", posted_comment_bodies[0])
-        self.assertIn("Investigation stage complete", posted_comment_bodies[0])
+        # Announce (missing create-comment path) + doc attachment comment.
+        self.assertEqual(len(posted_comment_bodies), 2)
+        self.assertTrue(any("Tracking run" in b for b in posted_comment_bodies))
+        self.assertTrue(any("https://asset.example/file.md" in b for b in posted_comment_bodies))
+        self.assertTrue(any("Investigation stage complete" in b for b in posted_comment_bodies))
 
     def test_investigation_complete_reposts_after_content_changes(self):
         """A doc stage can complete more than once for the same run — human
@@ -564,7 +564,83 @@ class TestDocStageAttachment(unittest.TestCase):
                 "# Investigation\n\nrewritten after feedback.\n")
             sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
 
-        self.assertEqual(len(posted_comment_bodies), 2)
+        # Announce once + doc attachment twice (content changed).
+        self.assertEqual(len(posted_comment_bodies), 3)
+        self.assertEqual(sum(1 for b in posted_comment_bodies if "Tracking run" in b), 1)
+        self.assertEqual(sum(1 for b in posted_comment_bodies if "Investigation stage complete" in b), 2)
+
+
+class TestStageProgressComments(unittest.TestCase):
+    """Per-stage start/complete Linear comments — transition-deduped."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _sync(self, run_id, store, bodies):
+        from gantry.linear import sync_issue_status
+
+        def fake_graphql(query, variables, api_key):
+            if "commentCreate" in query:
+                bodies.append(variables["body"])
+                return {"commentCreate": {"success": True}}
+            if "team(id" in query and "states" in query:
+                return {"team": {"states": {"nodes": [
+                    {"id": "s-ip", "name": "In Progress", "type": "started"}]}}}
+            if "team(id" in query and "labels" in query:
+                return {"team": {"labels": {"nodes": []}}}
+            if "issue(id" in query and "labels" in query:
+                return {"issue": {"labels": {"nodes": []}}}
+            if "issueLabelCreate" in query:
+                return {"issueLabelCreate": {"success": True, "issueLabel": {"id": "lbl-1"}}}
+            return {"issueUpdate": {"success": True}}
+
+        with patch("gantry.linear._graphql", side_effect=fake_graphql):
+            sync_issue_status(run_id, store, TEST_TEAM_ID, TEST_API_KEY)
+
+    def test_posts_start_and_complete_once_per_transition(self):
+        run_id = self.eng.create_run("cleanup", "remove apps", tag="chore")
+        store = self.eng.store
+        store.record_linear_issue("issue-progress", run_id)
+        bodies: list[str] = []
+
+        store.update_state(run_id, status="plan_running", current_stage="plan")
+        self._sync(run_id, store, bodies)
+        self._sync(run_id, store, bodies)  # same status — no spam
+        store.update_state(run_id, status="plan_complete", current_stage="plan")
+        self._sync(run_id, store, bodies)
+        store.update_state(run_id, status="build_running", current_stage="build")
+        self._sync(run_id, store, bodies)
+
+        starts = [b for b in bodies if "Starting **plan**" in b]
+        completes = [b for b in bodies if "**Plan** stage complete" in b]
+        builds = [b for b in bodies if "Starting **build**" in b]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(completes), 1)
+        self.assertEqual(len(builds), 1)
+        self.assertTrue(any("Tracking run" in b for b in bodies))
+
+    def test_reentering_build_running_posts_again(self):
+        run_id = self.eng.create_run("cleanup", "remove apps", tag="chore")
+        store = self.eng.store
+        store.record_linear_issue("issue-reenter", run_id)
+        bodies: list[str] = []
+
+        store.update_state(run_id, status="build_running", current_stage="build")
+        self._sync(run_id, store, bodies)
+        store.update_state(run_id, status="review_changes_requested", current_stage="review")
+        self._sync(run_id, store, bodies)
+        store.update_state(run_id, status="build_running", current_stage="build")
+        self._sync(run_id, store, bodies)
+
+        builds = [b for b in bodies if "Starting **build**" in b]
+        self.assertEqual(len(builds), 2)
 
 
 class TestClassifyTicketRunner(unittest.TestCase):

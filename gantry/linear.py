@@ -415,6 +415,73 @@ def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: st
     store.update_state(run_id, **{dedup_field: {**posted, stage: dedup_key}})
 
 
+def _maybe_post_run_announcement(run_id: str, store: Any, issue_id: str,
+                                  status: str, current_stage: str | None,
+                                  api_key: str) -> None:
+    """Guarantee the issue thread names the gantry run at least once.
+
+    Intake posts a create comment, but if that GraphQL call fails after the
+    run is already recorded, webhook retries are idempotent and never re-post.
+    First successful sync then announces the run so humans aren't left with
+    only a stage: label and no run id.
+    """
+    if store.state(run_id).get("linear_run_announced"):
+        return
+    stage_bit = f" (stage `{current_stage}`)" if current_stage else ""
+    post_comment(
+        issue_id,
+        f"Tracking run `{run_id}` — status `{status}`{stage_bit}.",
+        api_key,
+    )
+    store.update_state(run_id, linear_run_announced=True)
+
+
+def _stage_progress_message(status: str, run_id: str) -> str | None:
+    """Human-readable Linear update for notable status transitions, or None
+    to stay quiet (mid-flight awaiting_* ticks, unrecognized statuses)."""
+    from .config import DOC_STAGES
+
+    if status.endswith("_running"):
+        stage = status.removesuffix("_running")
+        return f"Starting **{stage}** stage for run `{run_id}`."
+    if status.endswith("_complete"):
+        stage = status.removesuffix("_complete")
+        # Doc stages already get a richer artifact comment via
+        # _maybe_post_stage_doc — don't double-post a bare "complete".
+        if stage in DOC_STAGES:
+            return None
+        return f"**{stage.capitalize()}** stage complete for run `{run_id}`."
+    if status == "review_approved":
+        return f"**Review** approved for run `{run_id}` — proceeding to ship."
+    if status == "review_changes_requested":
+        return f"**Review** requested changes for run `{run_id}` — returning to build."
+    if status in {"shipped", "shipped_manually"}:
+        return f"**Shipped** run `{run_id}`."
+    if status == "checks_running":
+        return f"Starting **checks** for run `{run_id}`."
+    if status == "e2e_running":
+        return f"Starting **e2e** for run `{run_id}`."
+    return None
+
+
+def _maybe_post_stage_progress(run_id: str, store: Any, issue_id: str,
+                               status: str, api_key: str) -> None:
+    """Post a Linear comment on each notable status *transition*.
+
+    Dedup is transition-based (`linear_last_progress_status`): the same
+    status on every advance tick must not spam the thread, but re-entering
+    e.g. `build_running` after review_changes_requested must post again.
+    """
+    message = _stage_progress_message(status, run_id)
+    if not message:
+        return
+    last = store.state(run_id).get("linear_last_progress_status")
+    if last == status:
+        return
+    post_comment(issue_id, message, api_key)
+    store.update_state(run_id, linear_last_progress_status=status)
+
+
 def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> dict[str, Any]:
     """Keep a run's tracked Linear issue in sync with its gantry state:
 
@@ -425,7 +492,10 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
        (independent of (1): moving investigation -> plan is still
        "in_progress" category-wise, but the visible stage label must still
        advance so the issue shows where the run actually is right now).
-    3. Doc-stage artifact attachment — the completed doc gets attached as a
+    3. Run announcement + per-stage progress comments — create-run id on
+       first sync if missing, then a comment on each start/complete
+       transition (see _maybe_post_stage_progress).
+    4. Doc-stage artifact attachment — the completed doc gets attached as a
        file the first time its *_complete status is seen (see
        _maybe_post_stage_doc).
 
@@ -441,6 +511,8 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
         set_stage_label(issue_id, current_stage, team_id, api_key)
 
     status = run_state.get("status", "")
+    _maybe_post_run_announcement(run_id, store, issue_id, status, current_stage, api_key)
+    _maybe_post_stage_progress(run_id, store, issue_id, status, api_key)
     _maybe_post_stage_doc(run_id, store, issue_id, status, api_key)
     _maybe_post_stage_failure(run_id, store, issue_id, status, api_key)
 
@@ -560,6 +632,7 @@ def handle_issue_created(payload: dict[str, Any], team_id: str, linear_api_key: 
     )
     engine.store.record_linear_issue(issue_id, run_id)
     post_comment(issue_id, f"Classified as `{tag}`. Gantry run `{run_id}` created.", linear_api_key)
+    engine.store.update_state(run_id, linear_run_announced=True)
     return {"tag": tag, "run_id": run_id, "issue_id": issue_id}
 
 
