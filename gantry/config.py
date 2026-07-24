@@ -136,6 +136,7 @@ class ReviewConfig:
                             # needs far fewer turns than build/evidence. Previously
                             # silently inherited StageModel's generic default (60)
                             # because "review" is rarely declared in [models].
+    timeout: int = 900
     checklist: list[str] = field(default_factory=list)  # project-specific items the Spec
                                                           # axis must explicitly address
                                                           # (e.g. "confirm no secrets committed").
@@ -641,6 +642,7 @@ def load_config(target_workspace: Path) -> GantryConfig:
             request_changes_keywords=r.get("request_changes_keywords", ["REQUEST_CHANGES"]),
             escalate_keywords=r.get("escalate_keywords", ["ESCALATE"]),
             max_turns=int(r.get("max_turns", 10)),
+            timeout=int(r.get("timeout", 900)),
             checklist=r.get("checklist", []),
             standards_checklist=r.get("standards_checklist", []),
             keyword_mode=r.get("keyword_mode", "anywhere"),

@@ -118,6 +118,7 @@ escalate_keywords = ["ESCALATE"]
 # Review is an investigation, not open-ended implementation — needs far
 # fewer turns than build/evidence.
 max_turns = 10
+timeout = 900
 # Project-specific items appended to the review prompt that the reviewer
 # must explicitly address, e.g. ["confirm no secrets committed"]. Empty =
 # none (default). Scoped to the SPEC axis only when two_axis = true (spec

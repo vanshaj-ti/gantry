@@ -14,9 +14,7 @@ GantryConfig and the runner/notifier adapters.
 """
 from __future__ import annotations
 
-import json
 import logging
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +22,9 @@ from .backends.registry import get_execution_runner as get_runner
 from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
-from .profiles import snapshot_profile
+from .invocation import InvocationRequest, invoke
 from .redact import proxy_secrets, redact_secrets
-from .runners import resolve_proxy_env
-from .state import RunStore, now_iso
+from .state import RunStore
 from .status import Status
 
 logger = logging.getLogger(__name__)
@@ -38,26 +35,6 @@ logger = logging.getLogger(__name__)
 # timeout — the heartbeat thread dies the instant the gantry process itself
 # does, whereas a wedged-but-alive agent subprocess keeps the heartbeat going.
 HEARTBEAT_INTERVAL = 20
-
-
-def _start_heartbeat(store: RunStore, run_id: str, interval: float | None = None) -> tuple[threading.Event, threading.Thread]:
-    stop = threading.Event()
-
-    def _beat() -> None:
-        # Read the module global at wait-time (not a bound default arg) so
-        # tests can patch gantry.engine.HEARTBEAT_INTERVAL and see it take
-        # effect without needing to thread a parameter through run_agent_stage.
-        while not stop.wait(interval if interval is not None else HEARTBEAT_INTERVAL):
-            store.update_state(run_id, heartbeat_at=now_iso())
-
-    thread = threading.Thread(target=_beat, daemon=True)
-    thread.start()
-    return stop, thread
-
-
-def _stop_heartbeat(stop: threading.Event, thread: threading.Thread) -> None:
-    stop.set()
-    thread.join(timeout=1)
 
 
 class Engine:
@@ -96,8 +73,8 @@ class Engine:
         p = Path(self.cfg.prompts_dir)
         return p if p.is_absolute() else (self.target / p)
 
-    def render_prompt(self, stage: str, run_id: str) -> str:
-        profile = self.cfg.profile_for(stage)
+    def render_prompt(self, stage: str, run_id: str, profile=None) -> str:
+        profile = profile or self.cfg.profile_for(stage)
         template_path = self._prompt_template_path(stage)
         if not template_path.exists():
             # fall back to a minimal generic instruction so a bare repo still runs
@@ -109,7 +86,8 @@ class Engine:
             base = template_path.read_text().replace("{RUN_ID}", run_id)
         preamble = f"{profile.prompt_preamble}\n\n" if profile.prompt_preamble else ""
         return (preamble + self._plan_context_directive(stage) + base + self._stage_skill_directive(stage)
-                + self._skills_directive(stage) + self._evidence_output_directive(stage))
+                + self._skills_directive(stage, profile=profile)
+                + self._evidence_output_directive(stage))
 
     def _prompt_template_path(self, stage: str) -> Path:
         """Which prompt template file to use for this stage.
@@ -196,7 +174,7 @@ class Engine:
             f"required discipline and output format before doing any other work.\n"
         )
 
-    def _skills_directive(self, stage: str) -> str:
+    def _skills_directive(self, stage: str, profile=None) -> str:
         """Scoped skill mandate. Only for build/evidence (execution stages) — NOT
         spec/design/plan, where a methodology library would fight Gantry's own
         stages. Tells the agent a plan already exists: execute, don't re-plan.
@@ -209,7 +187,7 @@ class Engine:
         another round of implementation work. [skills].evidence_directive
         lets a project override evidence's text entirely; unset falls back to
         a verification-focused default distinct from build's."""
-        profile = self.cfg.profile_for(stage)
+        profile = profile or self.cfg.profile_for(stage)
         stage_skill = f"gantry-stage-{stage}"
         enabled = tuple(skill for skill in profile.skills if skill != stage_skill)
         if not enabled:
@@ -240,25 +218,13 @@ class Engine:
         )
 
     def _answer_context(self, run_id: str, stage: str) -> str:
-        # Two independent producers feed a resumed agent stage, and a resume
-        # must see whichever one actually fired or it silently repeats its
-        # prior (rejected/failing) output with no new guidance:
-        #   - review.py / Engine.revise(): writes review-comments.md when a
-        #     reviewer requests changes.
-        #   - advance.py's checks/e2e auto-retry loop: writes answers/build.md
-        #     when repo checks (lint/build/test) or e2e fail, independent of
-        #     any review verdict.
-        # These fire at different points in the pipeline (checks failures
-        # happen before evidence/review even run), so neither can be dropped
-        # in favor of the other. Concatenate whichever exist, most-recent
-        # last so it reads as the final word if both are somehow present.
+        from .feedback import feedback_artifacts_for_stage
+
         parts = []
-        checks_answer = self.store.read_artifact(run_id, f"answers/{stage}.md")
-        if checks_answer:
-            parts.append(f"# Checks/e2e failure detail for this resumed stage\n{checks_answer}")
-        review_comments = self.store.read_artifact(run_id, "review-comments.md")
-        if review_comments:
-            parts.append(f"# Revision comments for this resumed stage\n{review_comments}")
+        for artifact, heading in feedback_artifacts_for_stage(stage):
+            content = self.store.read_artifact(run_id, artifact)
+            if content:
+                parts.append(f"# {heading}\n{content}")
         return "\n\n" + "\n\n".join(parts) if parts else ""
 
     # --- run lifecycle ---
@@ -366,16 +332,7 @@ class Engine:
     def run_agent_stage(self, run_id: str, stage: str, resume: bool = False) -> dict[str, Any]:
         if not self.store.exists(run_id):
             raise ValueError(f"Run not found: {run_id}")
-        profile = self.cfg.profile_for(stage)
         sm = self.cfg.model_for(stage)
-        runner = get_runner(profile.backend)
-        self.store.write_log(
-            run_id, f"{stage}-profile.json", json.dumps(snapshot_profile(profile), indent=2))
-
-        prompt = self.render_prompt(stage, run_id)
-        if resume:
-            prompt += self._answer_context(run_id, stage)
-        self.store.write_log(run_id, f"{stage}-prompt{'-resume' if resume else ''}.md", prompt)
 
         # Clear any question.md from a PRIOR invocation before this one runs
         # — the deterministic question-signal check below must reflect only
@@ -387,101 +344,38 @@ class Engine:
         if question_path.exists():
             question_path.unlink()
 
-        from .sessions import resolve_resume_session_id, save_session_record
-
         work_dir = self.work_dir(run_id)
-        worktree_id = str(work_dir.resolve())
-        session_id = None
-        if resume:
-            decision = resolve_resume_session_id(
-                self.store, run_id, stage,
-                backend=runner.name,
-                profile=profile.role,
-                model=profile.model,
-                worktree_id=worktree_id,
-            )
-            if decision.allowed:
-                session_id = decision.session_id
-            elif decision.fallback_to_artifacts:
-                # Fresh axes / compatibility mismatch: continue with artifact
-                # context in the prompt, but do not native-resume.
-                session_id = None
-            else:
-                raise ValueError(f"No stored session for {run_id}/{stage}; cannot resume")
-
-        # Register any enabled MCP servers for this stage before invoking the agent.
-        from .mcp import ensure_mcp_for_stage
-        mcp_results = ensure_mcp_for_stage(
-            self.cfg, stage, runner.name, work_dir, profile=profile)
-        if mcp_results:
-            self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
         if stage == "build" and not resume:
             self._run_build_pre_hook(run_id, work_dir)
 
-        self._set_status(run_id, f"{stage}_running", current_stage=stage, resumed=resume,
-                         heartbeat_at=now_iso())
-        # Record runner/model before invoking (not just after, in save_session
-        # below) so a live *_running status shows what's actually driving it
-        # right now — session_id isn't known until the agent returns, but
-        # which runner/model is in flight is, and that's the useful part for
-        # `gantry watch`'s detail column while a stage is still running.
-        save_session_record(
-            self.store, run_id, stage,
-            model=profile.model, runner=runner.name,
-            profile=profile.role, profile_version=str(profile.version),
-            worktree_id=worktree_id,
-        )
-        import subprocess as _subprocess
-        stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
-        try:
-            try:
-                proxy = self.cfg.proxy.get(runner.name)
-                result = runner.run(
-                    cwd=work_dir,
-                    prompt=prompt,
-                    model=profile.model,
-                    session_id=session_id,
-                    plan_mode=sm.plan_mode,
-                    skip_permissions=profile.permissions == "allow",
-                    output_format=self.cfg.agent.output_format,
-                    session_name=f"{run_id}-{stage}",
-                    max_turns=profile.turn_budget,
-                    timeout=profile.timeout,
-                    env=resolve_proxy_env(runner.name, proxy),
-                    proxy=proxy,
-                )
-            except _subprocess.TimeoutExpired:
-                # Without this, a killed/timed-out agent subprocess leaves state.json
-                # stuck at "{stage}_running" forever — `gantry watch`/status then lies
-                # about a dead run still being in flight (see recovery notes in the
-                # workflow skill). Mark it failed like any other unsuccessful stage so
-                # the normal retry/escalate machinery (advance.py's Status.BLOCKED/
-                # Status.CHECKS_ESCALATED path) can act on it instead of a human having
-                # to notice a stale lockfile and reset state by hand.
-                self.store.write_log(run_id, f"{stage}.stderr",
-                                     self._redact(
-                                         f"Agent subprocess timed out after {profile.timeout}s"))
-                self._set_status(run_id, f"{stage}_failed")
-                return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
-        finally:
-            _stop_heartbeat(stop_hb, hb_thread)
-        suffix = ".resume" if resume else ""
-        self.store.write_log(run_id, f"{stage}{suffix}.stdout", self._redact(result.stdout))
-        self.store.write_log(run_id, f"{stage}{suffix}.stderr", self._redact(result.stderr))
-        self.store.write_result(run_id, f"{stage}-result.json", result.raw)
-        save_session_record(
-            self.store, run_id, stage,
-            session_id=result.session_id,
-            model=profile.model, runner=runner.name,
-            profile=profile.role, profile_version=str(profile.version),
-            worktree_id=worktree_id,
-            backend_agent_id=result.session_id,
-            terminal_status="ok" if result.ok else "error",
-        )
-        from .cost import accumulate as _accumulate_cost
-        _accumulate_cost(self.store, run_id, stage, result.usage,
-                         runner=runner.name, session_id=result.session_id)
+        outcome = invoke(InvocationRequest(
+            cfg=self.cfg,
+            store=self.store,
+            run_id=run_id,
+            stage=stage,
+            cwd=work_dir,
+            prompt="",
+            prompt_factory=lambda profile: (
+                self.render_prompt(stage, run_id, profile=profile)
+                + (self._answer_context(run_id, stage) if resume else "")
+            ),
+            resume=resume,
+            plan_mode=sm.plan_mode,
+            session_name=f"{run_id}-{stage}",
+            prompt_name=f"{stage}-prompt{'-resume' if resume else ''}.md",
+            start_status=f"{stage}_running",
+            failure_status=f"{stage}_failed",
+            current_stage=stage,
+            heartbeat_interval=HEARTBEAT_INTERVAL,
+            backend_resolver=get_runner,
+        ))
+        result = outcome.result
+        if outcome.timed_out:
+            return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
+        if outcome.cancelled:
+            return {"stage": stage, "ok": False, "session_id": result.session_id,
+                    "error": "cancelled"}
         ok = result.ok
         # Deterministic "the agent has a blocking question" signal — a
         # question.md file, per every stage prompt's instruction, checked
@@ -523,7 +417,8 @@ class Engine:
                         run_id, f"{stage}-gate.stderr",
                         self._redact(f"{stage} stage structural gate failed: {gate['reason']}"))
             status = f"{stage}_complete" if ok else f"{stage}_failed"
-        self._set_status(run_id, status)
+        if self.store.state(run_id).get("status") != Status.CANCELLED:
+            self._set_status(run_id, status)
         return {"stage": stage, "ok": ok, "session_id": result.session_id, "question": has_question}
 
     def _resolver_checks_prompt(self, run_id: str, wt: Path) -> str:
@@ -673,12 +568,6 @@ class Engine:
             prompt = self._resolver_conflict_prompt(run_id, wt, conflict_output)
         else:
             prompt = self._resolver_checks_prompt(run_id, wt)
-        profile = self.cfg.profile_for("resolve")
-        if profile.prompt_preamble:
-            prompt = f"{profile.prompt_preamble}\n\n{prompt}"
-        self.store.write_log(run_id, "resolve-prompt.md", prompt)
-        self.store.write_log(
-            run_id, "resolve-profile.json", json.dumps(snapshot_profile(profile), indent=2))
         # Uses [models.resolve] if the project configures it, else falls back
         # to [models.build]'s model/runner (model_for's own default behavior
         # for an unconfigured stage name). Worth configuring resolve to a
@@ -687,27 +576,24 @@ class Engine:
         # the same issue, so re-running the same model that produced (or
         # missed) the bug is a weaker bet than escalating to a more capable
         # one for the fix-it attempt.
-        runner = get_runner(profile.backend)
-        self._set_status(run_id, Status.RESOLVE_RUNNING, current_stage="build", heartbeat_at=now_iso())
-        stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
-        try:
-            proxy = self.cfg.proxy.get(runner.name)
-            result = runner.run(
-                cwd=wt, prompt=prompt, model=profile.model,
-                session_id=None, plan_mode=False,
-                skip_permissions=profile.permissions == "allow",
-                output_format=self.cfg.agent.output_format, session_name=f"{run_id}-resolve",
-                max_turns=profile.turn_budget, timeout=profile.timeout,
-                env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
-            )
-        finally:
-            _stop_heartbeat(stop_hb, hb_thread)
-        self.store.write_log(run_id, "resolve.stdout", self._redact(result.stdout))
-        self.store.write_log(run_id, "resolve.stderr", self._redact(result.stderr))
-        self.store.write_result(run_id, "resolve-result.json", result.raw)
-        from .cost import accumulate as _accumulate_cost
-        _accumulate_cost(self.store, run_id, "resolve", result.usage,
-                         runner=runner.name, session_id=result.session_id)
+        outcome = invoke(InvocationRequest(
+            cfg=self.cfg,
+            store=self.store,
+            run_id=run_id,
+            stage="resolve",
+            cwd=wt,
+            prompt=prompt,
+            prepend_profile_preamble=True,
+            session_name=f"{run_id}-resolve",
+            start_status=Status.RESOLVE_RUNNING,
+            failure_status=Status.RESOLVE_ESCALATED,
+            current_stage="build",
+            heartbeat_interval=HEARTBEAT_INTERVAL,
+            backend_resolver=get_runner,
+        ))
+        result = outcome.result
+        if outcome.cancelled:
+            return {"agent_ok": False, "cancelled": True}
 
         if failure_kind == "conflict":
             # ship.py owns re-verification here (re-attempting the actual

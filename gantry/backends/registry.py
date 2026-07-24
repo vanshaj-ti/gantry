@@ -52,6 +52,16 @@ class BackendRunnerAdapter:
         spec = invocation_from_runner_kwargs(backend=self.name, **kwargs)
         return self._backend.invoke(spec).to_runner_result()
 
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return self._backend.capabilities
+
+    def invoke(self, spec):
+        return self._backend.invoke(spec)
+
+    def cancel(self, session=None) -> bool:
+        return self._backend.cancel(session)
+
 
 def list_backends() -> list[str]:
     return sorted(_BACKENDS)

@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -47,9 +46,7 @@ from typing import Any
 from . import herdr as _herdr
 from .backends.registry import get_execution_runner as get_runner
 from .config import GantryConfig
-from .profiles import profile_for, snapshot_profile
-from .redact import proxy_secrets, redact_secrets
-from .runners import resolve_proxy_env
+from .invocation import InvocationRequest, invoke
 from .state import RunStore
 from .status import Status
 
@@ -60,19 +57,6 @@ REVIEW_ARTIFACTS = [
     "implementation-plan.md", "build-summary.md", "evidence-report.md",
     "scope.json", "checks.json",
 ]
-
-# RunStore.save_session/write_result do a read-modify-write over one shared
-# JSON file per run (sessions.json, cost.json) with no file locking of their
-# own — fine for the existing serial call pattern every other stage uses, but
-# the two axes run truly concurrently (ThreadPoolExecutor, real OS threads)
-# and both call save_session (their own session key) and cost.accumulate
-# (their own stage key) against the SAME underlying file. Two threads racing
-# read-modify-write on the same file corrupts it (one thread's write clobbers
-# the other's, or interleaves invalid JSON) — this lock serializes just those
-# calls so each read-modify-write cycle completes atomically relative to the
-# other axis, without limiting the actual LLM-call concurrency the two axes
-# get from the runner subprocess itself (which releases the GIL while blocked).
-_SHARED_STATE_LOCK = threading.Lock()
 
 VALID_FINDING_ACTIONS = {"blocking", "ask-user", "no-op"}
 # Fail-closed default (Task 2/CONFIRMED decisions): a finding with a missing,
@@ -155,6 +139,7 @@ def _parse_findings(text: str) -> list[dict[str, str]] | None:
         out.append({
             "severity": str(item.get("severity") or "Suggestion"),
             "action": action,
+            "category": str(item.get("category") or "").strip().lower(),
             "location": str(item.get("location") or ""),
             "description": str(item.get("description") or ""),
             "recommendation": str(item.get("recommendation") or ""),
@@ -421,7 +406,8 @@ _FALLBACK_TEMPLATES = {
         "conformance (see instructions below). Reply with exactly one of APPROVE, "
         "REQUEST_CHANGES, or ESCALATE, a Verification Story section, a fenced "
         "```json findings block ({\"findings\": [...]}, each with severity/action/"
-        "location/description/recommendation — action defaults to ask-user if "
+        "category/location/description/recommendation — category is one of requirement, "
+        "architecture, diagnosis, approach, scope, implementation, proof; action defaults to ask-user if "
         "unclear), followed by your reasoning.\n"
     ),
     "standards": (
@@ -430,7 +416,8 @@ _FALLBACK_TEMPLATES = {
         "conventions (see instructions below). Reply with exactly one of APPROVE, "
         "REQUEST_CHANGES, or ESCALATE, a Verification Story section, a fenced "
         "```json findings block ({\"findings\": [...]}, each with severity/action/"
-        "location/description/recommendation — action defaults to ask-user if "
+        "category/location/description/recommendation — category is one of requirement, "
+        "architecture, diagnosis, approach, scope, implementation, proof; action defaults to ask-user if "
         "unclear), followed by your reasoning.\n"
     ),
 }
@@ -472,46 +459,25 @@ def _run_one_axis(axis: str, store: RunStore, run_id: str, cfg: GantryConfig, cw
     checklist_items = cfg.review.checklist if axis == "spec" else cfg.review.standards_checklist
 
     prompt = _build_axis_prompt(store, run_id, cwd, base, template, cfg, checklist_items, high_risk_files)
-    profile = profile_for(f"review-{axis}", cfg, stage=f"review_{axis}")
-    if profile.prompt_preamble:
-        prompt = f"{profile.prompt_preamble}\n\n{prompt}"
-    store.write_log(run_id, f"review-{axis}-prompt.md", prompt)
-    store.write_log(
-        run_id, f"review-{axis}-profile.json",
-        json.dumps(snapshot_profile(profile), indent=2),
-    )
-
-    runner = get_runner(profile.backend)
-
-    from .mcp import ensure_mcp_for_stage
-    mcp_results = ensure_mcp_for_stage(
-        cfg, "review", runner.name, cwd, profile=profile)
-    if mcp_results:
-        store.write_log(run_id, f"review-{axis}-mcp.json", json.dumps(mcp_results, indent=2))
-
-    with _SHARED_STATE_LOCK:
-        session_id = store.get_session_id(run_id, session_key)
-        store.save_session(run_id, session_key, model=profile.model, runner=runner.name)
-
-    proxy = cfg.proxy.get(runner.name)
-    result = runner.run(
-        cwd=cwd, prompt=prompt, model=profile.model,
-        session_id=session_id, plan_mode=False,
-        skip_permissions=profile.permissions == "allow",
-        output_format="json", session_name=f"{run_id}-review-{axis}",
-        max_turns=profile.turn_budget, timeout=profile.timeout,
-        env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
-    )
-
-    secrets = proxy_secrets(cfg)
-    store.write_log(run_id, f"review-{axis}.stdout", redact_secrets(result.stdout, extra_secrets=secrets))
-    store.write_log(run_id, f"review-{axis}.stderr", redact_secrets(result.stderr, extra_secrets=secrets))
-    from .cost import accumulate as _accumulate_cost
-    with _SHARED_STATE_LOCK:
-        store.save_session(run_id, session_key, session_id=result.session_id,
-                           model=profile.model, runner=runner.name)
-        _accumulate_cost(store, run_id, session_key, result.usage,
-                         runner=runner.name, session_id=result.session_id)
+    outcome = invoke(InvocationRequest(
+        cfg=cfg,
+        store=store,
+        run_id=run_id,
+        stage=session_key,
+        session_key=session_key,
+        mcp_stage="review",
+        cwd=cwd,
+        prompt=prompt,
+        prepend_profile_preamble=True,
+        resume_existing=True,
+        output_format="json",
+        log_prefix=f"review-{axis}",
+        result_name=f"review-{axis}-invocation-result.json",
+        session_name=f"{run_id}-review-{axis}",
+        backend_resolver=get_runner,
+    ))
+    result = outcome.result
+    profile = outcome.profile
 
     text = result.raw.get("result", "") if isinstance(result.raw, dict) else result.stdout
     text = str(text) or result.stdout
@@ -542,7 +508,8 @@ def _combined_comments_md(spec: dict[str, Any], standards: dict[str, Any]) -> st
             lines.append("### Findings\n")
             for f in findings:
                 lines.append(
-                    f"- **[{f['severity']}/{f['action']}]** {f['location']}: "
+                    f"- **[{f['severity']}/{f['action']}"
+                    f"{('/' + f['category']) if f.get('category') else ''}]** {f['location']}: "
                     f"{f['description']} — _{f['recommendation']}_\n")
         lines.append(f"\n### Full response\n\n{axis['result']}\n")
         return "".join(lines)
@@ -562,22 +529,14 @@ def _run_review_two_axis(store: RunStore, run_id: str, cfg: GantryConfig, cwd: P
 
     high_risk_files = _high_risk_files_for(store, run_id)
 
-    from .engine import _start_heartbeat, _stop_heartbeat
-    stop_hb, hb_thread = _start_heartbeat(store, run_id)
-    try:
-        # ThreadPoolExecutor over the two axes — same concurrency pattern as
-        # checks.py::run_repo_checks' parallel=true commands (subprocess.run
-        # inside each axis releases the GIL while the agent CLI subprocess is
-        # running, so this is real wall-clock parallelism for the ~2x LLM
-        # calls two_axis costs, not just concurrency theater).
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {
-                pool.submit(_run_one_axis, "spec", store, run_id, cfg, cwd, base, high_risk_files): "spec",
-                pool.submit(_run_one_axis, "standards", store, run_id, cfg, cwd, base, high_risk_files): "standards",
-            }
-            axis_results = {futures[future]: future.result() for future in futures}
-    finally:
-        _stop_heartbeat(stop_hb, hb_thread)
+    # ThreadPoolExecutor over the two axes — persistence is serialized inside
+    # invocation.py, while both backend calls remain wall-clock parallel.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            pool.submit(_run_one_axis, "spec", store, run_id, cfg, cwd, base, high_risk_files): "spec",
+            pool.submit(_run_one_axis, "standards", store, run_id, cfg, cwd, base, high_risk_files): "standards",
+        }
+        axis_results = {futures[future]: future.result() for future in futures}
 
     spec = axis_results["spec"]
     standards = axis_results["standards"]
@@ -598,6 +557,8 @@ def _run_review_two_axis(store: RunStore, run_id: str, cfg: GantryConfig, cwd: P
     }
     store.write_result(run_id, "review-result.json", out)
 
+    if store.state(run_id).get("status") == Status.CANCELLED:
+        return out
     status = {"APPROVE": Status.REVIEW_APPROVED, "REQUEST_CHANGES": Status.REVIEW_CHANGES_REQUESTED,
               "ESCALATE": Status.REVIEW_ESCALATED}[combined_verdict]
     store.update_state(run_id, status=status, review_verdict=combined_verdict)
@@ -624,13 +585,6 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
         "or ESCALATE, followed by your reasoning.\n")
 
     prompt = _build_prompt(store, run_id, cwd, base, template, cfg)
-    profile = profile_for("review-spec", cfg, stage="review_spec")
-    if profile.prompt_preamble:
-        prompt = f"{profile.prompt_preamble}\n\n{prompt}"
-    store.write_log(run_id, "review-prompt.md", prompt)
-    store.write_log(
-        run_id, "review-profile.json", json.dumps(snapshot_profile(profile), indent=2))
-
     # Unlike engine.run_agent_stage's plan/build/evidence stages, this used
     # to only report "review_running" to herdr's sidebar without ever
     # writing it to state.json — `gantry status`/`gantry watch` kept
@@ -639,55 +593,25 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     # with no visible "in progress" state at all.
     store.update_state(run_id, status=Status.REVIEW_RUNNING, current_stage="review")
     _report_herdr(cfg, run_id, "review_running")
-    runner = get_runner(profile.backend)
-
-    # Register any enabled MCP servers for review (e.g. codebase-memory), same
-    # as engine.run_agent_stage does for plan/build/evidence.
-    from .mcp import ensure_mcp_for_stage
-    mcp_results = ensure_mcp_for_stage(
-        cfg, "review", runner.name, cwd, profile=profile)
-    if mcp_results:
-        store.write_log(run_id, "review-mcp.json", json.dumps(mcp_results, indent=2))
-
-    session_id = store.get_session_id(run_id, "review")
-    # Save runner/model BEFORE invoking (mirrors engine.run_agent_stage) so
-    # `gantry watch`'s AGENT/MODEL columns aren't blank for the whole duration
-    # of review_running — session_id isn't known until the agent returns, but
-    # which runner/model is driving it right now is, and that's what the
-    # live-status columns are for.
-    store.save_session(run_id, "review", model=profile.model, runner=runner.name)
-    # This is now an agentic investigation (the reviewer reads files, runs git
-    # diff, re-checks tests itself), so it needs the same headless auto-approve
-    # the other stages get, and more turns than a single-shot prompt needed.
-    from .engine import _start_heartbeat, _stop_heartbeat
-    stop_hb, hb_thread = _start_heartbeat(store, run_id)
-    try:
-        proxy = cfg.proxy.get(runner.name)
-        result = runner.run(
-            cwd=cwd, prompt=prompt, model=profile.model,
-            session_id=session_id, plan_mode=False,
-            skip_permissions=profile.permissions == "allow",
-            output_format="json", session_name=f"{run_id}-review",
-            max_turns=profile.turn_budget, timeout=profile.timeout,
-            env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
-        )
-    finally:
-        _stop_heartbeat(stop_hb, hb_thread)
-    # Unlike run_agent_stage, this never logged raw stdout/stderr — a
-    # failed review (result.ok=False, empty result text) left literally no
-    # diagnostic trail beyond review-result.json's bare {"ok": false,
-    # "verdict": "ESCALATE"}, no way to tell WHY the runner call failed.
-    # Redact known-sensitive values (auth env vars, this config's proxy
-    # api_key_env/headers values) before persisting subprocess output to disk
-    # — see redact.py's module docstring for the leak vector this closes.
-    secrets = proxy_secrets(cfg)
-    store.write_log(run_id, "review.stdout", redact_secrets(result.stdout, extra_secrets=secrets))
-    store.write_log(run_id, "review.stderr", redact_secrets(result.stderr, extra_secrets=secrets))
-    store.save_session(run_id, "review", session_id=result.session_id,
-                       model=profile.model, runner=runner.name)
-    from .cost import accumulate as _accumulate_cost
-    _accumulate_cost(store, run_id, "review", result.usage,
-                     runner=runner.name, session_id=result.session_id)
+    outcome = invoke(InvocationRequest(
+        cfg=cfg,
+        store=store,
+        run_id=run_id,
+        stage="review_spec",
+        session_key="review",
+        mcp_stage="review",
+        cwd=cwd,
+        prompt=prompt,
+        prepend_profile_preamble=True,
+        resume_existing=True,
+        output_format="json",
+        log_prefix="review",
+        result_name="review-invocation-result.json",
+        session_name=f"{run_id}-review",
+        backend_resolver=get_runner,
+    ))
+    result = outcome.result
+    profile = outcome.profile
 
     text = result.raw.get("result", "") if isinstance(result.raw, dict) else result.stdout
     verdict = _parse_verdict(str(text) or result.stdout, cfg) if result.ok else "ESCALATE"
@@ -696,6 +620,8 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
            "session_id": result.session_id, "result": str(text)[:8000]}
     store.write_result(run_id, "review-result.json", out)
 
+    if store.state(run_id).get("status") == Status.CANCELLED:
+        return out
     status = {"APPROVE": Status.REVIEW_APPROVED, "REQUEST_CHANGES": Status.REVIEW_CHANGES_REQUESTED,
               "ESCALATE": Status.REVIEW_ESCALATED}[verdict]
     store.update_state(run_id, status=status, review_verdict=verdict)

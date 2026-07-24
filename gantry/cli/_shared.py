@@ -10,17 +10,9 @@ import json
 import os
 from pathlib import Path
 
-from ..config import DOC_STAGES, load_config
+from ..config import load_config
 from ..engine import Engine
-
-# Statuses where a run is actually waiting on a human decision — the set
-# `gantry listen` matches replies against.
-NEEDS_INPUT_STATUSES = {
-    "blocked", "review_escalated", "checks_high_risk_escalated",
-    *(f"{stage}_complete" for stage in DOC_STAGES),  # always human-gated — never auto-advanced
-    *(f"{stage}_failed" for stage in DOC_STAGES),
-    "plan_failed", "build_failed", "evidence_failed",
-}
+from ..feedback import NEEDS_INPUT_STATUSES as NEEDS_INPUT_STATUSES
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 

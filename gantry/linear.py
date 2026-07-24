@@ -31,6 +31,7 @@ from typing import Any
 
 from .config import DOC_STAGES, load_config
 from .engine import Engine
+from .feedback import FeedbackRoute, reply_prompt, route_for_state, route_feedback
 from .notify import LinearNotifier
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,11 @@ def set_stage_label(issue_id: str, stage: str, team_id: str, api_key: str) -> No
 _GANTRY_COMMENT_PREFIX = "Gantry: "
 
 
+def feedback_reply_prompt(route: FeedbackRoute) -> str:
+    """Linear presentation of the shared route's reply choices."""
+    return reply_prompt(route, channel="linear")
+
+
 def post_comment(issue_id: str, body: str, api_key: str) -> None:
     _graphql(
         "mutation($issueId: String!, $body: String!) { "
@@ -199,7 +205,7 @@ def post_stage_doc(issue_id: str, stage: str, artifact_path: Path, api_key: str)
     post_comment(
         issue_id,
         f"{stage.capitalize()} stage complete — [{artifact_path.name}]({asset_url})\n\n"
-        f"Reply `approve` to move on, or reply with feedback to send it back for another pass.",
+        f"{feedback_reply_prompt(route_feedback(f'{stage}_complete'))}",
         api_key,
     )
 
@@ -393,9 +399,17 @@ def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: st
     posted = store.state(run_id).get(dedup_field) or {}
     if posted.get(stage) == dedup_key:
         return
+    review_result = (
+        store.read_result(run_id, "review-result.json")
+        if status == "review_escalated"
+        else None
+    )
+    route = route_for_state(store.state(run_id), review_result=review_result)
     post_comment(
         issue_id,
-        f"{framing}\n\n{detail}\n\nReply with an answer/clarification to resume this stage.",
+        f"{framing}\n\n{detail}\n\n"
+        f"Feedback routes to `{route.target_stage}` via `{route.artifact}`.\n"
+        f"{feedback_reply_prompt(route)}",
         api_key,
     )
     store.update_state(run_id, **{dedup_field: {**posted, stage: dedup_key}})
@@ -454,17 +468,23 @@ def classify_ticket(title: str, description: str, *,
     given, so a codex-only install doesn't hard-depend on `claude` being on
     PATH. model="" lets the runner pick its own default."""
     from .backends.registry import get_execution_runner
-    from .profiles import profile_for, snapshot_profile
+    from .config import GantryConfig
+    from .invocation import InvocationRequest, invoke
     from .runners import get_runner
 
-    profile = None
-    if project_root is not None:
-        profile = profile_for("classifier", load_config(project_root))
-        runner = runner or profile.backend
-        model = model or profile.model
-    if not runner:
-        runner = "claude-code"
-
+    cfg = load_config(project_root) if project_root is not None else GantryConfig()
+    if project_root is None and not runner:
+        cfg.profiles["classifier"] = {
+            **cfg.profiles.get("classifier", {}),
+            "backend": "claude-code",
+        }
+    if runner or model:
+        override = dict(cfg.profiles.get("classifier", {}))
+        if runner:
+            override["backend"] = runner
+        if model:
+            override["model"] = model
+        cfg.profiles["classifier"] = override
     prompt = f"""Classify this Linear ticket into exactly one tag: feature, bug, hotfix, research, chore.
 
 - feature: new capability or behavior that doesn't exist yet
@@ -477,20 +497,24 @@ Title: {title}
 Description: {description}
 
 Respond with exactly one word: the tag."""
-    if profile and profile.prompt_preamble:
-        prompt = f"{profile.prompt_preamble}\n\n{prompt}"
-    if profile:
-        logger.debug("resolved classifier profile: %s", snapshot_profile(profile))
-    try:
-        execution_runner = get_runner(runner)
-    except ValueError:
-        execution_runner = get_execution_runner(runner)
-    result = execution_runner.run(
-        cwd=project_root or Path.cwd(), prompt=prompt, model=model,
-        max_turns=profile.turn_budget if profile else 1,
-        timeout=profile.timeout if profile else 900,
-        skip_permissions=profile.permissions == "allow" if profile else True,
-    )
+    def resolve(name: str):
+        try:
+            return get_runner(name)
+        except ValueError:
+            return get_execution_runner(name)
+
+    outcome = invoke(InvocationRequest(
+        cfg=cfg,
+        stage="classifier",
+        role="classifier",
+        cwd=project_root or Path.cwd(),
+        prompt=prompt,
+        prepend_profile_preamble=True,
+        output_format="json",
+        session_name="linear-classifier",
+        backend_resolver=resolve,
+    ))
+    result = outcome.result
     text = (result.raw.get("result") or "").strip().lower() if result.raw else ""
     for tag in QUEUE_TAGS:
         if tag in text:

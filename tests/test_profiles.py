@@ -65,11 +65,13 @@ class TestLegacyConfigCompilation(unittest.TestCase):
         cfg.review.runner = "codex-cli"
         cfg.review.model = "reviewer"
         cfg.review.max_turns = 8
+        cfg.review.timeout = 321
         for stage in ("review_spec", "review_standards"):
             profile = profile_for_stage(stage, cfg)
             self.assertEqual(profile.backend, "codex-cli")
             self.assertEqual(profile.model, "reviewer")
             self.assertEqual(profile.turn_budget, 8)
+            self.assertEqual(profile.timeout, 321)
 
     def test_resolver_preserves_build_fallback_and_doubled_budget(self):
         cfg = GantryConfig()

@@ -13,6 +13,7 @@ from .failure_detail import (
     _ship_checks_failure_detail,
     _spec_gate_failure_detail,
 )
+from .feedback import reply_prompt, route_for_state
 from .labels import label
 
 _STATUS_ICON = {
@@ -51,6 +52,15 @@ def notify_message(
     icon = _icon(status)
     header = f"{icon} *{_escape_md(run_id)}*\n{_escape_md(label(status))}"
     result = result or {}
+    review_result = (
+        store.read_result(run_id, "review-result.json")
+        if status in ("review_escalated", "review_changes_requested")
+        else None
+    )
+    route = route_for_state(
+        {**store.state(run_id), "status": status}, review_result=review_result,
+    )
+    replies = reply_prompt(route)
 
     if status in ("shipped", "shipped_manually") or status.endswith("_escalated"):
         from .cost import report_for_run
@@ -72,9 +82,7 @@ def notify_message(
         if isinstance(result.get("raw"), dict):
             agent_text = (result["raw"].get("result") or "")[:600]
         doc_note = f"\n{_escape_md(agent_text)}\n" if agent_text else ""
-        return (f"{header}\n{doc_note}\n"
-                f"*Reply 1* to approve and move on.\n"
-                f"*Reply 2* with feedback to have it rewritten.")
+        return f"{header}\n{doc_note}\n{replies}"
 
     if status == "blocked":
         blocked_on = store.state(run_id).get("blocked_on", "checks")
@@ -87,8 +95,7 @@ def notify_message(
         return (f"{header}\n\n"
                 f"*Blocked on:* {blocked_on} (auto-retry attempt {retry_count})\n"
                 f"{detail}\n\n"
-                f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere).\n"
-                f"*Reply 2* with guidance to send it back for a rebuild.")
+                f"{replies}")
 
     if status == "ship_checks_failed":
         ship_result = store.read_result(run_id, "ship-checks-result.json") or {}
@@ -99,9 +106,7 @@ def notify_message(
                 f"{detail}\n\n"
                 f"This always requires a human decision, regardless of auto_ship — a ship-time "
                 f"re-verification found a real problem, not a push/PR mechanics error.\n\n"
-                f"*Reply 1* to re-check now (only helps if the issue already got fixed elsewhere) "
-                f"and re-attempt ship.\n"
-                f"*Reply 2* with guidance to send it back for a rebuild.")
+                f"{replies}")
 
     if status == "checks_high_risk_escalated":
         from .config import load_config
@@ -111,8 +116,7 @@ def notify_message(
                 f"{detail}\n\n"
                 f"This always requires a human decision, regardless of "
                 f"auto_approve_docs/auto_ship/auto_resolve settings.\n\n"
-                f"*Reply 1* to approve and let the run continue.\n"
-                f"*Reply 2* with guidance to send it back for a rebuild.")
+                f"{replies}")
 
     if status == "checks_escalated":
         blocked_on = store.state(run_id).get("blocked_on", "checks")
@@ -125,8 +129,7 @@ def notify_message(
         return (f"{header}\n\n"
                 f"Auto-retry exhausted after {retry_count} attempt(s).\n"
                 f"{detail}\n\n"
-                f"*Reply 1* with guidance to send it back for a rebuild.\n"
-                f"*Reply 2* to leave it — you'll investigate yourself.")
+                f"{replies}")
 
     if status == "resolve_escalated":
         blocked_on = store.state(run_id).get("blocked_on", "checks")
@@ -139,8 +142,7 @@ def notify_message(
         return (f"{header}\n\n"
                 f"Resolver agent exhausted {resolve_attempts} attempt(s) without a passing fix.\n"
                 f"{detail}\n\n"
-                f"*Reply 1* with guidance to send it back for a rebuild.\n"
-                f"*Reply 2* to leave it — you'll investigate yourself.")
+                f"{replies}")
 
     if status.endswith("_failed"):
         stage = status.removesuffix("_failed")
@@ -157,23 +159,19 @@ def notify_message(
         if subtype == "error_max_turns":
             return (f"{header}\n\n"
                     f"Ran out of turns before finishing the *{stage}* stage.\n\n"
-                    f"*Reply 1* to retry the same stage.\n"
-                    f"*Reply 2* to leave it — you'll check the logs yourself later.")
+                    f"{replies}")
         gate_detail = _spec_gate_failure_detail(store, run_id) if stage == "spec" else ""
         gate_note = f"\n{_escape_md(gate_detail)}\n" if gate_detail else ""
         return (f"{header}\n\n"
                 f"Stage errored (`{subtype or 'unknown'}`).\n"
                 f"{_escape_md(agent_text)}\n{gate_note}\n"
-                f"*Reply 1* to retry.\n"
-                f"*Reply 2* to leave it — you'll check the logs yourself later.")
+                f"{replies}")
 
     if status == "review_escalated":
-        review_result = store.read_result(run_id, "review-result.json")
         detail = _review_findings_detail(review_result)
         return (f"{header}\n\n"
                 f"{detail}\n\n"
-                f"*Reply 1* to approve as-is.\n"
-                f"*Reply 2* with guidance to send back for changes.")
+                f"{replies}")
 
     if status == "review_changes_requested":
         review_result = store.read_result(run_id, "review-result.json")

@@ -71,6 +71,7 @@ Return a concise review with:
        {
          "severity": "Critical | Important | Suggestion",
          "action": "blocking | ask-user | no-op",
+        "category": "requirement | architecture | diagnosis | approach | scope | implementation | proof",
          "location": "path/to/file.py:123 or an artifact reference",
          "description": "what's wrong",
          "recommendation": "what to do about it"
@@ -78,7 +79,8 @@ Return a concise review with:
      ]
    }
    ```
-   Every finding MUST include an `action`. If you are unsure how to classify
+   Every finding MUST include an `action` and responsibility `category`.
+   If you are unsure how to classify
    a finding, use `"ask-user"` — never omit the field and never guess
    `"no-op"` just to avoid flagging something. An empty `findings` array
    (`{"findings": []}`) is valid and means a clean pass.

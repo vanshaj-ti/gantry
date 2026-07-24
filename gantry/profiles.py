@@ -105,9 +105,10 @@ def _legacy_model(cfg: GantryConfig, role: str, stage: str) -> StageModel:
 
 
 def _legacy_execution(cfg: GantryConfig, role: str, stage: str) -> tuple[str, str, int, int]:
-    if role in ("review-spec", "review-standards", "ship-metadata"):
-        turns = 10 if role == "ship-metadata" else cfg.review.max_turns
-        return cfg.review.runner, cfg.review.model, turns, 900
+    if role in ("review-spec", "review-standards"):
+        return cfg.review.runner, cfg.review.model, cfg.review.max_turns, cfg.review.timeout
+    if role == "ship-metadata":
+        return cfg.review.runner, cfg.review.model, 10, 900
     if role == "classifier":
         model = cfg.models.get("classifier")
         return (

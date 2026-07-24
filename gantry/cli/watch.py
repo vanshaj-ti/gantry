@@ -7,6 +7,7 @@ import sys
 import time
 
 from ..config import DOC_STAGES, load_config
+from ..feedback import route_for_state
 from ..notify import fetch_telegram_replies, get_notifier
 from ..state import RunStore
 from ._shared import NEEDS_INPUT_STATUSES, _notify, _target
@@ -265,10 +266,41 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
     status = st.get("status", "")
     eng = Engine(store.target, cfg)
     lowered = text.lower().strip()
+    review_result = (
+        store.read_result(run_id, "review-result.json")
+        if status == "review_escalated"
+        else None
+    )
+    route = route_for_state(st, review_result=review_result)
+
+    numbered = int(lowered[0]) - 1 if lowered[:1].isdigit() else None
+    if numbered is not None and 0 <= numbered < len(route.reply_options):
+        action = route.reply_options[numbered]
+    elif _is_affirmative_reply(lowered):
+        action = route.reply_options[0]
+    elif "revise" in route.reply_options:
+        action = "revise"
+    else:
+        action = route.reply_options[0]
+
+    def feedback_text() -> str:
+        return text[1:].strip() if lowered[:1].isdigit() else text
+
+    def write_routed_feedback(comment: str) -> None:
+        path = store.artifact_path(run_id, route.artifact)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(comment or "See reply.")
+
+    def resume_routed_stage(comment: str) -> None:
+        if route.artifact == "review-comments.md":
+            eng.revise(run_id, route.target_stage, comment or "See reply.")
+        else:
+            write_routed_feedback(comment)
+        eng.run_agent_stage(run_id, route.target_stage, resume=True)
 
     if status.endswith("_complete") and status.removesuffix("_complete") in DOC_STAGES:
         stage = status.removesuffix("_complete")
-        if lowered.startswith("1") or _is_affirmative_reply(lowered):
+        if action == "approve":
             nxt = eng.approve(run_id, stage)
             _notify(store, notifier, run_id, f"Approved *{run_id}* {stage} — moved to `{nxt}`.")
         else:
@@ -277,10 +309,8 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
             # run_agent_stage's resume path actually reads — and resume now,
             # rather than calling revise() (which writes review-comments.md,
             # a file only the build-resume auto-transition happens to consume).
-            comment = text[1:].strip() if lowered.startswith("2") else text
-            answer_path = store.artifact_path(run_id, f"answers/{stage}.md")
-            answer_path.parent.mkdir(parents=True, exist_ok=True)
-            answer_path.write_text(comment or "See Telegram reply.")
+            comment = feedback_text()
+            write_routed_feedback(comment)
             _notify(store, notifier, run_id, f"Rewriting *{run_id}* {stage} with your feedback…")
             eng.run_agent_stage(run_id, stage, resume=True)
             new_status = store.state(run_id).get("status", "")
@@ -288,19 +318,48 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
         return
 
     if status == "blocked":
-        if lowered.startswith("1"):
+        if action == "retry":
             eng.run_checks(run_id)
             new_status = store.state(run_id).get("status", "")
             _notify(store, notifier, run_id, f"Re-checked *{run_id}* — now: {label(new_status)}")
         else:
-            comment = text[1:].strip() if lowered.startswith("2") else text
-            eng.revise(run_id, "build", comment or "See Telegram reply.")
+            comment = feedback_text()
+            write_routed_feedback(comment)
+            eng.run_agent_stage(run_id, route.target_stage, resume=True)
             _notify(store, notifier, run_id, f"Sent *{run_id}* back to build with your comment.")
+        return
+
+    if status in (
+        "checks_escalated", "resolve_escalated", "checks_high_risk_escalated",
+        "ship_checks_failed", "ship_failed",
+    ):
+        if action == "approve":
+            store.update_state(
+                run_id, status="build_complete", current_stage="build", blocked_on=None,
+            )
+            from ..advance import advance_run
+            advance_run(eng, run_id)
+            _notify(store, notifier, run_id, f"Approved *{run_id}* — continuing.")
+        elif action == "retry_ship":
+            from ..ship import ship_run
+            out = ship_run(eng, run_id)
+            _notify(
+                store, notifier, run_id,
+                f"*{run_id}* ship: {'completed' if out.get('ok') else 'failed again'}.",
+            )
+        elif action == "revise":
+            resume_routed_stage(feedback_text())
+            _notify(
+                store, notifier, run_id,
+                f"Sent *{run_id}* back to {route.target_stage} with your comment.",
+            )
+        else:
+            _notify(store, notifier, run_id, f"Noted — *{run_id}* left as-is.")
         return
 
     if status.endswith("_failed"):
         stage = status.removesuffix("_failed")
-        if lowered.startswith("1") or _is_affirmative_reply(lowered):
+        if action == "retry_stage":
             # A stage that timed out (or crashed before the agent returned
             # anything) never got a session_id saved — run_agent_stage
             # raises ValueError if resume=True is attempted with no stored
@@ -323,22 +382,23 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
         return
 
     if status == "review_escalated":
-        if lowered.startswith("1") or _is_affirmative_reply(lowered):
+        if action == "approve":
             eng.approve(run_id, "review")
             _notify(store, notifier, run_id, f"Approved *{run_id}* — proceeding.")
         else:
-            comment = text[1:].strip() if lowered.startswith("2") else text
-            eng.revise(run_id, "build", comment or "See Telegram reply.")
-            _notify(store, notifier, run_id, f"Sent *{run_id}* back to build with your comment.")
+            comment = feedback_text()
+            resume_routed_stage(comment)
+            _notify(
+                store, notifier, run_id,
+                f"Sent *{run_id}* back to {route.target_stage} with your comment.",
+            )
         return
 
     # Fallback: treat the reply as the answer to whatever the agent asked mid-stage
     # (the "clarifying question" branch of notify_message). We don't know which
     # exact stage without re-deriving it from status — best-effort from current_stage.
-    stage = st.get("current_stage", "build")
-    answer_path = store.artifact_path(run_id, f"answers/{stage}.md")
-    answer_path.parent.mkdir(parents=True, exist_ok=True)
-    answer_path.write_text(text)
+    stage = route.target_stage
+    write_routed_feedback(text)
     _notify(store, notifier, run_id, f"Recorded your answer for *{run_id}* stage `{stage}`, resuming…")
     eng.run_agent_stage(run_id, stage, resume=True)
     new_status = store.state(run_id).get("status", "")

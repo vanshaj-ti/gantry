@@ -201,8 +201,9 @@ class TestStageResumeContract(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_resume_requires_prior_session(self):
+        # Isolated stages still require a stored session when resume=True.
         with self.assertRaises(ValueError):
-            self.eng.run_agent_stage(self.run_id, "build", resume=True)
+            self.eng.run_agent_stage(self.run_id, "investigation", resume=True)
 
     def test_resume_passes_session_id_to_runner(self):
         self.eng.store.save_session(self.run_id, "build", session_id="prior-build",
