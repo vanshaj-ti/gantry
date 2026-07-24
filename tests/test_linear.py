@@ -730,5 +730,44 @@ class TestStatusToCategoryAutonomy(unittest.TestCase):
         )
 
 
+class TestSyncRunnerFailedReviewStaysInProgress(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_runner_failed_review_escalated_maps_in_progress(self):
+        """Regression: Linear showed Blocked while advance auto-retried a dead review."""
+        from unittest.mock import patch
+        from gantry.linear import sync_issue_status
+
+        run_id = self.eng.create_run("t", "r", tag="chore")
+        store = self.eng.store
+        store.record_linear_issue("issue-1", run_id)
+        store.update_state(run_id, status="review_escalated", current_stage="review")
+        store.write_result(run_id, "review-result.json", {
+            "verdict": "ESCALATE", "runner_failed": True, "ok": False,
+            "two_axis": True,
+            "spec": {"findings_source": "runner_failed"},
+            "standards": {"findings_source": "runner_failed"},
+        })
+        with patch("gantry.linear.set_stage_label"), \
+             patch("gantry.linear._maybe_post_run_announcement"), \
+             patch("gantry.linear._maybe_post_stage_progress"), \
+             patch("gantry.linear._maybe_post_stage_doc"), \
+             patch("gantry.linear._maybe_post_stage_failure"), \
+             patch("gantry.linear.resolve_state_id", return_value="state-ip"), \
+             patch("gantry.linear.set_issue_state") as set_state:
+            out = sync_issue_status(run_id, store, "team", "key")
+        self.assertEqual(out.get("category"), "in_progress")
+        set_state.assert_called_once_with("issue-1", "state-ip", "key")
+
+
+
 if __name__ == "__main__":
     unittest.main()

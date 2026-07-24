@@ -644,6 +644,13 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
     _maybe_post_stage_failure(run_id, store, issue_id, status, api_key)
 
     category = status_to_category(status, run_state)
+    # review_escalated from a dead invoke is not a human gate — advance will
+    # auto-retry. Keep Linear In Progress so the ticket doesn't look blocked
+    # while Sonnet/transport flaps.
+    if status == "review_escalated":
+        from .review import is_review_runner_failure
+        if is_review_runner_failure(store.read_result(run_id, "review-result.json")):
+            category = "in_progress"
     if not category:
         return {"synced": True, "issue_id": issue_id, "stage": current_stage,
                 "state_reason": f"status {status!r} has no mapped category"}
