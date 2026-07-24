@@ -52,6 +52,27 @@ max_turns = 80
 model = ""
 max_turns = 120
 
+# Optional versioned specialist overrides. Every field is additive: omitted
+# values continue to compile from [agent], [models.*], [review], [skills], and
+# [mcp], preserving existing configuration behavior. `setting_sources` defaults
+# to ["project"]; user/team/plugin settings are only requested when listed.
+#
+# [profiles.planner-builder]
+# version = 1
+# backend = "cursor-sdk"
+# model = ""
+# prompt_preamble = ""
+# skills = ["superpowers"]
+# mcp = ["codebase-memory"]
+# setting_sources = ["project"]  # optionally add "user", "team", or "plugin"
+# permissions = "allow"         # "allow" | "prompt"
+# sandbox = "workspace-write"   # backend-specific policy label
+# timeout = 900
+# turn_budget = 80
+#
+# Other roles: spec, design, investigator, researcher, resolver, evidence,
+# review-spec, review-standards, classifier, and ship-metadata.
+
 # Uncomment to use a stronger/different model specifically for the resolver
 # stage (auto_resolve below) — falls back to [models.build] if unset. Worth
 # configuring separately since build already failed 3x on the same issue by

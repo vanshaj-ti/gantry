@@ -19,9 +19,12 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import GantryConfig, MCPServer
+
+if TYPE_CHECKING:
+    from .profiles import AgentProfile
 
 
 def _claude_registered(name: str) -> bool:
@@ -85,12 +88,24 @@ def _register_codex(name: str, srv: MCPServer) -> dict[str, Any]:
             "output": (proc.stdout + proc.stderr)[-400:]}
 
 
-def ensure_mcp_for_stage(cfg: GantryConfig, stage: str, runner: str, target: Path) -> list[dict[str, Any]]:
+def ensure_mcp_for_stage(
+    cfg: GantryConfig,
+    stage: str,
+    runner: str,
+    target: Path,
+    profile: AgentProfile | None = None,
+) -> list[dict[str, Any]]:
     """Register every enabled MCP server that applies to this stage, for the
     given (already-resolved, per-stage) runner name. Idempotent; safe to call
     before each stage. No-op if none enabled."""
+    if profile is None:
+        from .profiles import profile_for_stage
+        profile = profile_for_stage(stage, cfg)
     results = []
-    for name, srv in cfg.mcp.for_stage(stage).items():
+    for name in profile.mcp:
+        srv = cfg.mcp.servers.get(name)
+        if srv is None:
+            continue
         try:
             if runner == "claude-code":
                 results.append(_register_claude(name, srv))

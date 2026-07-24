@@ -24,6 +24,7 @@ from .backends.registry import get_execution_runner as get_runner
 from .checks import run_all_checks
 from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
 from .git import ensure_worktree
+from .profiles import snapshot_profile
 from .redact import proxy_secrets, redact_secrets
 from .runners import resolve_proxy_env
 from .state import RunStore, now_iso
@@ -96,6 +97,7 @@ class Engine:
         return p if p.is_absolute() else (self.target / p)
 
     def render_prompt(self, stage: str, run_id: str) -> str:
+        profile = self.cfg.profile_for(stage)
         template_path = self._prompt_template_path(stage)
         if not template_path.exists():
             # fall back to a minimal generic instruction so a bare repo still runs
@@ -105,7 +107,8 @@ class Engine:
                     f"and write your output to .agent-runs/{run_id}/{artifact}.\n")
         else:
             base = template_path.read_text().replace("{RUN_ID}", run_id)
-        return (self._plan_context_directive(stage) + base + self._stage_skill_directive(stage)
+        preamble = f"{profile.prompt_preamble}\n\n" if profile.prompt_preamble else ""
+        return (preamble + self._plan_context_directive(stage) + base + self._stage_skill_directive(stage)
                 + self._skills_directive(stage) + self._evidence_output_directive(stage))
 
     def _prompt_template_path(self, stage: str) -> Path:
@@ -206,9 +209,12 @@ class Engine:
         another round of implementation work. [skills].evidence_directive
         lets a project override evidence's text entirely; unset falls back to
         a verification-focused default distinct from build's."""
-        if stage not in ("build", "evidence") or not self.cfg.skills.enabled:
+        profile = self.cfg.profile_for(stage)
+        stage_skill = f"gantry-stage-{stage}"
+        enabled = tuple(skill for skill in profile.skills if skill != stage_skill)
+        if not enabled:
             return ""
-        skills = ", ".join(f"`{s}`" for s in self.cfg.skills.enabled)
+        skills = ", ".join(f"`{s}`" for s in enabled)
         if stage == "evidence":
             framing = self.cfg.skills.evidence_directive or (
                 "IMPORTANT: the implementation is already complete — your job is to VERIFY "
@@ -216,11 +222,16 @@ class Engine:
                 "actually pass, confirm the plan's acceptance criteria are met) — do NOT "
                 "re-implement, refactor, or restart any part of the build.\n"
             )
-        else:
+        elif stage == "build":
             framing = (
                 "IMPORTANT: an approved implementation plan already exists for this run. Use "
                 "these skills for EXECUTION discipline (TDD, systematic debugging, review rigor) "
                 "— do NOT restart spec/design/planning. Execute the existing plan.\n"
+            )
+        else:
+            framing = (
+                "Use these profile-requested skills for this specialist role while "
+                "following the stage instructions above.\n"
             )
         return (
             f"\n\n---\n## Mandated skills for this stage\n"
@@ -355,8 +366,11 @@ class Engine:
     def run_agent_stage(self, run_id: str, stage: str, resume: bool = False) -> dict[str, Any]:
         if not self.store.exists(run_id):
             raise ValueError(f"Run not found: {run_id}")
+        profile = self.cfg.profile_for(stage)
         sm = self.cfg.model_for(stage)
-        runner = get_runner(self.cfg.runner_for(stage))
+        runner = get_runner(profile.backend)
+        self.store.write_log(
+            run_id, f"{stage}-profile.json", json.dumps(snapshot_profile(profile), indent=2))
 
         prompt = self.render_prompt(stage, run_id)
         if resume:
@@ -373,14 +387,32 @@ class Engine:
         if question_path.exists():
             question_path.unlink()
 
-        session_id = self.store.get_session_id(run_id, stage) if resume else None
-        if resume and not session_id:
-            raise ValueError(f"No stored session for {run_id}/{stage}; cannot resume")
+        from .sessions import resolve_resume_session_id, save_session_record
+
+        work_dir = self.work_dir(run_id)
+        worktree_id = str(work_dir.resolve())
+        session_id = None
+        if resume:
+            decision = resolve_resume_session_id(
+                self.store, run_id, stage,
+                backend=runner.name,
+                profile=profile.role,
+                model=profile.model,
+                worktree_id=worktree_id,
+            )
+            if decision.allowed:
+                session_id = decision.session_id
+            elif decision.fallback_to_artifacts:
+                # Fresh axes / compatibility mismatch: continue with artifact
+                # context in the prompt, but do not native-resume.
+                session_id = None
+            else:
+                raise ValueError(f"No stored session for {run_id}/{stage}; cannot resume")
 
         # Register any enabled MCP servers for this stage before invoking the agent.
         from .mcp import ensure_mcp_for_stage
-        work_dir = self.work_dir(run_id)
-        mcp_results = ensure_mcp_for_stage(self.cfg, stage, runner.name, work_dir)
+        mcp_results = ensure_mcp_for_stage(
+            self.cfg, stage, runner.name, work_dir, profile=profile)
         if mcp_results:
             self.store.write_log(run_id, f"{stage}-mcp.json", json.dumps(mcp_results, indent=2))
 
@@ -394,7 +426,12 @@ class Engine:
         # right now — session_id isn't known until the agent returns, but
         # which runner/model is in flight is, and that's the useful part for
         # `gantry watch`'s detail column while a stage is still running.
-        self.store.save_session(run_id, stage, model=sm.model, runner=runner.name)
+        save_session_record(
+            self.store, run_id, stage,
+            model=profile.model, runner=runner.name,
+            profile=profile.role, profile_version=str(profile.version),
+            worktree_id=worktree_id,
+        )
         import subprocess as _subprocess
         stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
@@ -403,14 +440,14 @@ class Engine:
                 result = runner.run(
                     cwd=work_dir,
                     prompt=prompt,
-                    model=sm.model,
+                    model=profile.model,
                     session_id=session_id,
                     plan_mode=sm.plan_mode,
-                    skip_permissions=self.cfg.agent.skip_permissions,
+                    skip_permissions=profile.permissions == "allow",
                     output_format=self.cfg.agent.output_format,
                     session_name=f"{run_id}-{stage}",
-                    max_turns=sm.max_turns,
-                    timeout=sm.timeout,
+                    max_turns=profile.turn_budget,
+                    timeout=profile.timeout,
                     env=resolve_proxy_env(runner.name, proxy),
                     proxy=proxy,
                 )
@@ -423,7 +460,8 @@ class Engine:
                 # Status.CHECKS_ESCALATED path) can act on it instead of a human having
                 # to notice a stale lockfile and reset state by hand.
                 self.store.write_log(run_id, f"{stage}.stderr",
-                                     self._redact(f"Agent subprocess timed out after {sm.timeout}s"))
+                                     self._redact(
+                                         f"Agent subprocess timed out after {profile.timeout}s"))
                 self._set_status(run_id, f"{stage}_failed")
                 return {"stage": stage, "ok": False, "session_id": None, "error": "timeout"}
         finally:
@@ -432,8 +470,15 @@ class Engine:
         self.store.write_log(run_id, f"{stage}{suffix}.stdout", self._redact(result.stdout))
         self.store.write_log(run_id, f"{stage}{suffix}.stderr", self._redact(result.stderr))
         self.store.write_result(run_id, f"{stage}-result.json", result.raw)
-        self.store.save_session(run_id, stage, session_id=result.session_id,
-                                model=sm.model, runner=runner.name)
+        save_session_record(
+            self.store, run_id, stage,
+            session_id=result.session_id,
+            model=profile.model, runner=runner.name,
+            profile=profile.role, profile_version=str(profile.version),
+            worktree_id=worktree_id,
+            backend_agent_id=result.session_id,
+            terminal_status="ok" if result.ok else "error",
+        )
         from .cost import accumulate as _accumulate_cost
         _accumulate_cost(self.store, run_id, stage, result.usage,
                          runner=runner.name, session_id=result.session_id)
@@ -486,7 +531,7 @@ class Engine:
         after the normal build/checks auto-retry loop exhausted itself.
         Unchanged behavior from before `run_resolver_stage` gained a
         `failure_kind` parameter — see `run_resolver_stage`'s docstring."""
-        from .advance import _checks_failure_detail
+        from .failure_detail import _checks_failure_detail
         detail = _checks_failure_detail(self.store, run_id)
         import subprocess as _subprocess
         diff_stat = _subprocess.run(["git", "diff", "--stat", "HEAD"], cwd=str(wt),
@@ -628,7 +673,12 @@ class Engine:
             prompt = self._resolver_conflict_prompt(run_id, wt, conflict_output)
         else:
             prompt = self._resolver_checks_prompt(run_id, wt)
+        profile = self.cfg.profile_for("resolve")
+        if profile.prompt_preamble:
+            prompt = f"{profile.prompt_preamble}\n\n{prompt}"
         self.store.write_log(run_id, "resolve-prompt.md", prompt)
+        self.store.write_log(
+            run_id, "resolve-profile.json", json.dumps(snapshot_profile(profile), indent=2))
         # Uses [models.resolve] if the project configures it, else falls back
         # to [models.build]'s model/runner (model_for's own default behavior
         # for an unconfigured stage name). Worth configuring resolve to a
@@ -637,17 +687,17 @@ class Engine:
         # the same issue, so re-running the same model that produced (or
         # missed) the bug is a weaker bet than escalating to a more capable
         # one for the fix-it attempt.
-        sm = self.cfg.model_for("resolve") if "resolve" in self.cfg.models else self.cfg.model_for("build")
-        runner = get_runner(sm.runner or self.cfg.agent.runner)
+        runner = get_runner(profile.backend)
         self._set_status(run_id, Status.RESOLVE_RUNNING, current_stage="build", heartbeat_at=now_iso())
         stop_hb, hb_thread = _start_heartbeat(self.store, run_id)
         try:
             proxy = self.cfg.proxy.get(runner.name)
             result = runner.run(
-                cwd=wt, prompt=prompt, model=sm.model,
-                session_id=None, plan_mode=False, skip_permissions=self.cfg.agent.skip_permissions,
+                cwd=wt, prompt=prompt, model=profile.model,
+                session_id=None, plan_mode=False,
+                skip_permissions=profile.permissions == "allow",
                 output_format=self.cfg.agent.output_format, session_name=f"{run_id}-resolve",
-                max_turns=sm.max_turns * 2, timeout=sm.timeout,
+                max_turns=profile.turn_budget, timeout=profile.timeout,
                 env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
             )
         finally:

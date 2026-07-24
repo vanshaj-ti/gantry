@@ -47,6 +47,7 @@ from typing import Any
 from . import herdr as _herdr
 from .backends.registry import get_execution_runner as get_runner
 from .config import GantryConfig
+from .profiles import profile_for, snapshot_profile
 from .redact import proxy_secrets, redact_secrets
 from .runners import resolve_proxy_env
 from .state import RunStore
@@ -471,25 +472,34 @@ def _run_one_axis(axis: str, store: RunStore, run_id: str, cfg: GantryConfig, cw
     checklist_items = cfg.review.checklist if axis == "spec" else cfg.review.standards_checklist
 
     prompt = _build_axis_prompt(store, run_id, cwd, base, template, cfg, checklist_items, high_risk_files)
+    profile = profile_for(f"review-{axis}", cfg, stage=f"review_{axis}")
+    if profile.prompt_preamble:
+        prompt = f"{profile.prompt_preamble}\n\n{prompt}"
     store.write_log(run_id, f"review-{axis}-prompt.md", prompt)
+    store.write_log(
+        run_id, f"review-{axis}-profile.json",
+        json.dumps(snapshot_profile(profile), indent=2),
+    )
 
-    runner = get_runner(cfg.review.runner)
+    runner = get_runner(profile.backend)
 
     from .mcp import ensure_mcp_for_stage
-    mcp_results = ensure_mcp_for_stage(cfg, "review", runner.name, cwd)
+    mcp_results = ensure_mcp_for_stage(
+        cfg, "review", runner.name, cwd, profile=profile)
     if mcp_results:
         store.write_log(run_id, f"review-{axis}-mcp.json", json.dumps(mcp_results, indent=2))
 
     with _SHARED_STATE_LOCK:
         session_id = store.get_session_id(run_id, session_key)
-        store.save_session(run_id, session_key, model=cfg.review.model, runner=runner.name)
+        store.save_session(run_id, session_key, model=profile.model, runner=runner.name)
 
     proxy = cfg.proxy.get(runner.name)
     result = runner.run(
-        cwd=cwd, prompt=prompt, model=cfg.review.model,
-        session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
+        cwd=cwd, prompt=prompt, model=profile.model,
+        session_id=session_id, plan_mode=False,
+        skip_permissions=profile.permissions == "allow",
         output_format="json", session_name=f"{run_id}-review-{axis}",
-        max_turns=cfg.review.max_turns, timeout=900,
+        max_turns=profile.turn_budget, timeout=profile.timeout,
         env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
     )
 
@@ -499,7 +509,7 @@ def _run_one_axis(axis: str, store: RunStore, run_id: str, cfg: GantryConfig, cw
     from .cost import accumulate as _accumulate_cost
     with _SHARED_STATE_LOCK:
         store.save_session(run_id, session_key, session_id=result.session_id,
-                           model=cfg.review.model, runner=runner.name)
+                           model=profile.model, runner=runner.name)
         _accumulate_cost(store, run_id, session_key, result.usage,
                          runner=runner.name, session_id=result.session_id)
 
@@ -514,7 +524,7 @@ def _run_one_axis(axis: str, store: RunStore, run_id: str, cfg: GantryConfig, cw
         "findings_source": derived["findings_source"],
         "verification_story_included": "verification story" in text.lower(),
         "ok": result.ok,
-        "model": cfg.review.model,
+        "model": profile.model,
         "session_id": result.session_id,
         "result": text[:8000],
     }
@@ -614,7 +624,12 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
         "or ESCALATE, followed by your reasoning.\n")
 
     prompt = _build_prompt(store, run_id, cwd, base, template, cfg)
+    profile = profile_for("review-spec", cfg, stage="review_spec")
+    if profile.prompt_preamble:
+        prompt = f"{profile.prompt_preamble}\n\n{prompt}"
     store.write_log(run_id, "review-prompt.md", prompt)
+    store.write_log(
+        run_id, "review-profile.json", json.dumps(snapshot_profile(profile), indent=2))
 
     # Unlike engine.run_agent_stage's plan/build/evidence stages, this used
     # to only report "review_running" to herdr's sidebar without ever
@@ -624,12 +639,13 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     # with no visible "in progress" state at all.
     store.update_state(run_id, status=Status.REVIEW_RUNNING, current_stage="review")
     _report_herdr(cfg, run_id, "review_running")
-    runner = get_runner(cfg.review.runner)
+    runner = get_runner(profile.backend)
 
     # Register any enabled MCP servers for review (e.g. codebase-memory), same
     # as engine.run_agent_stage does for plan/build/evidence.
     from .mcp import ensure_mcp_for_stage
-    mcp_results = ensure_mcp_for_stage(cfg, "review", runner.name, cwd)
+    mcp_results = ensure_mcp_for_stage(
+        cfg, "review", runner.name, cwd, profile=profile)
     if mcp_results:
         store.write_log(run_id, "review-mcp.json", json.dumps(mcp_results, indent=2))
 
@@ -639,7 +655,7 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     # of review_running — session_id isn't known until the agent returns, but
     # which runner/model is driving it right now is, and that's what the
     # live-status columns are for.
-    store.save_session(run_id, "review", model=cfg.review.model, runner=runner.name)
+    store.save_session(run_id, "review", model=profile.model, runner=runner.name)
     # This is now an agentic investigation (the reviewer reads files, runs git
     # diff, re-checks tests itself), so it needs the same headless auto-approve
     # the other stages get, and more turns than a single-shot prompt needed.
@@ -648,9 +664,11 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     try:
         proxy = cfg.proxy.get(runner.name)
         result = runner.run(
-            cwd=cwd, prompt=prompt, model=cfg.review.model,
-            session_id=session_id, plan_mode=False, skip_permissions=cfg.agent.skip_permissions,
-            output_format="json", session_name=f"{run_id}-review", max_turns=cfg.review.max_turns, timeout=900,
+            cwd=cwd, prompt=prompt, model=profile.model,
+            session_id=session_id, plan_mode=False,
+            skip_permissions=profile.permissions == "allow",
+            output_format="json", session_name=f"{run_id}-review",
+            max_turns=profile.turn_budget, timeout=profile.timeout,
             env=resolve_proxy_env(runner.name, proxy), proxy=proxy,
         )
     finally:
@@ -666,7 +684,7 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     store.write_log(run_id, "review.stdout", redact_secrets(result.stdout, extra_secrets=secrets))
     store.write_log(run_id, "review.stderr", redact_secrets(result.stderr, extra_secrets=secrets))
     store.save_session(run_id, "review", session_id=result.session_id,
-                       model=cfg.review.model, runner=runner.name)
+                       model=profile.model, runner=runner.name)
     from .cost import accumulate as _accumulate_cost
     _accumulate_cost(store, run_id, "review", result.usage,
                      runner=runner.name, session_id=result.session_id)
@@ -674,7 +692,7 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     text = result.raw.get("result", "") if isinstance(result.raw, dict) else result.stdout
     verdict = _parse_verdict(str(text) or result.stdout, cfg) if result.ok else "ESCALATE"
 
-    out = {"verdict": verdict, "ok": result.ok, "model": cfg.review.model,
+    out = {"verdict": verdict, "ok": result.ok, "model": profile.model,
            "session_id": result.session_id, "result": str(text)[:8000]}
     store.write_result(run_id, "review-result.json", out)
 

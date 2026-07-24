@@ -17,7 +17,7 @@ def cmd_mcp(args) -> int:
                      "runner": cfg.agent.runner})
     seen, results = set(), []
     for stage in ["plan", "build", "evidence", "review"]:
-        runner = cfg.runner_for(stage)
+        runner = cfg.profile_for(stage).backend
         for r in ensure_mcp_for_stage(cfg, stage, runner, tgt):
             key = (r.get("server"), r.get("status"))
             if key not in seen:

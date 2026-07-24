@@ -516,6 +516,10 @@ class GantryConfig:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     herdr: HerdrConfig = field(default_factory=HerdrConfig)
     proxy: dict[str, ProxyConfig] = field(default_factory=dict)  # runner name -> ProxyConfig
+    # Specialist role -> additive AgentProfile overrides. Kept as plain
+    # mappings here so config.py remains the TOML boundary; profiles.py
+    # compiles these on top of legacy [agent]/[models]/[review]/[skills]/[mcp].
+    profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     # prompts dir: where stage prompt templates live (relative to config, or absolute)
     prompts_dir: str = ".gantry/prompts"
     # tag -> stage list, seeded with the 5 built-in queues (DEFAULT_QUEUE_STAGES)
@@ -538,6 +542,11 @@ class GantryConfig:
         """Resolve which agent runner drives this stage: a per-stage override
         in [models.<stage>].runner, falling back to [agent].runner."""
         return self.model_for(stage).runner or self.agent.runner
+
+    def profile_for(self, stage: str):
+        """Resolve the immutable specialist profile for an invocation stage."""
+        from .profiles import profile_for_stage
+        return profile_for_stage(stage, self)
 
     def artifact_for(self, stage: str) -> str:
         return STAGE_ARTIFACTS.get(stage, f"{stage}.md")
@@ -729,4 +738,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
         cfg.daemon = DaemonConfig(
             per_target_timeout_seconds=int(d.get("per_target_timeout_seconds", 45)))
     cfg.proxy = _coerce_proxy(raw.get("proxy", {}))
+    cfg.profiles = {
+        role: dict(profile)
+        for role, profile in (raw.get("profiles", {}) or {}).items()
+        if isinstance(profile, dict)
+    }
     return cfg

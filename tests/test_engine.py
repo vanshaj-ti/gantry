@@ -1,4 +1,5 @@
 import subprocess
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,11 +72,22 @@ class TestRunAgentStage(unittest.TestCase):
         self.assertEqual(self.eng.store.state(self.run_id)["status"], "plan_failed")
 
     def test_resume_without_stored_session_raises(self):
+        # Isolated stages (investigation) must not silently invent a session.
         fake = _FakeRunner(result=RunnerResult(
             ok=True, session_id="sess-1", exit_code=0, raw={}, stdout="", stderr=""))
         with patch("gantry.engine.get_runner", return_value=fake):
             with self.assertRaises(ValueError):
-                self.eng.run_agent_stage(self.run_id, "plan", resume=True)
+                self.eng.run_agent_stage(self.run_id, "investigation", resume=True)
+
+    def test_shared_lineage_resume_without_peers_starts_fresh(self):
+        # plan/build/resolve may fall back to artifact continuation when the
+        # implementation lineage has no prior session_id yet.
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="sess-new", exit_code=0, raw={}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake):
+            out = self.eng.run_agent_stage(self.run_id, "plan", resume=True)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["session_id"], "sess-new")
 
     def test_resume_with_stored_session_reuses_it(self):
         fake = _FakeRunner(result=RunnerResult(
@@ -234,6 +246,30 @@ class TestRunAgentStage(unittest.TestCase):
         _time.sleep(0.2)
         beat_later = self.eng.store.state(self.run_id)["heartbeat_at"]
         self.assertEqual(beat_after, beat_later)  # thread stopped, no further beats
+
+    def test_profile_override_drives_invocation_and_is_snapshotted(self):
+        self.cfg.profiles["planner-builder"] = {
+            "backend": "codex-cli",
+            "model": "specialist",
+            "prompt_preamble": "Specialist preamble.",
+            "permissions": "prompt",
+            "timeout": 123,
+            "turn_budget": 7,
+        }
+        fake = _FakeRunner(result=RunnerResult(
+            ok=True, session_id="s1", exit_code=0, raw={}, stdout="", stderr=""))
+        with patch("gantry.engine.get_runner", return_value=fake) as get:
+            self.eng.run_agent_stage(self.run_id, "plan")
+        get.assert_called_once_with("codex-cli")
+        profile_log = self.eng.store.run_dir(self.run_id) / "logs" / "plan-profile.json"
+        snapshot = json.loads(profile_log.read_text())
+        self.assertEqual(snapshot["model"], "specialist")
+        self.assertEqual(snapshot["turn_budget"], 7)
+
+    def test_profile_preamble_is_prepended_to_prompt(self):
+        self.cfg.profiles["planner-builder"] = {"prompt_preamble": "Specialist preamble."}
+        prompt = self.eng.render_prompt("plan", self.run_id)
+        self.assertTrue(prompt.startswith("Specialist preamble.\n\n"))
 
 
 class _CapturingRunner(_FakeRunner):
@@ -424,6 +460,12 @@ class TestSkillsDirective(unittest.TestCase):
 
     def test_build_and_evidence_directives_differ(self):
         self.assertNotEqual(self.eng._skills_directive("build"), self.eng._skills_directive("evidence"))
+
+    def test_explicit_profile_skills_apply_outside_legacy_execution_stages(self):
+        self.cfg.profiles["spec"] = {"skills": ["product-discovery"]}
+        directive = self.eng._skills_directive("spec")
+        self.assertIn("product-discovery", directive)
+        self.assertNotIn("gantry-stage-spec", directive)
 
 
 class TestEvidenceOutputDirective(unittest.TestCase):

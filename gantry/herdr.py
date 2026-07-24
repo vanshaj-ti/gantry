@@ -87,7 +87,7 @@ def report_state(run_id: str, status: str, *, title: str = "", enabled: bool = T
         return {"reported": False, "reason": "could-not-resolve-pane"}
     state = _STATE_MAP.get(status, "unknown")
     try:
-        from .advance import label as _label
+        from .labels import label as _label
         human_status = _label(status)
     except Exception:
         human_status = status

@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.theme import Theme
 
-from .advance import label
+from .labels import label
 from .state import RunStore
 
 # rich's default markdown theme distinguishes heading levels mostly by

@@ -20,6 +20,7 @@ from typing import Any
 
 from .backends.registry import get_execution_runner as get_runner
 from .config import GantryConfig
+from .profiles import profile_for, snapshot_profile
 from .state import RunStore, slugify
 
 logger = logging.getLogger(__name__)
@@ -135,12 +136,19 @@ def draft_ship_meta(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) 
 
     try:
         prompt = _build_prompt(store, run_id, cwd, cfg.git.base_branch)
+        profile = profile_for("ship-metadata", cfg)
+        if profile.prompt_preamble:
+            prompt = f"{profile.prompt_preamble}\n\n{prompt}"
         store.write_log(run_id, "ship-prompt.md", prompt)
-        runner = get_runner(cfg.review.runner)
+        store.write_log(
+            run_id, "ship-profile.json", json.dumps(snapshot_profile(profile), indent=2))
+        runner = get_runner(profile.backend)
         result = runner.run(
-            cwd=cwd, prompt=prompt, model=cfg.review.model,
-            session_id=None, plan_mode=False, skip_permissions=False,
-            output_format="json", session_name=f"{run_id}-ship", max_turns=10,
+            cwd=cwd, prompt=prompt, model=profile.model,
+            session_id=None, plan_mode=False,
+            skip_permissions=profile.permissions == "allow",
+            output_format="json", session_name=f"{run_id}-ship",
+            max_turns=profile.turn_budget, timeout=profile.timeout,
         )
         from .cost import accumulate as _accumulate_cost
         _accumulate_cost(store, run_id, "ship", result.usage,

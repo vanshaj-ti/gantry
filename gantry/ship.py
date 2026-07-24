@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .engine import Engine
+from .failure_detail import format_checks_failure_detail
 from .git import branch_name, commit_all, create_pr, is_conflict_shaped_failure, merge_pr, push
 from .redact import proxy_secrets, redact_secrets
 from .shipmeta import draft_ship_meta
@@ -26,22 +27,12 @@ _MAX_CONFLICT_RESOLVE_ATTEMPTS = 1
 
 
 def _ship_checks_failure_detail(checks: dict[str, Any] | None) -> str:
-    """Mirrors advance.py's `_checks_failure_detail` shape/purpose, scoped to
-    ship_run's own fresh re-verification call (not the run's earlier
-    build/checks history) — kept local to ship.py rather than imported so
-    ship.py doesn't need advance.py's RunStore-shaped helper (this one just
-    takes the checks dict ship_run already has in hand)."""
-    if not checks:
-        return "Checks failed."
-    scope = checks.get("scope") or {}
-    if scope.get("forbidden_files") or scope.get("unexpected_files"):
-        bad = scope.get("forbidden_files", []) + scope.get("unexpected_files", [])
-        file_list = "\n".join(f"  • `{f}`" for f in bad[:8])
-        return f"Scope violation — files outside the plan:\n{file_list}"
-    failing = [c["command"] for c in (checks.get("checks") or {}).get("results", []) if not c.get("pass")]
-    if failing:
-        return "Failing command(s):\n" + "\n".join(f"  • `{c}`" for c in failing)
-    return "Checks failed."
+    """Render ship-time checks with the legacy ship-specific shape."""
+    return format_checks_failure_detail(
+        checks,
+        include_merge_conflict=False,
+        normalize_optional_sections=True,
+    )
 
 
 def _surviving_blocking_findings(review_result: dict[str, Any] | None) -> list[dict[str, Any]]:

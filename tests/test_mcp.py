@@ -88,6 +88,23 @@ class TestEnsureMcpCodex(unittest.TestCase):
         for name in ("codebase-memory", "chrome-devtools"):
             self.assertIn("codex-cli", DEFAULT_MCP_SERVERS[name]["register"])
 
+    def test_explicit_profile_mcp_subset_is_used(self):
+        cfg = _cfg_with_server()
+        cfg.mcp.enabled = []
+        cfg.profiles["planner-builder"] = {"mcp": ["codebase-memory"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("gantry.mcp._codex_registered", return_value=True):
+                results = ensure_mcp_for_stage(cfg, "plan", "codex-cli", Path(tmp))
+        self.assertEqual([result["server"] for result in results], ["codebase-memory"])
+
+    def test_profile_and_legacy_mcp_are_deduplicated(self):
+        cfg = _cfg_with_server()
+        cfg.profiles["planner-builder"] = {"mcp": ["codebase-memory"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("gantry.mcp._codex_registered", return_value=True):
+                results = ensure_mcp_for_stage(cfg, "plan", "codex-cli", Path(tmp))
+        self.assertEqual(len(results), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

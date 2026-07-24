@@ -303,6 +303,39 @@ max_parallel = 8
 """)
         self.assertEqual(cfg.checks.max_parallel, 8)
 
+    def test_profiles_section_is_loaded_additively(self):
+        cfg = self._load("""
+[agent]
+runner = "claude-code"
+
+[models.build]
+model = "legacy-builder"
+max_turns = 80
+
+[profiles.planner-builder]
+model = "specialist-builder"
+prompt_preamble = "Use the approved plan."
+skills = ["superpowers"]
+mcp = ["codebase-memory"]
+setting_sources = ["project", "team"]
+permissions = "prompt"
+sandbox = "workspace-write"
+timeout = 1200
+turn_budget = 100
+""")
+        self.assertEqual(cfg.agent.runner, "claude-code")
+        self.assertEqual(cfg.models["build"].model, "legacy-builder")
+        self.assertEqual(cfg.profiles["planner-builder"]["model"], "specialist-builder")
+        profile = cfg.profile_for("build")
+        self.assertEqual(profile.backend, "claude-code")
+        self.assertEqual(profile.model, "specialist-builder")
+        self.assertEqual(profile.setting_sources, ("project", "team"))
+
+    def test_missing_profiles_section_keeps_empty_overrides(self):
+        cfg = self._load("[agent]\nrunner = \"codex-cli\"\n")
+        self.assertEqual(cfg.profiles, {})
+        self.assertEqual(cfg.profile_for("plan").backend, "codex-cli")
+
 
 class TestCoerceHelpers(unittest.TestCase):
     def test_coerce_check_command_from_string(self):

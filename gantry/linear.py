@@ -369,7 +369,7 @@ def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: st
         # Telegram path does for review.
         stage = status.removesuffix("_escalated")
         if stage == "review":
-            from .advance import _review_findings_detail
+            from .failure_detail import _review_findings_detail
             review_result = store.read_result(run_id, "review-result.json")
             detail = _review_findings_detail(review_result)
         elif stage == "checks_high_risk":
@@ -454,10 +454,14 @@ def classify_ticket(title: str, description: str, *,
     given, so a codex-only install doesn't hard-depend on `claude` being on
     PATH. model="" lets the runner pick its own default."""
     from .backends.registry import get_execution_runner
+    from .profiles import profile_for, snapshot_profile
     from .runners import get_runner
 
-    if runner is None and project_root is not None:
-        runner = load_config(project_root).agent.runner
+    profile = None
+    if project_root is not None:
+        profile = profile_for("classifier", load_config(project_root))
+        runner = runner or profile.backend
+        model = model or profile.model
     if not runner:
         runner = "claude-code"
 
@@ -473,12 +477,19 @@ Title: {title}
 Description: {description}
 
 Respond with exactly one word: the tag."""
+    if profile and profile.prompt_preamble:
+        prompt = f"{profile.prompt_preamble}\n\n{prompt}"
+    if profile:
+        logger.debug("resolved classifier profile: %s", snapshot_profile(profile))
     try:
         execution_runner = get_runner(runner)
     except ValueError:
         execution_runner = get_execution_runner(runner)
     result = execution_runner.run(
-        cwd=project_root or Path.cwd(), prompt=prompt, model=model, max_turns=1,
+        cwd=project_root or Path.cwd(), prompt=prompt, model=model,
+        max_turns=profile.turn_budget if profile else 1,
+        timeout=profile.timeout if profile else 900,
+        skip_permissions=profile.permissions == "allow" if profile else True,
     )
     text = (result.raw.get("result") or "").strip().lower() if result.raw else ""
     for tag in QUEUE_TAGS:
