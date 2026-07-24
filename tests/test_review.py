@@ -134,9 +134,13 @@ class TestRunReview(unittest.TestCase):
         self.assertIsNone(self.store.read_artifact(self.run_id, "review-comments.md"))
 
     def test_runner_failure_defaults_to_escalate(self):
+        # Transport failures retry then escalate — still a terminal escalate,
+        # not a silent approve.
+        self.cfg.agent.stage_retry_attempts = 0
         with patch("gantry.review.get_runner", return_value=self._fake_runner("APPROVE", ok=False)):
             out = run_review(self.store, self.run_id, self.cfg, self.target)
         self.assertEqual(out["verdict"], "ESCALATE")
+        self.assertTrue(out.get("runner_failed"))
         self.assertEqual(self.store.state(self.run_id)["status"], "review_escalated")
 
     def test_max_turns_from_config_passed_to_runner(self):
@@ -538,6 +542,8 @@ class TestRunReviewTwoAxis(unittest.TestCase):
         self.assertNotIn("confirm docstrings present", spec_prompt)
 
     def test_runner_failure_on_one_axis_escalates_that_axis(self):
+        self.cfg.agent.stage_retry_attempts = 0
+
         class _MixedRunner:
             name = "claude-code"
 
@@ -554,6 +560,35 @@ class TestRunReviewTwoAxis(unittest.TestCase):
             out = run_review(self.store, self.run_id, self.cfg, self.target)
         self.assertEqual(out["spec"]["verdict"], "ESCALATE")
         self.assertEqual(out["combined_verdict"], "ESCALATE")
+        self.assertTrue(out.get("runner_failed"))
+        self.assertEqual(self.store.state(self.run_id)["status"], "review_escalated")
+
+    def test_runner_failure_retries_then_recovers(self):
+        self.cfg.agent.stage_retry_attempts = 2
+        calls = {"n": 0}
+
+        class _FlakyThenOk:
+            name = "claude-code"
+
+            def run(self, **kwargs):
+                calls["n"] += 1
+                # Fail both axes on first review pass (2 calls), succeed after.
+                if calls["n"] <= 2:
+                    return RunnerResult(ok=False, session_id=None, exit_code=1,
+                                        raw={"result": ""}, stdout="", stderr="boom")
+                text = (
+                    "APPROVE\n\nVerification Story: ok.\n\n"
+                    + _findings_json_block("no-op")
+                )
+                return RunnerResult(ok=True, session_id=f"s{calls['n']}", exit_code=0,
+                                    raw={"result": text}, stdout=text, stderr="")
+
+        with patch("gantry.review.get_runner", return_value=_FlakyThenOk()):
+            out = run_review(self.store, self.run_id, self.cfg, self.target)
+        self.assertEqual(out["combined_verdict"], "APPROVE")
+        self.assertFalse(out.get("runner_failed"))
+        self.assertEqual(self.store.state(self.run_id)["status"], "review_approved")
+        self.assertGreaterEqual(calls["n"], 4)  # failed pass (2) + success pass (2)
 
     def test_two_axis_false_matches_legacy_single_verdict_shape(self):
         """The critical regression guard: two_axis=False must produce the

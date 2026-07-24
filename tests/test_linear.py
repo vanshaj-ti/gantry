@@ -682,5 +682,46 @@ class TestClassifyTicketRunner(unittest.TestCase):
             self.assertEqual(captured["cwd"], root)
 
 
+class TestStatusToCategoryAutonomy(unittest.TestCase):
+    def test_retry_pending_stays_in_progress(self):
+        from gantry.linear import status_to_category
+
+        for status in (
+            "checks_failed", "e2e_failed", "build_failed",
+            "review_changes_requested", "ship_failed",
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(status_to_category(status), "in_progress")
+
+    def test_human_gates_are_blocked(self):
+        from gantry.linear import status_to_category
+
+        for status in (
+            "checks_escalated", "review_escalated", "resolve_escalated",
+            "checks_high_risk_escalated", "ship_checks_failed",
+            "blocked", "held", "spec_complete", "build_question",
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(status_to_category(status), "blocked")
+
+    def test_exhausted_stage_retries_block(self):
+        from gantry.linear import status_to_category
+
+        self.assertEqual(
+            status_to_category(
+                "build_failed",
+                {"build_retry_count": 2, "stage_retry_max": 2},
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            status_to_category(
+                "build_failed",
+                {"build_retry_count": 1, "stage_retry_max": 2},
+            ),
+            "in_progress",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

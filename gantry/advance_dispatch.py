@@ -251,7 +251,7 @@ def _handle_build_complete(engine: Engine, run_id: str, status: str) -> dict[str
     if not e2e["pass"]:
         engine.store.update_state(
             run_id,
-            status=Status.BLOCKED,
+            status=Status.E2E_FAILED,
             blocked_on=BlockedReason.E2E,
             checks="pass",
         )

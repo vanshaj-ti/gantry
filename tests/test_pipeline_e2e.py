@@ -256,11 +256,11 @@ class TestFullPipelineE2E(unittest.TestCase):
         with patch("gantry.engine.get_runner", return_value=_Runner()):
             advance_run(self.eng, run_id)  # awaiting_plan -> plan_complete
             advance_run(self.eng, run_id)  # plan_complete -> build (attempt 1, fails lint)
-            r = advance_run(self.eng, run_id)  # build_complete -> checks fail -> blocked
+            r = advance_run(self.eng, run_id)  # build_complete -> checks fail -> checks_failed
             self.assertEqual(r["action"], "checks_failed")
-            self.assertEqual(store.state(run_id)["status"], Status.BLOCKED)
+            self.assertEqual(store.state(run_id)["status"], Status.CHECKS_FAILED)
 
-            r = advance_run(self.eng, run_id)  # blocked -> retry build (attempt 2, fixes it)
+            r = advance_run(self.eng, run_id)  # checks_failed -> retry build (attempt 2, fixes it)
             self.assertEqual(r["action"], "retry_build_after_checks_failure")
 
             r = advance_run(self.eng, run_id)  # build_complete -> checks now pass

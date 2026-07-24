@@ -78,6 +78,11 @@ class AgentConfig:
                                  # time in a single Python process anyway, so an
                                  # unbounded cap changes nothing until advance_all
                                  # actually parallelizes its per-run loop).
+    stage_retry_attempts: int = 2  # auto-retry ordinary agent-stage failures
+                                   # (timeouts, runner errors) this many times
+                                   # before leaving the run for a human. Stale-
+                                   # heartbeat retries are separate and still
+                                   # always auto-retry once.
 
 
 # Per-runner install commands for agent skill libraries (e.g. superpowers).
@@ -651,6 +656,7 @@ def load_config(target_workspace: Path) -> GantryConfig:
             skip_permissions=bool(a.get("skip_permissions", True)),
             output_format=a.get("output_format", "json"),
             max_concurrent=int(a.get("max_concurrent", 0)),
+            stage_retry_attempts=int(a.get("stage_retry_attempts", 2)),
         )
     cfg.models = _coerce_models(raw.get("models", {}))
     cfg.review.runner = cfg.agent.runner

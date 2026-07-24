@@ -217,20 +217,17 @@ def post_stage_doc(issue_id: str, stage: str, artifact_path: Path, api_key: str)
 # uses for run dependencies). It stays "in_progress" (still being shipped);
 # "done" only fires once status is actually shipped/shipped_manually.
 # "blocked" covers every escalation/failure state — review REQUEST_CHANGES/
-# ESCALATE, checks escalation, ship failures — plus a doc stage's own
-# *_complete status (spec_complete/investigation_complete/etc): that IS a
-# human gate (approve or reply with feedback) even though gantry's own
-# internal naming calls it "complete" — it reads as "needs a human" from
-# Linear's side, exactly like every other escalation here. Once the human
-# replies (via a Linear comment -> handle_comment_created -> approve/resume)
-# the run moves off *_complete and the next poller tick syncs it back to
-# in_progress normally — no separate un-blocking step needed.
+# Human-gate statuses that should move Linear to Blocked. Retry-pending
+# failures (checks_failed / e2e_failed / ordinary *_failed) stay In Progress
+# while Gantry auto-retries — only escalations and true HITL pauses block.
 _STATUS_TO_CATEGORY: list[tuple[str, str]] = [
     ("shipped", "done"), ("cancelled", "done"),
-    ("review_escalated", "blocked"), ("review_changes_requested", "blocked"),
+    ("review_escalated", "blocked"),
     ("checks_escalated", "blocked"), ("checks_high_risk_escalated", "blocked"),
-    ("resolve_escalated", "blocked"), ("ship_failed", "blocked"),
-    ("ship_checks_failed", "blocked"), ("blocked", "blocked"), ("held", "blocked"),
+    ("e2e_escalated", "blocked"),
+    ("resolve_escalated", "blocked"),
+    ("ship_checks_failed", "blocked"),
+    ("blocked", "blocked"), ("held", "blocked"),
     *((f"{stage}_complete", "blocked") for stage in DOC_STAGES),
 ]
 
@@ -247,25 +244,49 @@ _CATEGORY_TYPE_FALLBACK = {
     "in_progress": "started", "blocked": "started", "done": "completed",
 }
 
+# Statuses that are still self-healing — stay In Progress on Linear.
+_AUTO_HEALING_STATUSES = frozenset({
+    "checks_failed", "e2e_failed", "review_changes_requested", "ship_failed",
+})
 
-def status_to_category(status: str) -> str | None:
+
+def status_to_category(status: str, state: dict | None = None) -> str | None:
     """Map a gantry run status to a Linear workflow category, or None if this
     status shouldn't move the issue (e.g. mid-doc-stage awaiting_* — the
     issue is already "In Progress" from run creation, no need to churn it on
-    every intermediate awaiting_/*_running tick)."""
+    every intermediate awaiting_/*_running tick).
+
+    Optional ``state`` lets retry-budget exhaustion flip ordinary ``*_failed``
+    into Blocked once auto-retries are spent.
+    """
     for prefix, category in _STATUS_TO_CATEGORY:
         if status == prefix or status.startswith(prefix):
             return category
     if status.startswith("awaiting_") or status.endswith("_running") or status == "review_approved":
         return "in_progress"
-    if status.endswith("_failed") or status.endswith("_question"):
-        # Both need a human: _failed is a genuine error (real bug, timeout,
-        # missing artifact); _question is the agent legitimately pausing to
-        # ask something (see engine.py's question.md check) — a distinct,
-        # expected state, not an error, but still something only a human
-        # reply can move forward.
+    if status in _AUTO_HEALING_STATUSES:
+        return "in_progress"
+    if status.endswith("_question"):
+        # Agent legitimately paused with question.md — needs a human answer.
         return "blocked"
+    if status.endswith("_failed"):
+        stage = status.removesuffix("_failed")
+        if state is not None and _agent_stage_retries_exhausted(state, stage):
+            return "blocked"
+        # Still within auto-retry budget (or budget unknown) — keep moving.
+        return "in_progress"
     return None
+
+
+def _agent_stage_retries_exhausted(state: dict, stage: str) -> bool:
+    """True when ordinary agent-stage auto-retries are spent for this stage."""
+    attempts = int(state.get("stage_retry_attempts") or state.get(f"{stage}_retry_count") or 0)
+    # stage_retry_max is stamped on the run when config is applied; fall back
+    # to treating "has a high retry count" via the count alone when missing.
+    max_attempts = state.get("stage_retry_max")
+    if max_attempts is None:
+        return False
+    return attempts >= int(max_attempts)
 
 
 def get_team_states(team_id: str, api_key: str) -> list[dict[str, str]]:
@@ -328,90 +349,175 @@ def _maybe_post_stage_doc(run_id: str, store: Any, issue_id: str, status: str, a
     store.update_state(run_id, linear_docs_posted={**posted, stage: content_hash})
 
 
-def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: str, api_key: str) -> None:
-    """Post why a stage stopped — either a genuine question (deterministic:
-    the agent wrote question.md, see engine.py) or a real failure — as a
-    comment, dedup'd once per distinct occurrence (a retry that asks a
-    DIFFERENT question, or fails for a different reason, gets its own
-    comment).
+def _simple_failure_detail(run_id: str, store: Any, status: str) -> str:
+    """Plain-language failure summary for Linear (no internal path dumps)."""
+    from .failure_detail import (
+        _checks_failure_detail,
+        _e2e_failure_detail,
+        _review_findings_detail,
+        format_checks_failure_detail,
+    )
 
-    Question and failure are deliberately distinct, not folded into one
-    "something went wrong" message: a question is expected pipeline
-    behavior (the agent correctly paused instead of guessing), a failure
-    is an actual error. Both need a human, so both map to the Blocked
-    category (see status_to_category), but the comment text says which
-    one this is."""
-    if status.endswith("_question"):
-        stage = status.removesuffix("_question")
-        detail = store.read_artifact(run_id, "question.md") or "(question.md was empty)"
-        detail = detail.strip()
-        framing = f"{stage.capitalize()} stage has a question — needs your input:"
-        dedup_field = "linear_questions_posted"
-    elif status.endswith("_failed"):
-        stage = status.removesuffix("_failed")
-        # Try every place a real failure reason could live, in order of
-        # specificity: the doc-stage structural gate (missing/empty
-        # artifact), then the stage's own stderr log (covers the case this
-        # was written for — a real 900s timeout produces an empty
-        # {stage}-result.json but a real stderr message, "Agent subprocess
-        # timed out after 900s" — the old code only checked the gate, so a
-        # genuine timeout showed up on Linear as a blank "(no failure
-        # detail captured)").
+    if status in ("checks_failed", "checks_escalated", "blocked") and (
+        store.state(run_id).get("blocked_on") in (None, "checks", "scope")
+        or status.startswith("checks_")
+    ):
+        checks = store.read_result(run_id, "checks.json")
+        if checks:
+            detail = format_checks_failure_detail(
+                checks, normalize_optional_sections=True,
+            )
+            # Append a short stderr hint from the first failing command.
+            results = ((checks.get("checks") or {}).get("results") or [])
+            for row in results:
+                if row.get("pass"):
+                    continue
+                tail = (row.get("stderr_tail") or row.get("stdout_tail") or "").strip()
+                if not tail:
+                    continue
+                # One readable last line / error sentence.
+                lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+                hint = next(
+                    (ln for ln in reversed(lines) if "Error" in ln or "error" in ln
+                     or "ENOENT" in ln or "failed" in ln.lower()),
+                    lines[-1] if lines else "",
+                )
+                if hint:
+                    if len(hint) > 200:
+                        hint = hint[:197] + "..."
+                    detail = f"{detail}\n\nDetail: {hint}"
+                break
+            return detail
+        return _checks_failure_detail(store, run_id)
+    if status in ("e2e_failed", "e2e_escalated"):
+        return _e2e_failure_detail(store, run_id)
+    if status == "review_escalated":
+        review_result = store.read_result(run_id, "review-result.json")
+        from .review import is_review_runner_failure
+        if is_review_runner_failure(review_result):
+            return (
+                "Review agent failed to run (transport/runner error), not a "
+                "content judgment. Gantry exhausted automatic retries."
+            )
+        return _review_findings_detail(review_result)
+    if status.endswith("_failed") or status.endswith("_question"):
+        stage = status.rsplit("_", 1)[0]
+        if status.endswith("_question"):
+            return (store.read_artifact(run_id, "question.md") or "(empty question)").strip()
         gate = store.read_result(run_id, f"{stage}-gate.json")
         reason = (gate or {}).get("reason", "") if isinstance(gate, dict) else ""
         stderr = (store.read_artifact(run_id, f"logs/{stage}.stderr") or "").strip()
-        detail = reason or stderr or "(no failure detail captured)"
-        framing = f"{stage.capitalize()} stage failed:"
-        dedup_field = "linear_failures_posted"
-    elif status.endswith("_escalated"):
-        # Real gap: status_to_category already maps every *_escalated status
-        # to "blocked" (moves the Linear issue state), but nothing ever
-        # explained WHY on the issue itself — a human saw "Blocked" with no
-        # comment, same class of gap _failed had before stderr fallback was
-        # added. review_escalated is the common case (both review axes
-        # disagree or one errors out); checks_high_risk_escalated and
-        # resolve_escalated get a best-effort generic detail since they're
-        # rarer and don't have a dedicated detail-builder like advance.py's
-        # Telegram path does for review.
+        if reason:
+            return reason
+        if stderr:
+            first = next((ln for ln in stderr.splitlines() if ln.strip()), stderr[:300])
+            return first.strip()
+        return f"{stage} failed — see gantry logs."
+    if status.endswith("_escalated"):
         stage = status.removesuffix("_escalated")
-        if stage == "review":
-            from .failure_detail import _review_findings_detail
-            review_result = store.read_result(run_id, "review-result.json")
-            detail = _review_findings_detail(review_result)
-        elif stage == "checks_high_risk":
+        if stage == "checks_high_risk":
             checks = store.read_result(run_id, "checks.json") or {}
             high_risk = (checks.get("scope") or {}).get("high_risk_files") or []
-            file_list = "\n".join(f"  • `{f}`" for f in high_risk[:8])
-            if file_list:
-                detail = (
-                    "High-risk path(s) touched — needs human sign-off:\n"
-                    f"{file_list}"
+            if high_risk:
+                return "High-risk path(s) touched:\n" + "\n".join(
+                    f"  • `{f}`" for f in high_risk[:8]
                 )
-            else:
-                detail = "High-risk path(s) touched — needs human sign-off."
-        else:
-            detail = f"{stage.capitalize()} escalated to a human decision — see gantry state/logs for detail."
-        framing = f"{stage.replace('_', ' ').capitalize()} escalated — needs your input:"
-        dedup_field = "linear_failures_posted"
-    else:
+            return "High-risk path(s) touched — needs human sign-off."
+        return f"{stage.replace('_', ' ')} needs a human decision."
+    return "See gantry state/logs for detail."
+
+
+def _is_human_gate_status(status: str, state: dict | None = None) -> bool:
+    """True when Linear should ask for human input (Blocked category)."""
+    return status_to_category(status, state) == "blocked"
+
+
+def _maybe_post_stage_failure(run_id: str, store: Any, issue_id: str, status: str, api_key: str) -> None:
+    """Post a plain-language stop reason. Auto-healing failures get a short
+    progress note; only true human gates ask for input with keyword replies.
+    """
+    if not (
+        status.endswith("_question")
+        or status.endswith("_failed")
+        or status.endswith("_escalated")
+        or status == "blocked"
+    ):
         return
-    dedup_key = hashlib.sha256(f"{stage}:{detail}".encode()).hexdigest()
-    posted = store.state(run_id).get(dedup_field) or {}
+
+    state = store.state(run_id)
+    human_gate = _is_human_gate_status(status, state)
+    detail = _simple_failure_detail(run_id, store, status)
+
+    if status.endswith("_question"):
+        stage = status.removesuffix("_question")
+        dedup_field = "linear_questions_posted"
+        body = (
+            f"Needs your input\n\n"
+            f"Question from **{stage}**:\n{detail}\n\n"
+            f"Need from you: reply on this issue with your answer."
+        )
+    elif human_gate:
+        stage = (
+            status.removesuffix("_failed")
+            if status.endswith("_failed")
+            else status.removesuffix("_escalated")
+            if status.endswith("_escalated")
+            else str(state.get("blocked_on") or "run")
+        )
+        dedup_field = "linear_failures_posted"
+        tried = []
+        if state.get("checks_retry_count"):
+            tried.append(f"{state['checks_retry_count']} check retry(ies)")
+        if state.get("resolve_attempt_count"):
+            tried.append(f"{state['resolve_attempt_count']} resolve attempt(s)")
+        stage_retries = state.get(f"{stage}_retry_count")
+        if stage_retries:
+            tried.append(f"{stage_retries} {stage} retry(ies)")
+        tried_line = f"Tried: {', '.join(tried)}\n" if tried else ""
+        review_result = (
+            store.read_result(run_id, "review-result.json")
+            if status == "review_escalated"
+            else None
+        )
+        route = route_for_state(state, review_result=review_result)
+        body = (
+            f"Needs your input\n\n"
+            f"Failed: {detail}\n"
+            f"{tried_line}"
+            f"Need from you: choose an action below (or write guidance).\n\n"
+            f"{feedback_reply_prompt(route)}"
+        )
+    else:
+        stage = (
+            status.removesuffix("_failed")
+            if status.endswith("_failed")
+            else status.removesuffix("_escalated")
+            if status.endswith("_escalated")
+            else "run"
+        )
+        dedup_field = "linear_failures_posted"
+        if status in ("checks_failed", "e2e_failed"):
+            attempt = int(state.get("checks_retry_count") or 0) + 1
+            framing = f"Retrying automatically (attempt {attempt})"
+        elif status.endswith("_failed"):
+            attempt = int(state.get(f"{stage}_retry_count") or 0) + 1
+            framing = f"Retrying **{stage}** automatically (attempt {attempt})"
+        elif status == "ship_failed":
+            framing = "Ship failed — retrying automatically"
+        else:
+            framing = f"**{str(stage).replace('_', ' ').capitalize()}** — continuing"
+        body = (
+            f"{framing}\n\n"
+            f"Failed: {detail}\n"
+            f"Next: Gantry will retry / resolve without waiting on you."
+        )
+
+    kind = "human" if human_gate or status.endswith("_question") else "auto"
+    dedup_key = hashlib.sha256(f"{stage}:{detail}:{kind}".encode()).hexdigest()
+    posted = state.get(dedup_field) or {}
     if posted.get(stage) == dedup_key:
         return
-    review_result = (
-        store.read_result(run_id, "review-result.json")
-        if status == "review_escalated"
-        else None
-    )
-    route = route_for_state(store.state(run_id), review_result=review_result)
-    post_comment(
-        issue_id,
-        f"{framing}\n\n{detail}\n\n"
-        f"Feedback routes to `{route.target_stage}` via `{route.artifact}`.\n"
-        f"{feedback_reply_prompt(route)}",
-        api_key,
-    )
+    post_comment(issue_id, body, api_key)
     store.update_state(run_id, **{dedup_field: {**posted, stage: dedup_key}})
 
 
@@ -516,7 +622,7 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
     _maybe_post_stage_doc(run_id, store, issue_id, status, api_key)
     _maybe_post_stage_failure(run_id, store, issue_id, status, api_key)
 
-    category = status_to_category(status)
+    category = status_to_category(status, run_state)
     if not category:
         return {"synced": True, "issue_id": issue_id, "stage": current_stage,
                 "state_reason": f"status {status!r} has no mapped category"}

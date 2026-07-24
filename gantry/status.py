@@ -197,7 +197,9 @@ MANUALLY_REACHABLE: set[Status] = (
     | set(_FAILED.values())             # a manually-run stage finishing failed
     | set(_CHANGES_REQUESTED.values())  # gantry revise
     | {
-        S.BLOCKED,                    # gantry checks (run_all_checks writes blocked on fail)
+        S.BLOCKED,                    # legacy human-gate alias
+        S.CHECKS_FAILED,              # gantry checks (v1 run_all_checks on fail)
+        S.E2E_FAILED,                 # v1 e2e failure while retry budget remains
         S.REVIEW_RUNNING,             # gantry review
         S.REVIEW_APPROVED,            # gantry review / gantry approve --stage review
         S.REVIEW_CHANGES_REQUESTED,   # gantry review
@@ -251,9 +253,11 @@ AUTOMATIC_TRANSITIONS: dict[Status | tuple[Status, str], set[Status]] = {
     S.DEFINITION_COMPLETE: {S.AWAITING_PLAN},
     # plan_complete -> build_running (via run_agent_stage)
     S.PLAN_COMPLETE: {S.BUILD_RUNNING},
-    # build_complete -> checks_high_risk_escalated / blocked(e2e) /
+    # build_complete -> checks_failed / e2e_failed (v1, retry-pending) /
+    # checks_high_risk_escalated / blocked(legacy) /
     # review_running (evidence skipped) / evidence_running
-    S.BUILD_COMPLETE: {S.CHECKS_RUNNING, S.CHECKS_HIGH_RISK_ESCALATED, S.BLOCKED,
+    S.BUILD_COMPLETE: {S.CHECKS_RUNNING, S.CHECKS_FAILED, S.E2E_FAILED,
+                        S.CHECKS_HIGH_RISK_ESCALATED, S.BLOCKED,
                         S.REVIEW_RUNNING, S.EVIDENCE_RUNNING},
     S.CHECKS_RUNNING: {S.CHECKS_PASSED, S.CHECKS_FAILED, S.CHECKS_HIGH_RISK_ESCALATED},
     S.CHECKS_PASSED: {S.E2E_RUNNING},
@@ -268,6 +272,9 @@ AUTOMATIC_TRANSITIONS: dict[Status | tuple[Status, str], set[Status]] = {
     S.EVIDENCE_COMPLETE: {S.REVIEW_RUNNING},
     # review_changes_requested -> build_running (resume)
     S.REVIEW_CHANGES_REQUESTED: {S.BUILD_RUNNING},
+    # review_escalated after runner_failed auto-retry -> review_running
+    S.REVIEW_ESCALATED: {S.REVIEW_RUNNING, S.REVIEW_APPROVED, S.REVIEW_CHANGES_REQUESTED,
+                         S.REVIEW_ESCALATED},
     # review_approved (+auto_ship) -> shipped / ship_failed / ship_checks_failed
     S.REVIEW_APPROVED: {S.SHIPPED, S.SHIP_FAILED, S.SHIP_CHECKS_FAILED},
     # ship_failed (+auto_ship, retry within cap) -> shipped / ship_failed again

@@ -449,8 +449,14 @@ def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
         # leaving the run permanently stuck at status=blocked.
         store.update_state(run_id, status=Status.BUILD_COMPLETE, blocked_on=None, checks="pass")
     else:
+        # Prefer checks_failed (not blocked) while the auto-retry budget
+        # remains — Linear maps checks_failed to In Progress so the ticket
+        # does not flicker Blocked during self-heal. Exhausted retries still
+        # escalate to checks_escalated via advance_dispatch.
         blocked = BlockedReason.SCOPE if not outcome.scope["pass"] else BlockedReason.CHECKS
-        store.update_state(run_id, status=Status.BLOCKED, blocked_on=blocked, checks="fail")
+        store.update_state(
+            run_id, status=Status.CHECKS_FAILED, blocked_on=blocked, checks="fail",
+        )
     return out
 
 

@@ -84,7 +84,9 @@ class TestFeedbackRouteMatrix(unittest.TestCase):
         linear = reply_prompt(route, channel="linear")
         self.assertIn("*Reply 1*", notification)
         self.assertIn("1.", watch)
-        self.assertIn("Reply `1`", linear)
+        self.assertIn("`revise`", linear)
+        self.assertIn("`hold`", linear)
+        self.assertNotIn("Reply `1`", linear)
         for text in (notification, watch, linear):
             self.assertIn("guidance", text)
             self.assertIn("leave", text)

@@ -216,6 +216,17 @@ def route_for_state(state: dict, review_result: dict | None = None) -> FeedbackR
     )
 
 
+_LINEAR_KEYWORDS = {
+    "approve": "`approve`",
+    "revise": "`revise` or write guidance in plain English",
+    "retry": "`retry`",
+    "retry_stage": "`retry`",
+    "retry_ship": "`retry ship`",
+    "hold": "`hold`",
+    "answer": "reply with your answer",
+}
+
+
 def reply_prompt(route: FeedbackRoute, channel: str = "notification") -> str:
     """Render the route's choices for Telegram, CLI/watch, or Linear."""
     descriptions = [_OPTION_TEXT[option] for option in route.reply_options]
@@ -225,10 +236,13 @@ def reply_prompt(route: FeedbackRoute, channel: str = "notification") -> str:
             for index, description in enumerate(descriptions, 1)
         )
     if channel == "linear":
-        return " ".join(
-            f"Reply `{index}` to {description}."
-            for index, description in enumerate(descriptions, 1)
-        )
+        # Linear tickets use keyword / prose replies — numbered 1/2 is a
+        # Telegram-era UX that feels wrong in an issue thread.
+        lines = ["How to reply (comment on this issue):"]
+        for option, description in zip(route.reply_options, descriptions):
+            keyword = _LINEAR_KEYWORDS.get(option, f"`{option}`")
+            lines.append(f"- {keyword} — {description}")
+        return "\n".join(lines)
     if channel == "watch":
         return "\n".join(
             f"{index}. {description}" for index, description in enumerate(descriptions, 1)

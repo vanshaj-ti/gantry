@@ -559,6 +559,19 @@ def _run_review_two_axis(store: RunStore, run_id: str, cfg: GantryConfig, cwd: P
 
     if store.state(run_id).get("status") == Status.CANCELLED:
         return out
+
+    # Runner transport failures are not a human judgment call — mark and let
+    # run_review() auto-retry. Only a successful invoke that returns ESCALATE
+    # (or exhausted retries) should land on review_escalated.
+    runner_failed = (
+        spec.get("findings_source") == "runner_failed"
+        or standards.get("findings_source") == "runner_failed"
+        or not out["ok"]
+    )
+    if combined_verdict == "ESCALATE" and runner_failed:
+        out["runner_failed"] = True
+        return out
+
     status = {"APPROVE": Status.REVIEW_APPROVED, "REQUEST_CHANGES": Status.REVIEW_CHANGES_REQUESTED,
               "ESCALATE": Status.REVIEW_ESCALATED}[combined_verdict]
     store.update_state(run_id, status=status, review_verdict=combined_verdict)
@@ -618,9 +631,14 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
 
     out = {"verdict": verdict, "ok": result.ok, "model": profile.model,
            "session_id": result.session_id, "result": str(text)[:8000]}
+    if not result.ok:
+        out["runner_failed"] = True
+        out["findings_source"] = "runner_failed"
     store.write_result(run_id, "review-result.json", out)
 
     if store.state(run_id).get("status") == Status.CANCELLED:
+        return out
+    if out.get("runner_failed"):
         return out
     status = {"APPROVE": Status.REVIEW_APPROVED, "REQUEST_CHANGES": Status.REVIEW_CHANGES_REQUESTED,
               "ESCALATE": Status.REVIEW_ESCALATED}[verdict]
@@ -632,13 +650,56 @@ def _run_review_single(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Pat
     return out
 
 
+def _finalize_runner_failed_escalate(store: RunStore, run_id: str, cfg: GantryConfig,
+                                     out: dict[str, Any]) -> dict[str, Any]:
+    """After retry budget is spent, surface runner failure as a human gate."""
+    out = {**out, "runner_failed": True, "verdict": "ESCALATE",
+           "combined_verdict": out.get("combined_verdict") or out.get("verdict") or "ESCALATE"}
+    store.write_result(run_id, "review-result.json", out)
+    if store.state(run_id).get("status") != Status.CANCELLED:
+        store.update_state(
+            run_id, status=Status.REVIEW_ESCALATED, review_verdict="ESCALATE",
+        )
+        _report_herdr(cfg, run_id, Status.REVIEW_ESCALATED)
+    return out
+
+
+def is_review_runner_failure(result: dict[str, Any] | None) -> bool:
+    """True when review stopped because the agent invoke failed, not judgment."""
+    if not result:
+        return False
+    if result.get("runner_failed"):
+        return True
+    if result.get("two_axis"):
+        for axis in ("spec", "standards"):
+            ax = result.get(axis) or {}
+            if ax.get("findings_source") == "runner_failed":
+                return True
+        return False
+    return result.get("findings_source") == "runner_failed" or result.get("ok") is False
+
+
 def run_review(store: RunStore, run_id: str, cfg: GantryConfig, cwd: Path) -> dict[str, Any]:
     """Entry point unchanged for every existing caller (advance.py, cmd_review).
     Dispatches on cfg.review.two_axis: True (default) runs both Spec and
     Standards axes in parallel and combines their verdicts (see
     `_run_review_two_axis`); False restores the exact legacy single-verdict,
     single-session behavior (see `_run_review_single`) for projects that want
-    to opt out of the ~2x LLM call cost."""
-    if cfg.review.two_axis:
-        return _run_review_two_axis(store, run_id, cfg, cwd)
-    return _run_review_single(store, run_id, cfg, cwd)
+    to opt out of the ~2x LLM call cost.
+
+    Runner/transport failures auto-retry up to ``agent.stage_retry_attempts``
+    times before escalating — a dead invoke is not a human judgment call.
+    """
+    attempts = max(1, int(cfg.agent.stage_retry_attempts) + 1)
+    last: dict[str, Any] = {}
+    for attempt in range(attempts):
+        store.update_state(run_id, review_retry_count=attempt, stage_retry_max=attempts - 1)
+        if cfg.review.two_axis:
+            last = _run_review_two_axis(store, run_id, cfg, cwd)
+        else:
+            last = _run_review_single(store, run_id, cfg, cwd)
+        if store.state(run_id).get("status") == Status.CANCELLED:
+            return last
+        if not is_review_runner_failure(last):
+            return last
+    return _finalize_runner_failed_escalate(store, run_id, cfg, last)

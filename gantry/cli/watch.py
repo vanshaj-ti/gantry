@@ -27,9 +27,51 @@ _WATCH_COLOR = {
 # unpredictably on every single reply, not just this one word form).
 _AFFIRMATIVE_PREFIXES = ("approve", "yes", "y", "retry", "lgtm", "ok", "okay", "continue")
 
+_HOLD_PREFIXES = ("hold", "leave it", "leave", "ignore", "skip")
+_RETRY_SHIP_PREFIXES = ("retry ship", "reship", "re-ship")
+
 
 def _is_affirmative_reply(lowered: str) -> bool:
     return lowered.startswith(_AFFIRMATIVE_PREFIXES)
+
+
+def _resolve_reply_action(lowered: str, route) -> str:
+    """Map a human reply to a route action.
+
+    Prefer keywords (Linear-friendly) over numbered Telegram-style replies.
+    Freeform prose maps to revise when that option exists; otherwise ask is
+    handled by falling through to the first option only for affirmatives.
+    """
+    options = route.reply_options
+    if lowered.startswith(_RETRY_SHIP_PREFIXES) and "retry_ship" in options:
+        return "retry_ship"
+    if lowered.startswith(("retry stage", "retry the stage")) and "retry_stage" in options:
+        return "retry_stage"
+    if lowered.startswith("retry") and "retry" in options:
+        return "retry"
+    if lowered.startswith("retry") and "retry_stage" in options:
+        return "retry_stage"
+    if lowered.startswith("retry") and "retry_ship" in options:
+        return "retry_ship"
+    if lowered.startswith(_HOLD_PREFIXES) and "hold" in options:
+        return "hold"
+    if lowered.startswith("revise") and "revise" in options:
+        return "revise"
+    if _is_affirmative_reply(lowered) and "approve" in options:
+        return "approve"
+    if _is_affirmative_reply(lowered) and options:
+        # "retry" is in affirmative prefixes — already handled above when present.
+        return options[0]
+    # Numbered replies kept for Telegram/watch compatibility only.
+    if lowered[:1].isdigit():
+        numbered = int(lowered[0]) - 1
+        if 0 <= numbered < len(options):
+            return options[numbered]
+    if "revise" in options:
+        return "revise"
+    if "answer" in options:
+        return "answer"
+    return options[0] if options else "revise"
 
 
 def _watch_color_family(status: str) -> str:
@@ -280,15 +322,7 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
     )
     route = route_for_state(st, review_result=review_result)
 
-    numbered = int(lowered[0]) - 1 if lowered[:1].isdigit() else None
-    if numbered is not None and 0 <= numbered < len(route.reply_options):
-        action = route.reply_options[numbered]
-    elif _is_affirmative_reply(lowered):
-        action = route.reply_options[0]
-    elif "revise" in route.reply_options:
-        action = "revise"
-    else:
-        action = route.reply_options[0]
+    action = _resolve_reply_action(lowered, route)
 
     def feedback_text() -> str:
         return text[1:].strip() if lowered[:1].isdigit() else text
