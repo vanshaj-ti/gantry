@@ -7,6 +7,17 @@
 # that layer.
 set -e
 
+# GCP / plain-env deploys pass GH_TOKEN but do not mount a host ~/.gitconfig.
+# Without a credential helper, `git push` to https://github.com fails with
+# "could not read Username for 'https://github.com'" even though `gh` itself
+# is authenticated via GH_TOKEN. Mirror the local docker-up sanitization.
+if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+    git config --global credential.helper '!gh auth git-credential'
+fi
+# Bind-mounted worktrees are often root-owned on the VM; avoid dubious-
+# ownership blocks on push/fetch inside the container.
+git config --global --add safe.directory '*'
+
 INTERVAL="${GANTRY_TICK_INTERVAL:-60}"
 # How often (in ticks) to sweep shipped/cancelled runs' worktrees + state —
 # without this, worktrees (each a full checkout, often with heavy
