@@ -1,0 +1,42 @@
+{
+  "plan": {
+    "session_id": "sess-plan-legacy-001",
+    "model": "opus",
+    "runner": "claude-code"
+  },
+  "build": {
+    "session_id": "sess-build-legacy-001",
+    "model": "opus",
+    "runner": "claude-code"
+  },
+  "evidence": {
+    "session_id": "sess-evidence-legacy-001",
+    "model": "sonnet",
+    "runner": "claude-code"
+  },
+  "review_spec": {
+    "session_id": "sess-review-spec-legacy-001",
+    "model": "sonnet",
+    "runner": "claude-code"
+  },
+  "review_standards": {
+    "session_id": "sess-review-standards-legacy-001",
+    "model": "sonnet",
+    "runner": "claude-code"
+  },
+  "investigation": {
+    "session_id": "sess-investigation-legacy-001",
+    "model": "opus",
+    "runner": "claude-code"
+  },
+  "spec": {
+    "session_id": "sess-spec-legacy-001",
+    "model": "opus",
+    "runner": "claude-code"
+  },
+  "design": {
+    "session_id": "sess-design-legacy-001",
+    "model": "opus",
+    "runner": "claude-code"
+  }
+}
