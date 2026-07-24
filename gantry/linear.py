@@ -633,11 +633,17 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
         return {"synced": False, "reason": "no linear issue tracked for this run"}
 
     run_state = store.state(run_id)
-    current_stage = run_state.get("current_stage")
-    if current_stage:
-        set_stage_label(issue_id, current_stage, team_id, api_key)
-
     status = run_state.get("status", "")
+    current_stage = run_state.get("current_stage")
+    # Ship is not a pipeline stage in `stages`, so current_stage often remains
+    # "review" after auto_ship. Still swap the visible stage:* label so Done
+    # tickets don't keep advertising stage:review.
+    stage_for_label = current_stage
+    if status in ("shipped", "shipped_manually", "ship_failed", "ship_checks_failed"):
+        stage_for_label = "ship"
+    if stage_for_label:
+        set_stage_label(issue_id, stage_for_label, team_id, api_key)
+
     _maybe_post_run_announcement(run_id, store, issue_id, status, current_stage, api_key)
     _maybe_post_stage_progress(run_id, store, issue_id, status, api_key)
     _maybe_post_stage_doc(run_id, store, issue_id, status, api_key)
@@ -652,14 +658,14 @@ def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> di
         if is_review_runner_failure(store.read_result(run_id, "review-result.json")):
             category = "in_progress"
     if not category:
-        return {"synced": True, "issue_id": issue_id, "stage": current_stage,
+        return {"synced": True, "issue_id": issue_id, "stage": stage_for_label,
                 "state_reason": f"status {status!r} has no mapped category"}
     state_id = resolve_state_id(team_id, category, api_key)
     if not state_id:
-        return {"synced": True, "issue_id": issue_id, "stage": current_stage,
+        return {"synced": True, "issue_id": issue_id, "stage": stage_for_label,
                 "state_reason": f"no Linear state found for category {category!r}"}
     set_issue_state(issue_id, state_id, api_key)
-    return {"synced": True, "issue_id": issue_id, "stage": current_stage, "category": category}
+    return {"synced": True, "issue_id": issue_id, "stage": stage_for_label, "category": category}
 
 
 def classify_ticket(title: str, description: str, *,

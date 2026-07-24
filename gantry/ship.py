@@ -230,9 +230,10 @@ def ship_run(engine: Engine, run_id: str) -> dict[str, Any]:
         # human or a later retry can merge it manually), not the same failure
         # class as a broken commit/push/PR-creation step above.
         engine.store.update_state(run_id, status=Status.SHIPPED, pr_url=pr_res.get("url"),
-                                  merged=merge_res["ok"])
+                                  merged=merge_res["ok"], current_stage="ship")
     else:
-        engine.store.update_state(run_id, status=Status.SHIPPED, pr_url=pr_res.get("url"))
+        engine.store.update_state(run_id, status=Status.SHIPPED, pr_url=pr_res.get("url"),
+                                  current_stage="ship")
 
     return {"ok": True, "commit": commit_res, "push": push_res, "pr": pr_res, "merge": merge_res,
             "branch": remote_branch, "title": title}

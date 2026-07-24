@@ -768,6 +768,37 @@ class TestSyncRunnerFailedReviewStaysInProgress(unittest.TestCase):
         set_state.assert_called_once_with("issue-1", "state-ip", "key")
 
 
+class TestSyncShippedSetsShipStageLabel(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self._tmp.name)
+        _init_scratch_repo(self.target)
+        self.cfg = GantryConfig()
+        self.eng = Engine(self.target, self.cfg)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_shipped_uses_stage_ship_even_if_current_stage_is_review(self):
+        from gantry.linear import sync_issue_status
+
+        run_id = self.eng.create_run("t", "r", tag="chore")
+        store = self.eng.store
+        store.record_linear_issue("issue-1", run_id)
+        store.update_state(run_id, status="shipped", current_stage="review")
+        with patch("gantry.linear.set_stage_label") as set_label, \
+             patch("gantry.linear._maybe_post_run_announcement"), \
+             patch("gantry.linear._maybe_post_stage_progress"), \
+             patch("gantry.linear._maybe_post_stage_doc"), \
+             patch("gantry.linear._maybe_post_stage_failure"), \
+             patch("gantry.linear.resolve_state_id", return_value="state-done"), \
+             patch("gantry.linear.set_issue_state"):
+            out = sync_issue_status(run_id, store, "team", "key")
+        set_label.assert_called_once_with("issue-1", "ship", "team", "key")
+        self.assertEqual(out.get("stage"), "ship")
+        self.assertEqual(out.get("category"), "done")
+
+
 
 if __name__ == "__main__":
     unittest.main()
