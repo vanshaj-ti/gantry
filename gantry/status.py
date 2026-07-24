@@ -69,6 +69,16 @@ class Status(StrEnum):
     SPEC_CHANGES_REQUESTED = "spec_changes_requested"
     DESIGN_CHANGES_REQUESTED = "design_changes_requested"
 
+    CHECKS_RUNNING = "checks_running"
+    CHECKS_PASSED = "checks_passed"
+    CHECKS_FAILED = "checks_failed"
+
+    E2E_RUNNING = "e2e_running"
+    E2E_PASSED = "e2e_passed"
+    E2E_FAILED = "e2e_failed"
+    E2E_SKIPPED = "e2e_skipped"
+    E2E_ESCALATED = "e2e_escalated"
+
     AWAITING_EVIDENCE = "awaiting_evidence"
     EVIDENCE_RUNNING = "evidence_running"
     EVIDENCE_COMPLETE = "evidence_complete"
@@ -231,8 +241,17 @@ AUTOMATIC_TRANSITIONS: dict[Status | tuple[Status, str], set[Status]] = {
     S.PLAN_COMPLETE: {S.BUILD_RUNNING},
     # build_complete -> checks_high_risk_escalated / blocked(e2e) /
     # review_running (evidence skipped) / evidence_running
-    S.BUILD_COMPLETE: {S.CHECKS_HIGH_RISK_ESCALATED, S.BLOCKED, S.REVIEW_RUNNING,
-                        S.EVIDENCE_RUNNING},
+    S.BUILD_COMPLETE: {S.CHECKS_RUNNING, S.CHECKS_HIGH_RISK_ESCALATED, S.BLOCKED,
+                        S.REVIEW_RUNNING, S.EVIDENCE_RUNNING},
+    S.CHECKS_RUNNING: {S.CHECKS_PASSED, S.CHECKS_FAILED, S.CHECKS_HIGH_RISK_ESCALATED},
+    S.CHECKS_PASSED: {S.E2E_RUNNING},
+    S.CHECKS_FAILED: {S.CHECKS_ESCALATED, S.BUILD_RUNNING, S.BUILD_COMPLETE,
+                      S.BUILD_FAILED},
+    S.E2E_RUNNING: {S.E2E_PASSED, S.E2E_FAILED, S.E2E_SKIPPED},
+    S.E2E_PASSED: {S.REVIEW_RUNNING, S.EVIDENCE_RUNNING},
+    S.E2E_SKIPPED: {S.REVIEW_RUNNING, S.EVIDENCE_RUNNING},
+    S.E2E_FAILED: {S.E2E_ESCALATED, S.BUILD_RUNNING, S.BUILD_COMPLETE,
+                   S.BUILD_FAILED},
     # evidence_complete -> review_running
     S.EVIDENCE_COMPLETE: {S.REVIEW_RUNNING},
     # review_changes_requested -> build_running (resume)
@@ -319,7 +338,9 @@ TRANSITIONS: dict[Status | tuple[Status, str], set[Status]] = _merge_transitions
 # `_running` (matches cmd_hold's own docstring/guard) — held itself is
 # handled as its own special case in validate_transition (resuming a held run
 # can restore ANY prior status, so from_status == HELD always validates).
-_RUNNING_STATUSES = set(_RUNNING.values()) | {S.RESOLVE_RUNNING, S.REVIEW_RUNNING}
+_RUNNING_STATUSES = set(_RUNNING.values()) | {
+    S.RESOLVE_RUNNING, S.REVIEW_RUNNING, S.CHECKS_RUNNING, S.E2E_RUNNING,
+}
 
 
 def can_hold_or_cancel(current: Status | str) -> bool:

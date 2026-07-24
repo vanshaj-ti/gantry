@@ -56,7 +56,11 @@ class _RouteRule:
 
 _ROUTE_RULES = (
     _RouteRule(("blocked",), "build", ("retry", "revise"), ("scope", "checks", "e2e")),
-    _RouteRule(("checks_escalated", "resolve_escalated"), "build", ("revise", "hold")),
+    _RouteRule(("checks_failed", "e2e_failed"), "build", ("retry", "revise")),
+    _RouteRule(
+        ("checks_escalated", "e2e_escalated", "resolve_escalated"),
+        "build", ("revise", "hold"),
+    ),
     _RouteRule(
         ("checks_high_risk_escalated",), "build", ("approve", "revise"),
         ("high_risk_paths",),

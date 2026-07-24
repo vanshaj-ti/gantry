@@ -2,7 +2,7 @@
 
 **Point it at a repo, describe a task, get a reviewed pull request — with as much or as little human involvement as you want.**
 
-Gantry drives a coding agent (Claude Code, Cursor, or Codex) through a staged pipeline — spec, design, plan, build, checks, evidence, review, ship — in an isolated git worktree, with deterministic guardrails and an independent LLM review before anything reaches a PR. Nothing is hardcoded: the agent, the model, the repo's own lint/test commands, and how much autonomy you allow all live in one config file per project.
+Gantry drives a coding agent (Cursor SDK by default, or Claude Code / Cursor CLI / Codex) through a staged pipeline — spec, design, plan, build, checks, evidence, review, ship — in an isolated git worktree, with deterministic guardrails and an independent LLM review before anything reaches a PR. Nothing is hardcoded: the agent, the model, the repo's own lint/test commands, and how much autonomy you allow all live in one config file per project.
 
 ```
 spec ──▶ design ──▶ plan ──▶ build ──▶ checks ──▶ evidence ──▶ review ──▶ ship
@@ -48,7 +48,9 @@ gantry --version
 
 </details>
 
-**Requirements:** Python ≥ 3.11, and at least one agent runner CLI on PATH — `claude` (Claude Code), `cursor-agent` (Cursor), or `codex` (Codex). Run `gantry doctor` any time to check.
+**Requirements:** Python ≥ 3.11. Primary driver is the Cursor Python SDK (`cursor-sdk`, auth via `CURSOR_API_KEY`). CLI fallbacks remain first-class: `cursor-agent` (Cursor CLI), `claude` (Claude Code), or `codex` (Codex). Run `gantry doctor` any time to check package/auth readiness and fallbacks.
+
+See [docs/cursor-sdk-compatibility.md](docs/cursor-sdk-compatibility.md) and [docs/migration-agent-architecture.md](docs/migration-agent-architecture.md) for SDK assumptions, rollback, and session lineage.
 
 **Already have some tools, added another one later?** `gantry doctor --fix` notices a runner CLI that showed up on your PATH after the fact and offers to register it in `gantry.toml` — no need to hand-edit config just because you installed Cursor last week.
 

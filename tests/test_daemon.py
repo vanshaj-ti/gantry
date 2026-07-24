@@ -103,6 +103,16 @@ class TestAdvanceTargetWithTimeout(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("boom", result["error"])
 
+    def test_daemon_counts_explicit_verification_stage_advances(self):
+        from gantry.config import GantryConfig
+
+        advances = [{"run_id": "r1", "action": "checks_passed"}]
+        with mock.patch("gantry.config.load_config", return_value=GantryConfig()), \
+             mock.patch("gantry.advance.advance_all", return_value=advances):
+            result = daemon._advance_target(Path("/v2"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["advanced"], 1)
+
 
 class TestRunTickPerTargetTimeout(unittest.TestCase):
     """A hanging target inside run_tick's own loop must not prevent later

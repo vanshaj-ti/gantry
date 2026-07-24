@@ -33,7 +33,11 @@ def _is_affirmative_reply(lowered: str) -> bool:
 
 
 def _watch_color_family(status: str) -> str:
-    if status in ("shipped", "shipped_manually") or status.endswith("_complete") or status == "review_approved":
+    if (
+        status in ("shipped", "shipped_manually", "checks_passed", "e2e_passed", "e2e_skipped")
+        or status.endswith("_complete")
+        or status == "review_approved"
+    ):
         return "green"
     if status in ("blocked",) or status.endswith("_escalated") or status.endswith("_failed"):
         return "red"
@@ -90,8 +94,11 @@ def cmd_watch(args) -> int:
         """Retry/blocked context only — agent/model/session now have their
         own columns (see running_session), so this stays scoped to what a
         stuck run is actually blocked on."""
-        if status not in ("blocked", "checks_escalated", "resolve_escalated", "held",
-                          "shipped", "shipped_manually"):
+        if status not in (
+            "blocked", "checks_failed", "e2e_failed", "checks_escalated",
+            "e2e_escalated", "resolve_escalated", "held", "shipped",
+            "shipped_manually",
+        ):
             return ""
         st = store.state(run_id)
         if status == "held":
@@ -317,9 +324,13 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
             _notify(store, notifier, run_id, f"*{run_id}* {stage}: {label(new_status)}")
         return
 
-    if status == "blocked":
+    if status in ("blocked", "checks_failed", "e2e_failed"):
         if action == "retry":
-            eng.run_checks(run_id)
+            if status == "blocked":
+                eng.run_checks(run_id)
+            else:
+                from ..advance import advance_run
+                advance_run(eng, run_id)
             new_status = store.state(run_id).get("status", "")
             _notify(store, notifier, run_id, f"Re-checked *{run_id}* — now: {label(new_status)}")
         else:
@@ -330,7 +341,8 @@ def _handle_reply(store, cfg, notifier, run_id: str, text: str) -> None:
         return
 
     if status in (
-        "checks_escalated", "resolve_escalated", "checks_high_risk_escalated",
+        "checks_escalated", "e2e_escalated", "resolve_escalated",
+        "checks_high_risk_escalated",
         "ship_checks_failed", "ship_failed",
     ):
         if action == "approve":

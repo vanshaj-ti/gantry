@@ -15,13 +15,49 @@ import fnmatch
 import json
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .config import CheckCommand, ChecksConfig, ScopeConfig, _coerce_check_command
-from .state import RunStore
+from .state import RunStore, now_iso
 from .status import BlockedReason, Status
+
+
+@dataclass(frozen=True)
+class ChecksOutcome:
+    """Typed, transition-free result of the checks verification stage."""
+
+    passed: bool
+    scope: dict[str, Any]
+    checks: dict[str, Any]
+    started_at: str = field(default_factory=now_iso)
+    completed_at: str = field(default_factory=now_iso)
+    duration_seconds: float = 0.0
+
+    @classmethod
+    def passed_outcome(
+        cls, *, scope: dict[str, Any], checks: dict[str, Any],
+    ) -> "ChecksOutcome":
+        return cls(passed=True, scope=scope, checks=checks)
+
+    @classmethod
+    def failed_outcome(
+        cls, *, scope: dict[str, Any], checks: dict[str, Any],
+    ) -> "ChecksOutcome":
+        return cls(passed=False, scope=scope, checks=checks)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pass": self.passed,
+            "scope": self.scope,
+            "checks": self.checks,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "duration_seconds": self.duration_seconds,
+        }
 
 
 def _merge_base(cwd: Path, base: str) -> str:
@@ -381,13 +417,30 @@ def run_repo_checks(cfg: ChecksConfig, cwd: Path, store: "RunStore | None" = Non
     return {"pass": all_pass, "results": results}
 
 
-def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
-                   checks_cfg: ChecksConfig, cwd: Path, base: str) -> dict[str, Any]:
+def evaluate_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
+                    checks_cfg: ChecksConfig, cwd: Path, base: str) -> ChecksOutcome:
+    """Execute checks and return a typed outcome without changing run status."""
+    started_at = now_iso()
+    started = time.monotonic()
     scope = run_scope_guard(store, run_id, scope_cfg, cwd, base)
     checks = run_repo_checks(checks_cfg, cwd, store=store, run_id=run_id)
-    out = {"pass": scope["pass"] and checks["pass"], "scope": scope, "checks": checks}
+    return ChecksOutcome(
+        passed=scope["pass"] and checks["pass"],
+        scope=scope,
+        checks=checks,
+        started_at=started_at,
+        completed_at=now_iso(),
+        duration_seconds=round(time.monotonic() - started, 6),
+    )
+
+
+def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
+                   checks_cfg: ChecksConfig, cwd: Path, base: str) -> dict[str, Any]:
+    """Legacy adapter retaining the embedded build-complete transition path."""
+    outcome = evaluate_checks(store, run_id, scope_cfg, checks_cfg, cwd, base)
+    out = outcome.to_dict()
     store.write_result(run_id, "checks.json", out)
-    if out["pass"]:
+    if outcome.passed:
         # Clear any prior block so advance_all (which only fires on
         # AUTO_TRANSITIONS states) can pick this run back up. Restoring
         # status to build_complete re-enters the normal build->evidence
@@ -396,7 +449,7 @@ def run_all_checks(store: RunStore, run_id: str, scope_cfg: ScopeConfig,
         # leaving the run permanently stuck at status=blocked.
         store.update_state(run_id, status=Status.BUILD_COMPLETE, blocked_on=None, checks="pass")
     else:
-        blocked = BlockedReason.SCOPE if not scope["pass"] else BlockedReason.CHECKS
+        blocked = BlockedReason.SCOPE if not outcome.scope["pass"] else BlockedReason.CHECKS
         store.update_state(run_id, status=Status.BLOCKED, blocked_on=blocked, checks="fail")
     return out
 

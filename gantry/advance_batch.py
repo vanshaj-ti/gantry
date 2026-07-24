@@ -12,7 +12,8 @@ from .status import FailureKind, Status
 # Transitions the poller drives automatically (no human gate).
 AUTO_TRANSITIONS = {
     "plan_complete", "build_complete", "evidence_complete", "review_changes_requested",
-    "blocked", "queued",
+    "blocked", "queued", "checks_passed", "checks_failed",
+    "e2e_passed", "e2e_skipped", "e2e_failed",
     *(f"awaiting_{stage}" for stage in AGENT_STAGES),
     *(f"awaiting_{stage}" for stage in DOC_STAGES),
 }

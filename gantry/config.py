@@ -36,6 +36,7 @@ DEFAULT_STAGES = ["plan", "build", "evidence", "review"]
 DOC_STAGES = {"spec", "design", "investigation", "research"}  # human-authored/agent-drafted, human-gated
 AGENT_STAGES = {"plan", "build", "evidence"}  # invoke the agent runner
 REVIEW_STAGE = "review"                    # independent LLM review
+VERIFICATION_STAGES = {"checks", "e2e"}
 
 STAGE_ARTIFACTS = {
     "spec": "product-spec.md",
@@ -314,6 +315,24 @@ class E2eConfig:
 
 
 @dataclass
+class PipelineConfig:
+    """Version of the run graph pinned into state at creation time."""
+
+    version: int = 1
+
+
+def stages_for_pipeline(stages: list[str], version: int) -> list[str]:
+    """Expand v2's verification stages without changing legacy defaults."""
+    pinned = list(stages)
+    if version < 2 or "build" not in pinned:
+        return pinned
+    pinned = [stage for stage in pinned if stage not in VERIFICATION_STAGES]
+    build_index = pinned.index("build") + 1
+    pinned[build_index:build_index] = ["checks", "e2e"]
+    return pinned
+
+
+@dataclass
 class PlanConfig:
     """Context injection + depth for the plan stage's rendered prompt."""
     include_git_log: bool = False   # prepend the last N `git log --oneline` lines
@@ -507,6 +526,7 @@ class GantryConfig:
     scope: ScopeConfig = field(default_factory=ScopeConfig)
     checks: ChecksConfig = field(default_factory=ChecksConfig)
     e2e: E2eConfig = field(default_factory=E2eConfig)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     plan: PlanConfig = field(default_factory=PlanConfig)
     build: BuildConfig = field(default_factory=BuildConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
@@ -686,6 +706,8 @@ def load_config(target_workspace: Path) -> GantryConfig:
             spec_glob=e.get("spec_glob", E2eConfig().spec_glob),
             timeout=int(e.get("timeout", 1800)),
         )
+    if "pipeline" in raw:
+        cfg.pipeline = PipelineConfig(version=int(raw["pipeline"].get("version", 1)))
     if "plan" in raw:
         p = raw["plan"]
         cfg.plan = PlanConfig(

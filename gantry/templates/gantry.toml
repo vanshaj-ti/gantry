@@ -17,6 +17,11 @@ stages = ["plan", "build", "evidence", "review"]
 # Where stage prompt templates live (relative to this file, or absolute).
 prompts_dir = ".gantry/prompts"
 
+# Version 1 preserves the legacy embedded build -> checks/e2e -> evidence edge.
+# Set version = 2 to pin checks and E2E as explicit, observable run stages.
+[pipeline]
+version = 1
+
 # Gantry ships 5 fixed, generic Linear-intake queues out of the box (see
 # gantry/linear.py's classifier tags: feature/bug/hotfix/research/chore) —
 # each with its own default stage list, no config needed here to get them.

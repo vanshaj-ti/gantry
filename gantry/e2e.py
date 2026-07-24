@@ -10,12 +10,58 @@ kill) an expensive LLM turn — this step is cheap to re-run on its own.
 from __future__ import annotations
 
 import subprocess
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .checks import _changed_files, _merge_base
 from .config import E2eConfig, _coerce_e2e_app
-from .state import RunStore
+from .state import RunStore, now_iso
+
+
+@dataclass(frozen=True)
+class E2eOutcome:
+    """Typed, transition-free result of the E2E verification stage."""
+
+    status: str
+    passed: bool
+    enabled: bool
+    apps: list[dict[str, Any]]
+    reason: str | None = None
+    base: str | None = None
+    touched_apps: list[str] = field(default_factory=list)
+    started_at: str = field(default_factory=now_iso)
+    completed_at: str = field(default_factory=now_iso)
+    duration_seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "status": self.status,
+            "enabled": self.enabled,
+            "pass": self.passed,
+            "apps": self.apps,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "duration_seconds": self.duration_seconds,
+        }
+        if self.reason:
+            out["reason"] = self.reason
+        if self.base is not None:
+            out["base"] = self.base
+            out["touched_apps"] = self.touched_apps
+        return out
+
+    def to_legacy_dict(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"enabled": False, "pass": True, "apps": []}
+        return {
+            "enabled": True,
+            "base": self.base,
+            "touched_apps": self.touched_apps,
+            "apps": self.apps,
+            "pass": self.passed,
+        }
 
 
 def _touched_apps(files: list[str], apps: dict[str, Any]) -> list[str]:
@@ -68,20 +114,24 @@ def _run_one_app(cwd: Path, app: str, command: str, timeout: int) -> dict[str, A
     }
 
 
-def run_e2e_tests(store: RunStore, run_id: str, cfg: E2eConfig, cwd: Path, base: str) -> dict[str, Any]:
-    """No-op result (pass=True, apps=[]) when e2e isn't configured, or when no
-    configured app was touched — evidence stage's own fallback path (running
-    Playwright itself) only kicks in via the prompt template, not here.
-
-    A failing app retries up to its own E2eAppConfig.retry count before being
-    included in the failure report as failed — scoped per-app since e2e
-    flakiness is usually app-specific (a Playwright suite hitting a real
-    external service is flakier than a pure-frontend suite), unlike
-    checks.retry_checks which retries the whole build on any check failure."""
-    if not cfg.enabled or not cfg.apps:
-        out = {"enabled": False, "pass": True, "apps": []}
-        store.write_result(run_id, "e2e-report.json", out)
-        return out
+def evaluate_e2e(store: RunStore, run_id: str, cfg: E2eConfig,
+                 cwd: Path, base: str) -> E2eOutcome:
+    """Execute E2E and return a typed outcome without changing run state."""
+    del store, run_id
+    started_at = now_iso()
+    started = time.monotonic()
+    if not cfg.enabled:
+        return E2eOutcome(
+            status="skipped", passed=True, enabled=False, apps=[],
+            reason="disabled", started_at=started_at, completed_at=now_iso(),
+            duration_seconds=round(time.monotonic() - started, 6),
+        )
+    if not cfg.apps:
+        return E2eOutcome(
+            status="skipped", passed=True, enabled=False, apps=[],
+            reason="no_apps_configured", started_at=started_at, completed_at=now_iso(),
+            duration_seconds=round(time.monotonic() - started, 6),
+        )
 
     apps = {name: _coerce_e2e_app(spec) for name, spec in cfg.apps.items()}
     fixed_base = _merge_base(cwd, base)
@@ -109,12 +159,33 @@ def run_e2e_tests(store: RunStore, run_id: str, cfg: E2eConfig, cwd: Path, base:
         all_pass = all_pass and result["pass"]
         results.append(result)
 
-    out = {
-        "enabled": True,
-        "base": fixed_base,
-        "touched_apps": candidates,
-        "apps": results,
-        "pass": all_pass,
-    }
+    status = "failed" if not all_pass else ("skipped" if not candidates else "passed")
+    reason = "no_touched_apps" if not candidates else None
+    return E2eOutcome(
+        status=status,
+        passed=all_pass,
+        enabled=True,
+        base=fixed_base,
+        touched_apps=candidates,
+        apps=results,
+        reason=reason,
+        started_at=started_at,
+        completed_at=now_iso(),
+        duration_seconds=round(time.monotonic() - started, 6),
+    )
+
+
+def run_e2e_tests(store: RunStore, run_id: str, cfg: E2eConfig, cwd: Path, base: str) -> dict[str, Any]:
+    """No-op result (pass=True, apps=[]) when e2e isn't configured, or when no
+    configured app was touched — evidence stage's own fallback path (running
+    Playwright itself) only kicks in via the prompt template, not here.
+
+    A failing app retries up to its own E2eAppConfig.retry count before being
+    included in the failure report as failed — scoped per-app since e2e
+    flakiness is usually app-specific (a Playwright suite hitting a real
+    external service is flakier than a pure-frontend suite), unlike
+    checks.retry_checks which retries the whole build on any check failure."""
+    outcome = evaluate_e2e(store, run_id, cfg, cwd, base)
+    out = outcome.to_legacy_dict()
     store.write_result(run_id, "e2e-report.json", out)
     return out

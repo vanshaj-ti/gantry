@@ -34,13 +34,15 @@ from typing import Any
 _STATE_MAP = {
     "spec_running": "working", "design_running": "working",
     "plan_running": "working", "build_running": "working", "evidence_running": "working",
-    "review_running": "working",
+    "review_running": "working", "checks_running": "working", "e2e_running": "working",
     "spec_complete": "idle", "design_complete": "idle",
     "plan_complete": "idle", "build_complete": "idle", "evidence_complete": "idle",
-    "review_approved": "idle",
+    "review_approved": "idle", "checks_passed": "idle", "e2e_passed": "idle",
+    "e2e_skipped": "idle",
     "spec_failed": "blocked", "design_failed": "blocked",
     "plan_failed": "blocked", "build_failed": "blocked", "evidence_failed": "blocked",
     "review_changes_requested": "blocked", "review_escalated": "blocked", "blocked": "blocked",
+    "checks_failed": "blocked", "e2e_failed": "blocked", "e2e_escalated": "blocked",
     "awaiting_spec": "blocked", "awaiting_design": "blocked", "awaiting_plan": "idle",
 }
 

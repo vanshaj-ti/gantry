@@ -15,17 +15,26 @@ GantryConfig and the runner/notifier adapters.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .backends.registry import get_execution_runner as get_runner
 from .checks import run_all_checks
-from .config import AGENT_STAGES, DOC_STAGES, REVIEW_STAGE, GantryConfig
+from .config import (
+    AGENT_STAGES,
+    DOC_STAGES,
+    REVIEW_STAGE,
+    GantryConfig,
+    stages_for_pipeline,
+)
 from .git import ensure_worktree
 from .invocation import InvocationRequest, invoke
+from .pipeline import definition_from_snapshot, snapshot_definition
 from .redact import proxy_secrets, redact_secrets
 from .state import RunStore
 from .status import Status
+from .triage import decide, reassess_after_plan
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +255,18 @@ class Engine:
         GantryConfig.stages_for) — in which case it also picks this run's
         pipeline (e.g. tag="bug" -> investigation/plan/build/evidence/review
         instead of the project's default stages)."""
-        stages = self.cfg.stages_for(tag)
+        # Keep the legacy stage resolver authoritative: existing queue
+        # mappings and project overrides must remain byte-for-byte compatible.
+        # Triage supplies additive policy/version metadata around that pinned
+        # stage list.
+        stages = stages_for_pipeline(
+            self.cfg.stages_for(tag), self.cfg.pipeline.version,
+        )
+        pipeline = replace(
+            decide(title, request, tag, None, self.cfg),
+            stages=tuple(stages),
+            version=self.cfg.pipeline.version,
+        )
         first = stages[0] if stages else "plan"
         rid = self.store.new_run_id(title, run_id)
         self.store.create(rid, title)
@@ -257,6 +277,13 @@ class Engine:
                 raise ValueError(f"depends_on references unknown run: {dep}")
         extra = {"tag": tag} if tag else {}
         extra["stages"] = stages
+        extra.update({
+            "pipeline_name": pipeline.name,
+            "pipeline_version": pipeline.version,
+            "definition_policy": pipeline.definition_policy,
+            "pipeline_mutations": [],
+            "pipeline_definition": snapshot_definition(pipeline),
+        })
         if deps:
             self.store.update_state(rid, status=Status.QUEUED, current_stage=first,
                                     title=title, depends_on=deps, **extra)
@@ -264,6 +291,46 @@ class Engine:
             self.store.update_state(rid, status=f"awaiting_{first}", current_stage=first,
                                     title=title, **extra)
         return rid
+
+    def reassess_risk_after_plan(self, run_id: str, *, risk: str, reason: str) -> dict[str, Any]:
+        """Persist an append-only pipeline escalation after plan scope is known.
+
+        The original pinned stage history is retained. ``pipeline_route_to`` is
+        an explicit orchestration signal when the new policy requires routing
+        backward through a definition gate.
+        """
+        state = self.store.state(run_id)
+        snapshot = state.get("pipeline_definition")
+        if snapshot:
+            current = definition_from_snapshot(snapshot)
+        else:
+            current = replace(
+                decide(state.get("title", ""), "", state.get("tag"), None, self.cfg),
+                stages=tuple(state.get("stages") or self.cfg.stages),
+                version=int(state.get("pipeline_version", 1)),
+            )
+        completed = tuple(state.get("completed_stages") or ("plan",))
+        evolved = reassess_after_plan(
+            current,
+            risk=risk,
+            reason=reason,
+            completed_stages=completed,
+        )
+        if evolved is current:
+            return state
+        mutations = [vars(item) for item in evolved.mutations]
+        route_to = evolved.mutations[-1].route_to
+        updated = self.store.update_state(
+            run_id,
+            pipeline_name=evolved.name,
+            pipeline_version=evolved.version,
+            definition_policy=evolved.definition_policy,
+            pipeline_definition=snapshot_definition(evolved),
+            pipeline_mutations=mutations,
+            pipeline_route_to=route_to,
+        )
+        self.store.write_result(run_id, "pipeline-mutations.json", mutations)
+        return updated
 
     def _prereqs_met(self, run_id: str) -> bool:
         """True if every run this run depends on has actually landed.
