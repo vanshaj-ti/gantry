@@ -411,6 +411,10 @@ class GitConfig:
                                             # matches that borrowed value exactly, so a project
                                             # that never sets this explicitly sees zero behavior
                                             # change.
+    # Worktree `git config user.*` for agent + ship commits. Override per
+    # project so PRs attribute to a human, not the default bot identity.
+    author_name: str = "Gantry Agent"
+    author_email: str = "gantry@anthropic.com"
 
 
 @dataclass
@@ -740,7 +744,9 @@ def load_config(target_workspace: Path) -> GantryConfig:
                             auto_ship=bool(g.get("auto_ship", False)),
                             auto_merge=bool(g.get("auto_merge", False)),
                             auto_approve_docs=bool(g.get("auto_approve_docs", False)),
-                            ship_retry_attempts=int(g.get("ship_retry_attempts", 2)))
+                            ship_retry_attempts=int(g.get("ship_retry_attempts", 2)),
+                            author_name=str(g.get("author_name", "Gantry Agent")),
+                            author_email=str(g.get("author_email", "gantry@anthropic.com")))
     if "notify" in raw:
         n = raw["notify"]
         cfg.notify = NotifyConfig(backend=n.get("backend", "none"), webhook_url=n.get("webhook_url", ""))

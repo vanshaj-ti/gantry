@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gantry.git import commit_all
+from gantry.git import commit_all, ensure_worktree
 
 
 def _init_scratch_repo(path: Path) -> None:
@@ -68,6 +68,56 @@ class TestCommitAll(unittest.TestCase):
                               capture_output=True, text=True, check=True)
         self.assertIn("deliverable.txt", proc.stdout)
         self.assertNotIn(".agent-runs", proc.stdout)
+
+
+class TestEnsureWorktreeAuthor(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        _init_scratch_repo(self.repo)
+        # Fake origin so ensure_worktree's fetch doesn't fail hard — use local path.
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(self.repo)],
+            cwd=str(self.repo), check=True,
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_configures_author_from_args(self):
+        wt = ensure_worktree(
+            self.repo,
+            "20260724T000000-test-author",
+            "main",
+            author_name="Vanshaj Bhatnagar",
+            author_email="vanshaj.bhatnagar@trilogy.com",
+        )
+        name = subprocess.run(
+            ["git", "config", "user.name"], cwd=str(wt),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        email = subprocess.run(
+            ["git", "config", "user.email"], cwd=str(wt),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(name, "Vanshaj Bhatnagar")
+        self.assertEqual(email, "vanshaj.bhatnagar@trilogy.com")
+
+    def test_updates_author_on_existing_worktree(self):
+        run_id = "20260724T000001-test-author-update"
+        ensure_worktree(self.repo, run_id, "main")
+        wt = ensure_worktree(
+            self.repo,
+            run_id,
+            "main",
+            author_name="Vanshaj Bhatnagar",
+            author_email="vanshaj.bhatnagar@trilogy.com",
+        )
+        name = subprocess.run(
+            ["git", "config", "user.name"], cwd=str(wt),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(name, "Vanshaj Bhatnagar")
 
 
 if __name__ == "__main__":

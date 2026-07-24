@@ -170,6 +170,11 @@ base_branch = "main"          # diff base for scope guard + review
 ship_retry_attempts = 2        # cap on auto-retry attempts for ship_failed
                                # (only relevant when auto_ship = true) before
                                # the run is left for a human to inspect.
+# author_name / author_email — worktree git identity for agent + ship commits.
+# Default is "Gantry Agent" <gantry@anthropic.com>; set these to attribute
+# PRs to a human identity instead.
+# author_name = "Your Name"
+# author_email = "you@company.com"
 
 [scope]
 # Gantry's built-in deterministic guard. Globs and path prefixes both work.

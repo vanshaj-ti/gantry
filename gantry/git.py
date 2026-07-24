@@ -128,12 +128,23 @@ def merge_base_into_worktree(target: Path, run_id: str, base_branch: str) -> dic
             "output": (proc.stdout + proc.stderr)[-1000:]}
 
 
-def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
+def ensure_worktree(
+    target: Path,
+    run_id: str,
+    base_branch: str,
+    *,
+    author_name: str = "Gantry Agent",
+    author_email: str = "gantry@anthropic.com",
+) -> Path:
     """Idempotent: create the run's worktree+branch if missing, else reuse it.
     Returns the worktree path. Raises RuntimeError with git's stderr on failure.
     """
     wt = worktree_path(target, run_id)
     if wt.exists():
+        # Keep author in sync with current [git] config (e.g. after a deploy
+        # that changes author_name without recreating the worktree).
+        _run(["git", "config", "user.email", author_email], wt, timeout=30)
+        _run(["git", "config", "user.name", author_name], wt, timeout=30)
         return wt
 
     wt.parent.mkdir(parents=True, exist_ok=True)
@@ -162,9 +173,9 @@ def ensure_worktree(target: Path, run_id: str, base_branch: str) -> Path:
     # restart that reset ambient config) hits ship.py's commit_all with no
     # identity at all: "Author identity unknown", ship_failed, no auto-retry
     # (real incident this fixes). Set it explicitly so ship never depends on
-    # incidental agent behavior.
-    _run(["git", "config", "user.email", "gantry@anthropic.com"], wt, timeout=30)
-    _run(["git", "config", "user.name", "Gantry Agent"], wt, timeout=30)
+    # incidental agent behavior. Projects override via [git].author_*.
+    _run(["git", "config", "user.email", author_email], wt, timeout=30)
+    _run(["git", "config", "user.name", author_name], wt, timeout=30)
 
     # Stage prompts reference `.agent-runs/<run_id>/...` relative to the agent's
     # cwd. State/artifacts live in the main repo (RunStore), so symlink the whole

@@ -63,7 +63,13 @@ class Engine:
         """The isolated worktree a run's agent stages/checks/review execute in.
         Created lazily on first use, reused afterward. .agent-runs/ state stays
         in self.target regardless — only the working copy of the repo moves."""
-        return ensure_worktree(self.target, run_id, self.cfg.git.base_branch)
+        return ensure_worktree(
+            self.target,
+            run_id,
+            self.cfg.git.base_branch,
+            author_name=self.cfg.git.author_name,
+            author_email=self.cfg.git.author_email,
+        )
 
 
     def _set_status(self, run_id: str, status: str, **extra: Any) -> None:
