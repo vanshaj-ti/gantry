@@ -88,13 +88,9 @@ def advance_run(engine: Engine, run_id: str) -> dict[str, Any]:
 
 
 def _sync_linear_status_if_configured(engine: Engine, run_id: str) -> None:
-    api_key = os.environ.get("GANTRY_LINEAR_API_KEY")
-    team_id = os.environ.get("GANTRY_LINEAR_TEAM_ID")
-    if not api_key or not team_id:
-        return
-    from .linear import sync_issue_status
+    from .linear import sync_issue_status_if_configured
     try:
-        sync_issue_status(run_id, engine.store, team_id, api_key)
+        sync_issue_status_if_configured(engine.store, run_id)
     except Exception:
         logger.warning("Linear status sync failed for run %s", run_id, exc_info=True)
 

@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import urllib.request
 from pathlib import Path
@@ -262,6 +263,12 @@ def status_to_category(status: str, state: dict | None = None) -> str | None:
     for prefix, category in _STATUS_TO_CATEGORY:
         if status == prefix or status.startswith(prefix):
             return category
+    # Agent/pipeline *_complete (plan/build/evidence/…) — not human doc gates.
+    # Doc-stage *_complete is already mapped to Blocked above. Without this,
+    # build_complete returns None and Linear stays stuck on a prior Blocked
+    # (seen live: evidence_running in state.json while Linear still Blocked + stage:build).
+    if status.endswith("_complete"):
+        return "in_progress"
     if status.startswith("awaiting_") or status.endswith("_running") or status == "review_approved":
         return "in_progress"
     if status in _AUTO_HEALING_STATUSES:
@@ -586,6 +593,20 @@ def _maybe_post_stage_progress(run_id: str, store: Any, issue_id: str,
         return
     post_comment(issue_id, message, api_key)
     store.update_state(run_id, linear_last_progress_status=status)
+
+
+def sync_issue_status_if_configured(store: Any, run_id: str) -> dict[str, Any] | None:
+    """No-op sync when Linear env is unset; otherwise sync_issue_status.
+
+    Safe to call mid-stage (right after ``*_running`` is stamped) so Linear
+    leaves Blocked / advances ``stage:`` labels while a long agent invoke
+    is still in flight — not only after ``advance_run`` returns.
+    """
+    api_key = os.environ.get("GANTRY_LINEAR_API_KEY")
+    team_id = os.environ.get("GANTRY_LINEAR_TEAM_ID")
+    if not api_key or not team_id:
+        return None
+    return sync_issue_status(run_id, store, team_id, api_key)
 
 
 def sync_issue_status(run_id: str, store: Any, team_id: str, api_key: str) -> dict[str, Any]:

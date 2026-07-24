@@ -693,6 +693,13 @@ class TestStatusToCategoryAutonomy(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertEqual(status_to_category(status), "in_progress")
 
+    def test_agent_complete_stays_in_progress(self):
+        from gantry.linear import status_to_category
+
+        for status in ("plan_complete", "build_complete", "evidence_complete"):
+            with self.subTest(status=status):
+                self.assertEqual(status_to_category(status), "in_progress")
+
     def test_human_gates_are_blocked(self):
         from gantry.linear import status_to_category
 

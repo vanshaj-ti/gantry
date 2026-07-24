@@ -328,6 +328,17 @@ def invoke(request: InvocationRequest) -> InvocationOutcome:
                 heartbeat_at=now_iso(),
                 resumed=request.resume,
             )
+            # Sync Linear as soon as *_running is stamped — don't wait for the
+            # (often long) agent invoke to finish, or the ticket stays on a
+            # prior Blocked / stale stage: label the whole time.
+            try:
+                from .linear import sync_issue_status_if_configured
+                sync_issue_status_if_configured(store, run_id)
+            except Exception:
+                logger.warning(
+                    "Linear status sync failed at start of %s for run %s",
+                    request.stage, run_id, exc_info=True,
+                )
         with _PERSIST_LOCK:
             save_session_record(
                 store,
