@@ -4,8 +4,9 @@
 # existing secret rather than failing.
 #
 # Required: GitHub PAT + Linear credentials.
-# Optional: Anthropic direct key, and/or gateway base_url+auth_token, and/or
-# OpenAI key — store only what your runners need.
+# Optional runner auth — store only what the *target project's* gantry.toml
+# needs ([agent].runner). Gantry itself is project-agnostic; secrets are
+# chosen per deployment, not baked to a specific app.
 set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:?set PROJECT_ID to your GCP project id}"
@@ -44,6 +45,8 @@ set_secret gantry-anthropic-auth-token \
   "ANTHROPIC_AUTH_TOKEN (optional gateway token; pair with base_url)" 1
 set_secret gantry-openai-api-key \
   "OPENAI_API_KEY (optional; for codex-cli)" 1
+set_secret gantry-cursor-api-key \
+  "CURSOR_API_KEY (optional; for cursor-sdk / Cursor API)" 1
 set_secret gantry-linear-api-key \
   "Linear personal API key or OAuth token"
 set_secret gantry-linear-team-id \

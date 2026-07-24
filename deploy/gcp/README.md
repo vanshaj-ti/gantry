@@ -30,11 +30,14 @@ debugging path, not the normal way to ship a change anymore.
 
 - A fine-grained GitHub PAT scoped to the **target** repo
   (contents: read/write, pull requests: read/write).
-- Runner auth for whatever `[agent].runner` the target uses:
+- Runner auth for whatever `[agent].runner` the **target project** sets in its
+  own `gantry.toml` (Gantry does not hardcode a project or runner):
+  - `cursor-sdk` (default for new scaffolds): `CURSOR_API_KEY`
   - Claude Code direct: `ANTHROPIC_API_KEY`, **or**
   - Claude Code via gateway: `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`
   - Codex: `OPENAI_API_KEY` (or whatever env key your `~/.codex/config.toml`
     model_provider uses — pass it through Secret Manager / env-file)
+  - `cursor-cli`: host login / CLI auth (not a Secret Manager key)
 - The target project's Linear team id (`GANTRY_LINEAR_TEAM_ID`) and a Linear
   personal API key or OAuth token with issue read/write + comment + label
   scopes (`GANTRY_LINEAR_API_KEY`).

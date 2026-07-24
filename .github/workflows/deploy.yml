@@ -58,7 +58,6 @@ jobs:
           export TARGET_REPO_URL=$(printf %q "$TARGET_REPO_URL")
           export GANTRY_REPO_URL=$(printf %q "$GANTRY_REPO_URL")
           export BASE_BRANCH=$(printf %q "$BASE_BRANCH")
-          export EDUPAID_REPO_URL="\$TARGET_REPO_URL"
           export GANTRY_DEPLOY_YES=1
           GANTRY_SRC_DIR=/opt/gantry-src
           echo "==> refreshing gantry-src from \$GANTRY_REPO_URL"

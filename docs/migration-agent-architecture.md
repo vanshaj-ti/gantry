@@ -22,13 +22,28 @@ invalidating existing `gantry.toml`, in-flight runs, or on-disk artifacts.
 
 Existing projects that already write `runner = "claude-code"` are unchanged.
 
-## Cursor SDK setup
+## Cursor SDK setup (any target project)
 
-1. Install Gantry (`pip install -e .` pulls `cursor-sdk>=1.0.24,<2`).
-2. Export `CURSOR_API_KEY` (user or service-account key).
-3. Run `gantry doctor` — inspect the additive `cursor_sdk` diagnosis block:
-   package availability, API key presence, and CLI fallback readiness.
-4. Optional live smoke (not CI):
+Runner choice lives in the **target** project's `gantry.toml`, not in Gantry
+source. To opt a project into the SDK:
+
+1. Install Gantry (`pip install -e .` / image rebuild pulls `cursor-sdk>=1.0.24,<2`).
+2. Provide `CURSOR_API_KEY` in the environment (local `.env`, Docker pass-through,
+   or GCP Secret Manager `gantry-cursor-api-key` for VM deploys).
+3. Set in that project's `gantry.toml`:
+
+```toml
+[agent]
+runner = "cursor-sdk"
+
+# Use Cursor model ids — not Claude/Codex gateway model names.
+[models.plan]
+model = "composer-2.5"
+```
+
+4. Run `gantry doctor` against the target — inspect the additive `cursor_sdk`
+   diagnosis block: package availability, API key presence, CLI fallback readiness.
+5. Optional live smoke (not ordinary CI):
 
 ```bash
 export GANTRY_CURSOR_SDK_LIVE=1
@@ -39,6 +54,9 @@ python -m unittest tests.test_cursor_sdk_smoke.TestCursorSdkLiveSmoke -v
 
 See [cursor-sdk-compatibility.md](./cursor-sdk-compatibility.md) for documented
 SDK assumptions and explicit non-assumptions.
+
+Existing projects that already set `runner = "claude-code"` (or another CLI)
+are unchanged until they opt in.
 
 ## Rollback to a legacy CLI backend
 

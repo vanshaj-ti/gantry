@@ -5,10 +5,6 @@
 # clone already exists.
 set -euo pipefail
 
-# Prefer TARGET_REPO_URL; accept legacy EDUPAID_REPO_URL as an alias.
-if [[ -z "${TARGET_REPO_URL:-}" && -n "${EDUPAID_REPO_URL:-}" ]]; then
-  TARGET_REPO_URL="$EDUPAID_REPO_URL"
-fi
 TARGET_REPO_URL="${TARGET_REPO_URL:?set TARGET_REPO_URL (git HTTPS URL of the project to build)}"
 GANTRY_REPO_URL="${GANTRY_REPO_URL:-https://github.com/<org>/gantry.git}"
 TARGET_NAME="${TARGET_NAME:-$(basename "${TARGET_REPO_URL}" .git)}"
@@ -64,6 +60,7 @@ append_secret ANTHROPIC_API_KEY gantry-anthropic-api-key 0
 append_secret ANTHROPIC_BASE_URL gantry-anthropic-base-url 0
 append_secret ANTHROPIC_AUTH_TOKEN gantry-anthropic-auth-token 0
 append_secret OPENAI_API_KEY gantry-openai-api-key 0
+append_secret CURSOR_API_KEY gantry-cursor-api-key 0
 append_secret GANTRY_LINEAR_API_KEY gantry-linear-api-key 1
 append_secret GANTRY_LINEAR_TEAM_ID gantry-linear-team-id 1
 append_secret GANTRY_LINEAR_WEBHOOK_SECRET gantry-linear-webhook-secret 1

@@ -245,12 +245,12 @@ def _has_usage(usage: dict[str, Any]) -> bool:
 
 def invoke(request: InvocationRequest) -> InvocationOutcome:
     """Resolve policy and execute one complete invocation lifecycle."""
+    from .sessions import policy_for
+
     profile = _resolve_profile(request)
     prompt = request.prompt_factory(profile) if request.prompt_factory else request.prompt
     if request.prepend_profile_preamble and profile.prompt_preamble:
         prompt = f"{profile.prompt_preamble}\n\n{prompt}"
-    backend = _resolve_backend(request, profile)
-    backend_name = _backend_name(backend, profile)
     session_key = request.session_key or request.stage
     log_prefix = request.log_prefix or request.stage.replace("_", "-")
     result_name = request.result_name or f"{log_prefix}-result.json"
@@ -262,6 +262,18 @@ def invoke(request: InvocationRequest) -> InvocationOutcome:
         raise ValueError("store and run_id must be provided together")
     if store is not None and not store.exists(run_id):
         raise ValueError(f"Run not found: {run_id}")
+
+    # Fail closed on missing isolated resume sessions *before* resolving a
+    # backend. Resume policy must not depend on which runner/API keys the
+    # host has (CI, doctor, and multi-project deploys stay project-agnostic).
+    if request.resume and store is not None and not request.resume_existing:
+        pol = policy_for(session_key)
+        prior = (store.get_session(run_id, session_key) or {}).get("session_id")
+        if not prior and pol.allow_native_resume and pol.lineage == "isolated":
+            raise ValueError(f"No stored session for {run_id}/{session_key}; cannot resume")
+
+    backend = _resolve_backend(request, profile)
+    backend_name = _backend_name(backend, profile)
 
     if store is not None:
         store.write_log(
